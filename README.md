@@ -1,6 +1,6 @@
 # Concierge
 
-Concierge is a Home Assistant custom integration that provides the interaction and orchestration layer for the Homes Platform.
+Concierge is a Home Assistant custom integration that is the interaction and messaging layer of the Homes That Behave Well platform.
 
 It is designed to follow Homes That Behave Well principles:
 
@@ -11,11 +11,13 @@ It is designed to follow Homes That Behave Well principles:
 
 ## Scope
 
-Concierge is responsible for:
+It provides:
+- context-aware responses
+- asset-aware queries
+- guided decision-making
+- calm, deterministic messaging
 
-- user-facing orchestration
-- interaction workflows
-- capability routing to other integrations
+Concierge translates system intelligence into user understanding.
 
 Concierge does not own:
 
