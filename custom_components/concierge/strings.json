@@ -1,0 +1,31 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Set up Concierge",
+        "description": "Configure Concierge orchestration settings",
+        "data": {
+          "name": "Name",
+          "enable_notifications": "Enable notifications",
+          "update_interval_seconds": "Update interval (seconds)",
+          "night_mode_enabled": "Enable night mode"
+        }
+      }
+    },
+    "abort": {
+      "already_configured": "Concierge is already configured"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Concierge options",
+        "data": {
+          "enable_notifications": "Enable notifications",
+          "update_interval_seconds": "Update interval (seconds)",
+          "night_mode_enabled": "Enable night mode"
+        }
+      }
+    }
+  }
+}

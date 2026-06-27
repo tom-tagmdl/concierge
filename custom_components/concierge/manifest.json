@@ -1,0 +1,17 @@
+{
+  "domain": "concierge",
+  "name": "Concierge",
+  "codeowners": [
+    "@tom-tagmdl"
+  ],
+  "config_flow": true,
+  "documentation": "https://github.com/tom-tagmdl/homes_that_behave_well",
+  "integration_type": "service",
+  "iot_class": "local_push",
+  "issue_tracker": "https://github.com/tom-tagmdl/concierge/issues",
+  "loggers": [
+    "custom_components.concierge"
+  ],
+  "requirements": [],
+  "version": "0.1.0"
+}

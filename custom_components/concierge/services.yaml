@@ -1,0 +1,28 @@
+request_action:
+  name: Request Action
+  description: Submit a Concierge orchestration request through a validated service boundary.
+  fields:
+    intent:
+      name: Intent
+      description: The requested user intent.
+      required: true
+      selector:
+        text:
+    room:
+      name: Room
+      description: Optional room or area context.
+      required: false
+      selector:
+        text:
+    target_asset:
+      name: Target Asset
+      description: Optional target asset identifier.
+      required: false
+      selector:
+        text:
+    context:
+      name: Context
+      description: Optional structured context payload.
+      required: false
+      selector:
+        object:
