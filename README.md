@@ -1,3 +1,9 @@
+
+![Concierge Banner](custom_components/concierge/brand/Concierge-Banner.png)
+
+## How It Works
+![Concierge Flow](custom_components/concierge/brand/Concierge-Flow.png)
+
 # 🏠 Concierge
 
 **Concierge is the Homes Platform interaction and orchestration integration for Home Assistant, delivering room-aware, deterministic, and explainable smart home experiences.**
