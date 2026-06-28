@@ -1,8 +1,8 @@
 # 🏠 Concierge
 
-**Concierge is a Home Assistant integration that turns your home into a calm, context-aware, and explainable system.**
+**Concierge is the Homes Platform interaction and orchestration integration for Home Assistant, delivering room-aware, deterministic, and explainable smart home experiences.**
 
-It connects your devices, rooms, and data into a single interaction layer—so your home doesn’t just react… it understands.
+It connects devices, rooms, signals, and global context into a unified interaction layer so the home can respond clearly, consistently, and without guesswork.
 
 ***
 
