@@ -1,9 +1,3 @@
-Got it — the issue is the **code block wrapper itself** (the \`\`\` markdown fencing). That’s what’s breaking your copy/paste.
-
-Here is the **README with NO code fences, NO wrapping, fully continuous plain Markdown** so you can copy it clean into GitHub.
-
-***
-
 # 🏠 Concierge
 
 **Concierge is a Home Assistant integration that turns your home into a calm, context-aware, and explainable system.**
