@@ -296,11 +296,3 @@ Explore the full architecture:
 **Concierge is part of the Homes That Behave Well platform.**
 
 ***
-
-✅ This version will paste cleanly into GitHub with:
-
-* no truncation
-* no "show more lines" issue
-* no markdown renderer conflicts
-
-***
