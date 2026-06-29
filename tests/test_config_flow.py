@@ -16,8 +16,14 @@ async def test_user_flow(hass) -> None:
         result["flow_id"],
         {
             "name": "Concierge",
-            "enable_notifications": True,
-            "update_interval_seconds": 60,
+            "ai_enabled": False,
+            "ai_local_first": True,
+            "action_provider": "none",
+            "action_model": "",
+            "action_endpoint": "",
+            "tts_enabled": False,
+            "tts_provider": "none",
+            "tts_voice": "",
             "night_mode_enabled": False,
         },
     )
@@ -31,8 +37,14 @@ async def test_single_instance_abort(hass) -> None:
         result["flow_id"],
         {
             "name": "Concierge",
-            "enable_notifications": True,
-            "update_interval_seconds": 60,
+            "ai_enabled": False,
+            "ai_local_first": True,
+            "action_provider": "none",
+            "action_model": "",
+            "action_endpoint": "",
+            "tts_enabled": False,
+            "tts_provider": "none",
+            "tts_voice": "",
             "night_mode_enabled": False,
         },
     )

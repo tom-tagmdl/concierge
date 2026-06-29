@@ -8,10 +8,8 @@ from homeassistant.core import HomeAssistant
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.concierge.const import (
-    CONF_ENABLE_NOTIFICATIONS,
     CONF_NIGHT_MODE_ENABLED,
     CONF_UPDATE_INTERVAL_SECONDS,
-    DEFAULT_ENABLE_NOTIFICATIONS,
     DEFAULT_NIGHT_MODE_ENABLED,
     DEFAULT_UPDATE_INTERVAL_SECONDS,
     DOMAIN,
@@ -25,7 +23,6 @@ def mock_config_entry() -> MockConfigEntry:
         domain=DOMAIN,
         title="Concierge",
         data={
-            CONF_ENABLE_NOTIFICATIONS: DEFAULT_ENABLE_NOTIFICATIONS,
             CONF_UPDATE_INTERVAL_SECONDS: DEFAULT_UPDATE_INTERVAL_SECONDS,
             CONF_NIGHT_MODE_ENABLED: DEFAULT_NIGHT_MODE_ENABLED,
         },

@@ -1,28 +1,435 @@
-request_action:
-  name: Request Action
-  description: Submit a Concierge orchestration request through a validated service boundary.
+execute:
+  name: Execute
+  description: Resolve and execute a configured target using Concierge orchestration rules.
   fields:
-    intent:
-      name: Intent
-      description: The requested user intent.
+    target:
+      name: Target
       required: true
       selector:
         text:
-    room:
-      name: Room
-      description: Optional room or area context.
+    area_id:
+      name: Area ID
       required: false
       selector:
         text:
-    target_asset:
-      name: Target Asset
-      description: Optional target asset identifier.
+    composite_id:
+      name: Composite ID
       required: false
       selector:
         text:
     context:
       name: Context
-      description: Optional structured context payload.
       required: false
       selector:
         object:
+
+execute_direct:
+  name: Execute Direct
+  description: Execute a resolved direct target without orchestration.
+  fields:
+    entity_id:
+      name: Entity ID
+      required: true
+      selector:
+        text:
+    service:
+      name: Service
+      required: true
+      selector:
+        text:
+    data:
+      name: Service Data
+      required: false
+      selector:
+        object:
+
+get_interactions:
+  name: Get Interactions
+  description: Return active interactions for a room or composite scope.
+  fields:
+    area_id:
+      name: Area ID
+      required: false
+      selector:
+        text:
+    composite_id:
+      name: Composite ID
+      required: false
+      selector:
+        text:
+
+update_interaction:
+  name: Update Interaction
+  description: Upsert runtime interaction state.
+  fields:
+    interaction_id:
+      name: Interaction ID
+      required: true
+      selector:
+        text:
+    area_id:
+      name: Area ID
+      required: false
+      selector:
+        text:
+    message:
+      name: Message
+      required: true
+      selector:
+        text:
+    level:
+      name: Level
+      required: false
+      selector:
+        text:
+    state:
+      name: State
+      required: false
+      selector:
+        text:
+    priority:
+      name: Priority
+      required: false
+      selector:
+        number:
+          min: 0
+          max: 100
+
+clear_interaction:
+  name: Clear Interaction
+  description: Remove a runtime interaction by ID.
+  fields:
+    interaction_id:
+      name: Interaction ID
+      required: true
+      selector:
+        text:
+
+get_signal:
+  name: Get Signal
+  description: Return one signal snapshot.
+  fields:
+    signal_type:
+      name: Signal Type
+      required: true
+      selector:
+        text:
+
+get_signals:
+  name: Get Signals
+  description: Return all known signal snapshots.
+  fields:
+    area_id:
+      name: Area ID
+      required: false
+      selector:
+        text:
+    composite_id:
+      name: Composite ID
+      required: false
+      selector:
+        text:
+
+update_room_config:
+  name: Update Room Config
+  description: Update room aliases and global overlay preferences.
+  fields:
+    area_id:
+      name: Area ID
+      required: true
+      selector:
+        text:
+    aliases:
+      name: Aliases
+      required: false
+      selector:
+        object:
+    global_overlays:
+      name: Global Overlays
+      required: false
+      selector:
+        object:
+    posture:
+      name: Room Posture
+      required: false
+      selector:
+        text:
+    media_player_entity_ids:
+      name: Media Player Entity IDs
+      required: false
+      selector:
+        entity:
+          domain: media_player
+          multiple: true
+    voice_device_entity_ids:
+      name: Voice Device Entity IDs
+      required: false
+      selector:
+        entity:
+          domain: assist_satellite
+          multiple: true
+    asset_entity_ids:
+      name: Asset Entity IDs
+      required: false
+      selector:
+        entity:
+          multiple: true
+    room_sensor_entity_ids:
+      name: Room Sensor Entity IDs
+      required: false
+      selector:
+        entity:
+          multiple: true
+    room_health_entity_ids:
+      name: Room Health Entity IDs
+      required: false
+      selector:
+        entity:
+          multiple: true
+    human_health_entity_ids:
+      name: Human Health Entity IDs
+      required: false
+      selector:
+        entity:
+          multiple: true
+    light_entity_ids:
+      name: Light and Lamp Entity IDs
+      required: false
+      selector:
+        entity:
+          domain: light
+          multiple: true
+    shade_entity_ids:
+      name: Shade Entity IDs
+      required: false
+      selector:
+        entity:
+          domain: cover
+          multiple: true
+    speaker_entity_ids:
+      name: Speaker Entity IDs
+      required: false
+      selector:
+        entity:
+          domain: media_player
+          multiple: true
+    dashboard_entity_ids:
+      name: Dashboard Entity IDs
+      required: false
+      selector:
+        entity:
+          multiple: true
+    other_entity_ids:
+      name: Other Room Entity IDs
+      required: false
+      selector:
+        entity:
+          multiple: true
+    persona:
+      name: Persona
+      required: false
+      selector:
+        text:
+    persona_prompt:
+      name: Persona Paragraph
+      required: false
+      selector:
+        text:
+    tts_voice:
+      name: TTS Voice
+      required: false
+      selector:
+        text:
+
+update_identity_profile:
+  name: Update Identity Profile
+  description: Update Concierge per-user presentation preferences.
+  fields:
+    profile_id:
+      name: Profile ID
+      required: true
+      selector:
+        text:
+    name:
+      name: Name
+      required: true
+      selector:
+        text:
+    persona:
+      name: Persona
+      required: false
+      selector:
+        text:
+    tts_voice:
+      name: TTS Voice
+      required: false
+      selector:
+        text:
+    verbosity:
+      name: Verbosity
+      required: false
+      selector:
+        text:
+    allow_ai:
+      name: Allow AI
+      required: false
+      selector:
+        boolean:
+    content_type:
+      name: Content Type
+      required: false
+      selector:
+        text:
+    detail_level:
+      name: Detail Level
+      required: false
+      selector:
+        text:
+    set_as_default:
+      name: Set As Default
+      required: false
+      selector:
+        boolean:
+
+update_global_context:
+  name: Update Global Context
+  description: Update context usage preferences and optional summary payloads.
+  fields:
+    context_type:
+      name: Context Type
+      required: true
+      selector:
+        text:
+    enabled:
+      name: Enabled
+      required: true
+      selector:
+        boolean:
+    options:
+      name: Options
+      required: false
+      selector:
+        object:
+    summary:
+      name: Summary
+      required: false
+      selector:
+        text:
+    detail:
+      name: Detail
+      required: false
+      selector:
+        text:
+    speakable:
+      name: Speakable
+      required: false
+      selector:
+        text:
+
+update_execution_preferences:
+  name: Update Execution Preferences
+  description: Update execution preference configuration for a scope.
+  fields:
+    scope_id:
+      name: Scope ID
+      required: true
+      selector:
+        text:
+    preferences:
+      name: Preferences
+      required: true
+      selector:
+        object:
+
+get_context:
+  name: Get Context
+  description: Return one global context payload.
+  fields:
+    context_type:
+      name: Context Type
+      required: true
+      selector:
+        text:
+
+get_summary:
+  name: Get Summary
+  description: Return a combined summary from available contexts and signals.
+  fields:
+    area_id:
+      name: Area ID
+      required: false
+      selector:
+        text:
+    include_signals:
+      name: Include Signals
+      required: false
+      selector:
+        boolean:
+    include_context:
+      name: Include Context
+      required: false
+      selector:
+        boolean:
+
+preview_tts_voice:
+  name: Preview TTS Voice
+  description: Speak a sample Concierge greeting through a selected media player using the chosen TTS provider and voice.
+  fields:
+    provider:
+      name: Provider
+      required: true
+      selector:
+        text:
+    media_player_entity_id:
+      name: Media Player Entity IDs
+      required: true
+      selector:
+        entity:
+          filter:
+            domain: media_player
+          multiple: true
+    voice:
+      name: Voice
+      required: false
+      selector:
+        text:
+    message:
+      name: Sample Message
+      required: false
+      selector:
+        text:
+
+sync_rooms:
+  name: Sync Rooms
+  description: Synchronize Concierge room configuration with current Home Assistant areas.
+  fields:
+    add_missing:
+      name: Add Missing Rooms
+      required: false
+      selector:
+        boolean:
+    remove_missing:
+      name: Remove Missing Rooms
+      required: false
+      selector:
+        boolean:
+
+refresh_entity_structure:
+  name: Refresh Entity Structure
+  description: Optionally sync rooms and reload Concierge to rebuild room entities.
+  fields:
+    sync_rooms:
+      name: Sync Rooms First
+      required: false
+      selector:
+        boolean:
+    add_missing:
+      name: Add Missing Rooms
+      required: false
+      selector:
+        boolean:
+    remove_missing:
+      name: Remove Missing Rooms
+      required: false
+      selector:
+        boolean:

@@ -3,12 +3,16 @@
     "step": {
       "user": {
         "title": "Set up Concierge",
-        "description": "Configure Concierge orchestration settings",
+        "description": "Configure Concierge global orchestration settings",
         "data": {
           "name": "Name",
-          "enable_notifications": "Enable notifications",
-          "update_interval_seconds": "Update interval (seconds)",
-          "night_mode_enabled": "Enable night mode"
+          "ai_enabled": "Enable AI assistance",
+          "ai_local_first": "Prefer local-first AI",
+          "action_provider": "Action provider",
+          "tts_enabled": "Enable text-to-speech",
+          "tts_provider": "TTS provider",
+          "media_provider": "Media provider",
+          "asset_intelligence_provider": "Asset Intelligence connection"
         }
       }
     },
@@ -21,9 +25,14 @@
       "init": {
         "title": "Concierge options",
         "data": {
-          "enable_notifications": "Enable notifications",
-          "update_interval_seconds": "Update interval (seconds)",
-          "night_mode_enabled": "Enable night mode"
+          "name": "Name",
+          "ai_enabled": "Enable AI assistance",
+          "ai_local_first": "Prefer local-first AI",
+          "action_provider": "Action provider",
+          "tts_enabled": "Enable text-to-speech",
+          "tts_provider": "TTS provider",
+          "media_provider": "Media provider",
+          "asset_intelligence_provider": "Asset Intelligence connection"
         }
       }
     }

@@ -43,10 +43,15 @@ class ConciergeStatusSensor(CoordinatorEntity[ConciergeCoordinator], SensorEntit
     @property
     def extra_state_attributes(self) -> dict:
         """Return additional state attributes."""
+        foundation_summary = self.coordinator.data.get("foundation_summary", {})
         return {
-            "enable_notifications": self.coordinator.data.get("enable_notifications"),
             "night_mode_enabled": self.coordinator.data.get("night_mode_enabled"),
             "entry_title": self.coordinator.data.get("entry_title"),
+            "room_count": foundation_summary.get("room_count", 0),
+            "interaction_count": foundation_summary.get("interaction_count", 0),
+            "signal_count": foundation_summary.get("signal_count", 0),
+            "context_source_count": foundation_summary.get("context_source_count", 0),
+            "capability_domains": self.coordinator.data.get("capability_domains", []),
         }
 
     @property

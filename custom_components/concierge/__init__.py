@@ -8,13 +8,15 @@ from homeassistant.core import HomeAssistant
 
 from .const import DOMAIN
 from .coordinator import ConciergeCoordinator
+from .panel import async_setup_panel
 from .services import async_register_services, async_unregister_services
 
-PLATFORMS: list[Platform] = [Platform.SENSOR]
+PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.SELECT]
 
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     """Set up Concierge from YAML (not used)."""
+    await async_setup_panel(hass)
     return True
 
 
