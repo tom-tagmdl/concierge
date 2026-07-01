@@ -2,9 +2,6 @@
   "name": "Concierge",
   "content_in_root": false,
   "country": "US",
-  "domains": [
-    "concierge"
-  ],
   "homeassistant": "2024.12.0",
   "render_readme": true
 }
