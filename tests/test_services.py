@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import pytest
+
+from homeassistant.helpers import area_registry as ar
+from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers import floor_registry as fr
 from homeassistant.core import HomeAssistant
 
 from custom_components.concierge.const import DOMAIN
@@ -172,6 +177,76 @@ async def test_identity_profile_service_persists_default_profile(
     assert state.default_identity_profile.profile_id == "tom"
 
 
+async def test_person_profile_service_persists_bindings(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """Person profile service should persist consent and device binding state."""
+    from custom_components.concierge.storage import ConciergeStorage
+
+    result = await hass.services.async_call(
+        DOMAIN,
+        "update_person_profile",
+        {
+            "person_id": "tom",
+            "name": "Tom",
+            "linked_area_id": "living_room",
+            "ble_device_ids": ["ble.tom_tag"],
+            "aqara_presence_entity_ids": ["binary_sensor.tom_presence"],
+            "voice_profile_id": "tom_voice",
+            "consent": {"person_identity": True},
+            "notes": "Primary person profile",
+            "set_as_default": True,
+        },
+        blocking=True,
+        return_response=True,
+    )
+
+    state = await ConciergeStorage(hass).async_load_state()
+    profile = state.person_profiles["tom"]
+    assert result["person_profile_count"] == 1
+    assert profile.linked_area_id == "living_room"
+    assert profile.ble_device_ids == ["ble.tom_tag"]
+    assert profile.voice_profile_id == "tom_voice"
+    assert state.default_person_profile is not None
+    assert state.default_person_profile.person_id == "tom"
+
+
+async def test_voice_profile_service_persists_enrollment(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """Voice profile service should persist voice enrollment state."""
+    from custom_components.concierge.storage import ConciergeStorage
+
+    result = await hass.services.async_call(
+        DOMAIN,
+        "update_voice_profile",
+        {
+            "voice_profile_id": "tom_voice",
+            "name": "Tom Voice",
+            "tts_voice": "alloy",
+            "enrollment_state": "trained",
+            "enrollment_source": "local",
+            "speaker_embedding_id": "embedding-1",
+            "sample_count": 4,
+            "consent": {"voice_training": True},
+            "set_as_default": True,
+        },
+        blocking=True,
+        return_response=True,
+    )
+
+    state = await ConciergeStorage(hass).async_load_state()
+    profile = state.voice_profiles["tom_voice"]
+    assert result["voice_profile_count"] == 1
+    assert profile.tts_voice == "alloy"
+    assert profile.enrollment_state == "trained"
+    assert profile.sample_count == 4
+    assert state.default_voice_profile is not None
+    assert state.default_voice_profile.voice_profile_id == "tom_voice"
+
+
 async def test_sync_rooms_service_reports_success(
     hass: HomeAssistant,
     setup_integration,
@@ -190,3 +265,263 @@ async def test_sync_rooms_service_reports_success(
 
     assert result["synced"] is True
     assert "room_count" in result
+
+
+async def test_update_composite_config_same_floor_rename_and_dismantle(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """Composite service should support same-floor merge, rename, and dismantle."""
+    from custom_components.concierge.storage import ConciergeStorage
+
+    floor_registry = fr.async_get(hass)
+    main_floor = floor_registry.async_create(name="Main")
+
+    area_registry = ar.async_get(hass)
+    kitchen = area_registry.async_create(name="Kitchen", floor_id=main_floor.floor_id)
+    dining = area_registry.async_create(name="Dining", floor_id=main_floor.floor_id)
+    living = area_registry.async_create(name="Living", floor_id=main_floor.floor_id)
+
+    created = await hass.services.async_call(
+        DOMAIN,
+        "update_composite_config",
+        {
+            "composite_id": "upstairs_public_space",
+            "name": "Upstairs Public Space",
+            "area_ids": [kitchen.id, dining.id, living.id],
+            "primary_area": kitchen.id,
+        },
+        blocking=True,
+        return_response=True,
+    )
+    assert created["dismantled"] is False
+    assert created["area_count"] == 3
+
+    renamed = await hass.services.async_call(
+        DOMAIN,
+        "update_composite_config",
+        {
+            "composite_id": "upstairs_public_space",
+            "name": "Main Public Space",
+            "area_ids": [kitchen.id, living.id],
+            "primary_area": living.id,
+        },
+        blocking=True,
+        return_response=True,
+    )
+    assert renamed["dismantled"] is False
+    assert renamed["area_count"] == 2
+
+    state = await ConciergeStorage(hass).async_load_state()
+    composite = state.composites["upstairs_public_space"]
+    assert composite.name == "Main Public Space"
+    assert composite.area_ids == [kitchen.id, living.id]
+    assert composite.primary_area == living.id
+
+    dismantled = await hass.services.async_call(
+        DOMAIN,
+        "update_composite_config",
+        {
+            "composite_id": "upstairs_public_space",
+            "area_ids": [],
+        },
+        blocking=True,
+        return_response=True,
+    )
+    assert dismantled["dismantled"] is True
+
+    post = await ConciergeStorage(hass).async_load_state()
+    assert "upstairs_public_space" not in post.composites
+
+
+async def test_update_composite_config_rejects_cross_floor_membership(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """Composite service must reject area lists that span multiple floors."""
+    floor_registry = fr.async_get(hass)
+    first_floor = floor_registry.async_create(name="First")
+    second_floor = floor_registry.async_create(name="Second")
+
+    area_registry = ar.async_get(hass)
+    kitchen = area_registry.async_create(name="Kitchen", floor_id=first_floor.floor_id)
+    bedroom = area_registry.async_create(name="Bedroom", floor_id=second_floor.floor_id)
+
+    with pytest.raises(Exception, match="same floor"):
+        await hass.services.async_call(
+            DOMAIN,
+            "update_composite_config",
+            {
+                "composite_id": "invalid_composite",
+                "name": "Invalid Composite",
+                "area_ids": [kitchen.id, bedroom.id],
+            },
+            blocking=True,
+        )
+
+
+async def test_sync_composites_removes_invalid_members(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """Sync composites should remove missing area members and dismantle empty composites."""
+    from custom_components.concierge.storage import ConciergeStorage
+
+    floor_registry = fr.async_get(hass)
+    main_floor = floor_registry.async_create(name="Main")
+    area_registry = ar.async_get(hass)
+    kitchen = area_registry.async_create(name="Kitchen", floor_id=main_floor.floor_id)
+
+    storage = ConciergeStorage(hass)
+    await storage.async_update_composite_config(
+        composite_id="test_composite",
+        name="Test Composite",
+        area_ids=[kitchen.id, "missing_area"],
+        primary_area=kitchen.id,
+    )
+
+    result = await hass.services.async_call(
+        DOMAIN,
+        "sync_composites",
+        {"remove_invalid": True},
+        blocking=True,
+        return_response=True,
+    )
+    assert result["synced"] is True
+    assert result["validation_errors"]
+
+    state = await storage.async_load_state()
+    assert "test_composite" in state.composites
+    assert state.composites["test_composite"].area_ids == [kitchen.id]
+
+    # If the only valid area disappears, sync should dismantle the composite.
+    area_registry.async_delete(kitchen.id)
+    await hass.async_block_till_done()
+
+    await hass.services.async_call(
+        DOMAIN,
+        "sync_composites",
+        {"remove_invalid": True},
+        blocking=True,
+        return_response=True,
+    )
+    state_after = await storage.async_load_state()
+    assert "test_composite" not in state_after.composites
+
+
+async def test_update_composite_config_persists_and_prunes_selected_entities(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """Composite selections should persist and prune entities from removed member rooms."""
+    from custom_components.concierge.storage import ConciergeStorage
+
+    floor_registry = fr.async_get(hass)
+    main_floor = floor_registry.async_create(name="Main")
+
+    area_registry = ar.async_get(hass)
+    kitchen = area_registry.async_create(name="Kitchen", floor_id=main_floor.floor_id)
+    dining = area_registry.async_create(name="Dining", floor_id=main_floor.floor_id)
+
+    entity_registry = er.async_get(hass)
+    kitchen_light = entity_registry.async_get_or_create(
+        "light",
+        DOMAIN,
+        "kitchen_light",
+        area_id=kitchen.id,
+    )
+    dining_light = entity_registry.async_get_or_create(
+        "light",
+        DOMAIN,
+        "dining_light",
+        area_id=dining.id,
+    )
+
+    await hass.services.async_call(
+        DOMAIN,
+        "update_composite_config",
+        {
+            "composite_id": "public_space",
+            "name": "Public Space",
+            "area_ids": [kitchen.id, dining.id],
+            "light_entity_ids": [kitchen_light.entity_id, dining_light.entity_id],
+        },
+        blocking=True,
+    )
+
+    storage = ConciergeStorage(hass)
+    state = await storage.async_load_state()
+    assert state.composites["public_space"].light_entity_ids == [
+        kitchen_light.entity_id,
+        dining_light.entity_id,
+    ]
+
+    await hass.services.async_call(
+        DOMAIN,
+        "update_composite_config",
+        {
+            "composite_id": "public_space",
+            "area_ids": [kitchen.id],
+        },
+        blocking=True,
+    )
+
+    updated = await storage.async_load_state()
+    assert updated.composites["public_space"].light_entity_ids == [kitchen_light.entity_id]
+
+
+async def test_sync_composites_prunes_stale_selected_entities(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """Sync composites should remove selected entities no longer scoped to member areas."""
+    from custom_components.concierge.storage import ConciergeStorage
+
+    floor_registry = fr.async_get(hass)
+    main_floor = floor_registry.async_create(name="Main")
+
+    area_registry = ar.async_get(hass)
+    kitchen = area_registry.async_create(name="Kitchen", floor_id=main_floor.floor_id)
+    den = area_registry.async_create(name="Den", floor_id=main_floor.floor_id)
+
+    entity_registry = er.async_get(hass)
+    kitchen_light = entity_registry.async_get_or_create(
+        "light",
+        DOMAIN,
+        "sync_kitchen_light",
+        area_id=kitchen.id,
+    )
+    den_light = entity_registry.async_get_or_create(
+        "light",
+        DOMAIN,
+        "sync_den_light",
+        area_id=den.id,
+    )
+
+    await hass.services.async_call(
+        DOMAIN,
+        "update_composite_config",
+        {
+            "composite_id": "sync_test",
+            "name": "Sync Test",
+            "area_ids": [kitchen.id, den.id],
+            "light_entity_ids": [kitchen_light.entity_id, den_light.entity_id],
+        },
+        blocking=True,
+    )
+
+    area_registry.async_delete(den.id)
+    await hass.async_block_till_done()
+
+    await hass.services.async_call(
+        DOMAIN,
+        "sync_composites",
+        {"remove_invalid": True},
+        blocking=True,
+        return_response=True,
+    )
+
+    state = await ConciergeStorage(hass).async_load_state()
+    composite = state.composites["sync_test"]
+    assert composite.area_ids == [kitchen.id]
+    assert composite.light_entity_ids == [kitchen_light.entity_id]

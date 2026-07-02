@@ -7,6 +7,9 @@ from typing import Any
 import voluptuous as vol
 
 from homeassistant.helpers import area_registry as ar
+from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers import floor_registry as fr
 from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
 
 from .const import (
@@ -23,13 +26,17 @@ from .const import (
     SERVICE_PREVIEW_TTS_VOICE,
     SERVICE_REFRESH_ENTITY_STRUCTURE,
     SERVICE_SYNC_ROOMS,
+    SERVICE_SYNC_COMPOSITES,
+    SERVICE_UPDATE_COMPOSITE_CONFIG,
     SERVICE_UPDATE_IDENTITY_PROFILE,
     SERVICE_UPDATE_EXECUTION_PREFERENCES,
     SERVICE_UPDATE_GLOBAL_CONTEXT,
+    SERVICE_UPDATE_PERSON_PROFILE,
     SERVICE_UPDATE_INTERACTION,
     SERVICE_UPDATE_ROOM_CONFIG,
+    SERVICE_UPDATE_VOICE_PROFILE,
 )
-from .models import ContextState, IdentityProfile, Interaction, SignalState
+from .models import ContextState, IdentityProfile, Interaction, PersonProfile, SignalState, VoiceProfile
 from .storage import ConciergeStorage
 
 SERVICE_EXECUTE_SCHEMA = vol.Schema(
@@ -113,6 +120,31 @@ SERVICE_UPDATE_EXEC_PREFS_SCHEMA = vol.Schema(
         vol.Required("preferences"): dict,
     }
 )
+SERVICE_UPDATE_COMPOSITE_CONFIG_SCHEMA = vol.Schema(
+    {
+        vol.Required("composite_id"): str,
+        vol.Optional("name"): str,
+        vol.Optional("area_ids"): vol.All(list, [str]),
+        vol.Optional("primary_area"): str,
+        vol.Optional("enabled"): bool,
+        vol.Optional("media_player_entity_ids"): vol.All(list, [str]),
+        vol.Optional("voice_device_entity_ids"): vol.All(list, [str]),
+        vol.Optional("asset_entity_ids"): vol.All(list, [str]),
+        vol.Optional("room_sensor_entity_ids"): vol.All(list, [str]),
+        vol.Optional("room_health_entity_ids"): vol.All(list, [str]),
+        vol.Optional("human_health_entity_ids"): vol.All(list, [str]),
+        vol.Optional("light_entity_ids"): vol.All(list, [str]),
+        vol.Optional("shade_entity_ids"): vol.All(list, [str]),
+        vol.Optional("speaker_entity_ids"): vol.All(list, [str]),
+        vol.Optional("dashboard_entity_ids"): vol.All(list, [str]),
+        vol.Optional("other_entity_ids"): vol.All(list, [str]),
+    }
+)
+SERVICE_SYNC_COMPOSITES_SCHEMA = vol.Schema(
+    {
+        vol.Optional("remove_invalid", default=True): bool,
+    }
+)
 SERVICE_GET_CONTEXT_SCHEMA = vol.Schema({vol.Required("context_type"): str})
 SERVICE_GET_SUMMARY_SCHEMA = vol.Schema(
     {
@@ -142,6 +174,32 @@ SERVICE_UPDATE_IDENTITY_PROFILE_SCHEMA = vol.Schema(
         vol.Optional("allow_ai", default=True): bool,
         vol.Optional("content_type", default="general"): str,
         vol.Optional("detail_level", default="medium"): str,
+        vol.Optional("set_as_default", default=False): bool,
+    }
+)
+SERVICE_UPDATE_PERSON_PROFILE_SCHEMA = vol.Schema(
+    {
+        vol.Required("person_id"): str,
+        vol.Required("name"): str,
+        vol.Optional("linked_area_id"): str,
+        vol.Optional("ble_device_ids", default=[]): vol.All(list, [str]),
+        vol.Optional("aqara_presence_entity_ids", default=[]): vol.All(list, [str]),
+        vol.Optional("voice_profile_id"): str,
+        vol.Optional("consent", default={}): dict,
+        vol.Optional("notes", default=""): str,
+        vol.Optional("set_as_default", default=False): bool,
+    }
+)
+SERVICE_UPDATE_VOICE_PROFILE_SCHEMA = vol.Schema(
+    {
+        vol.Required("voice_profile_id"): str,
+        vol.Required("name"): str,
+        vol.Optional("tts_voice", default=""): str,
+        vol.Optional("enrollment_state", default="untrained"): str,
+        vol.Optional("enrollment_source", default=""): str,
+        vol.Optional("speaker_embedding_id", default=""): str,
+        vol.Optional("sample_count", default=0): int,
+        vol.Optional("consent", default={}): dict,
         vol.Optional("set_as_default", default=False): bool,
     }
 )
@@ -410,6 +468,62 @@ async def _async_handle_update_identity_profile(
     }
 
 
+async def _async_handle_update_person_profile(
+    hass: HomeAssistant,
+    call: ServiceCall,
+) -> dict[str, Any]:
+    """Insert or update person identity and consent state."""
+    storage = ConciergeStorage(hass)
+    profile = PersonProfile(
+        person_id=call.data["person_id"],
+        name=call.data["name"],
+        linked_area_id=call.data.get("linked_area_id"),
+        ble_device_ids=list(call.data.get("ble_device_ids", [])),
+        aqara_presence_entity_ids=list(call.data.get("aqara_presence_entity_ids", [])),
+        voice_profile_id=call.data.get("voice_profile_id"),
+        consent=dict(call.data.get("consent", {})),
+        notes=call.data.get("notes", ""),
+    )
+    state = await storage.async_update_person_profile(
+        profile,
+        set_as_default=bool(call.data.get("set_as_default", False)),
+    )
+    return {
+        "person_profile_count": len(state.person_profiles),
+        "default_person_id": (
+            state.default_person_profile.person_id if state.default_person_profile is not None else None
+        ),
+    }
+
+
+async def _async_handle_update_voice_profile(
+    hass: HomeAssistant,
+    call: ServiceCall,
+) -> dict[str, Any]:
+    """Insert or update voice enrollment and attribution state."""
+    storage = ConciergeStorage(hass)
+    profile = VoiceProfile(
+        voice_profile_id=call.data["voice_profile_id"],
+        name=call.data["name"],
+        tts_voice=call.data.get("tts_voice", ""),
+        enrollment_state=call.data.get("enrollment_state", "untrained"),
+        enrollment_source=call.data.get("enrollment_source", ""),
+        speaker_embedding_id=call.data.get("speaker_embedding_id", ""),
+        sample_count=int(call.data.get("sample_count", 0)),
+        consent=dict(call.data.get("consent", {})),
+    )
+    state = await storage.async_update_voice_profile(
+        profile,
+        set_as_default=bool(call.data.get("set_as_default", False)),
+    )
+    return {
+        "voice_profile_count": len(state.voice_profiles),
+        "default_voice_profile_id": (
+            state.default_voice_profile.voice_profile_id if state.default_voice_profile is not None else None
+        ),
+    }
+
+
 async def _async_handle_update_global_context(hass: HomeAssistant, call: ServiceCall) -> dict[str, Any]:
     """Update global context usage and optional cached speakable values."""
     storage = ConciergeStorage(hass)
@@ -448,6 +562,209 @@ async def _async_handle_update_execution_preferences(
         preferences=call.data["preferences"],
     )
     return {"execution_preference_count": len(state.execution_preferences)}
+
+
+def _validate_same_floor_area_ids(hass: HomeAssistant, area_ids: list[str]) -> None:
+    """Validate all provided areas exist and belong to the same floor."""
+    if len(area_ids) <= 1:
+        return
+
+    area_registry = ar.async_get(hass)
+    floor_ids: set[str | None] = set()
+
+    for area_id in area_ids:
+        area = area_registry.async_get_area(area_id)
+        if area is None:
+            raise vol.Invalid(f"area_id does not exist: {area_id}")
+        floor_ids.add(area.floor_id)
+
+    if len(floor_ids) > 1:
+        raise vol.Invalid("composite area_ids must all be on the same floor")
+
+
+COMPOSITE_ENTITY_FIELDS: tuple[str, ...] = (
+    "media_player_entity_ids",
+    "voice_device_entity_ids",
+    "asset_entity_ids",
+    "room_sensor_entity_ids",
+    "room_health_entity_ids",
+    "human_health_entity_ids",
+    "light_entity_ids",
+    "shade_entity_ids",
+    "speaker_entity_ids",
+    "dashboard_entity_ids",
+    "other_entity_ids",
+)
+
+
+def _entity_ids_for_area_ids(hass: HomeAssistant, area_ids: list[str]) -> set[str]:
+    """Return all entity IDs currently assigned to the given area IDs."""
+    entity_registry = er.async_get(hass)
+    device_registry = dr.async_get(hass)
+    target_areas = set(area_ids)
+    entity_ids: set[str] = set()
+
+    for entry in entity_registry.entities.values():
+        if entry.disabled_by is not None:
+            continue
+
+        area_id = entry.area_id
+        if area_id is None and entry.device_id:
+            device = device_registry.devices.get(entry.device_id)
+            if device is not None:
+                area_id = device.area_id
+
+        if area_id in target_areas:
+            entity_ids.add(entry.entity_id)
+
+    return entity_ids
+
+
+def _sanitize_composite_entity_payload(
+    payload: dict[str, Any],
+    *,
+    allowed_entity_ids: set[str],
+) -> dict[str, list[str] | None]:
+    """Keep only selected entity IDs that are members of current composite areas."""
+    sanitized: dict[str, list[str] | None] = {}
+    for field_name in COMPOSITE_ENTITY_FIELDS:
+        if field_name not in payload:
+            sanitized[field_name] = None
+            continue
+        value = payload.get(field_name)
+        if not isinstance(value, list):
+            raise vol.Invalid(f"{field_name} must be a list of entity IDs")
+        unique_values = list(dict.fromkeys(str(item) for item in value if isinstance(item, str)))
+        sanitized[field_name] = [entity_id for entity_id in unique_values if entity_id in allowed_entity_ids]
+    return sanitized
+
+
+async def _async_handle_update_composite_config(
+    hass: HomeAssistant,
+    call: ServiceCall,
+) -> dict[str, Any]:
+    """Create/update/dismantle a merged-room composite configuration."""
+    storage = ConciergeStorage(hass)
+    state = await storage.async_load_state()
+
+    composite_id = call.data["composite_id"]
+    existing = state.composites.get(composite_id)
+
+    area_ids = call.data.get("area_ids")
+    if area_ids is None and existing is not None:
+        resolved_area_ids = list(existing.area_ids)
+    elif area_ids is None:
+        resolved_area_ids = []
+    else:
+        resolved_area_ids = list(dict.fromkeys(area_ids))
+
+    if resolved_area_ids:
+        _validate_same_floor_area_ids(hass, resolved_area_ids)
+
+    primary_area = call.data.get("primary_area")
+    if primary_area is not None and resolved_area_ids and primary_area not in resolved_area_ids:
+        raise vol.Invalid("primary_area must exist in area_ids")
+
+    # Composite device selections must remain scoped to member areas.
+    allowed_entity_ids = _entity_ids_for_area_ids(hass, resolved_area_ids)
+    sanitized_entities = _sanitize_composite_entity_payload(call.data, allowed_entity_ids=allowed_entity_ids)
+
+    if area_ids is not None and existing is not None:
+        for field_name in COMPOSITE_ENTITY_FIELDS:
+            if sanitized_entities[field_name] is not None:
+                continue
+            current = getattr(existing, field_name, [])
+            if not isinstance(current, list):
+                sanitized_entities[field_name] = []
+                continue
+            sanitized_entities[field_name] = [
+                entity_id
+                for entity_id in current
+                if isinstance(entity_id, str) and entity_id in allowed_entity_ids
+            ]
+
+    updated = await storage.async_update_composite_config(
+        composite_id=composite_id,
+        name=call.data.get("name"),
+        area_ids=resolved_area_ids if area_ids is not None else None,
+        primary_area=primary_area,
+        enabled=call.data.get("enabled"),
+        media_player_entity_ids=sanitized_entities["media_player_entity_ids"],
+        voice_device_entity_ids=sanitized_entities["voice_device_entity_ids"],
+        asset_entity_ids=sanitized_entities["asset_entity_ids"],
+        room_sensor_entity_ids=sanitized_entities["room_sensor_entity_ids"],
+        room_health_entity_ids=sanitized_entities["room_health_entity_ids"],
+        human_health_entity_ids=sanitized_entities["human_health_entity_ids"],
+        light_entity_ids=sanitized_entities["light_entity_ids"],
+        shade_entity_ids=sanitized_entities["shade_entity_ids"],
+        speaker_entity_ids=sanitized_entities["speaker_entity_ids"],
+        dashboard_entity_ids=sanitized_entities["dashboard_entity_ids"],
+        other_entity_ids=sanitized_entities["other_entity_ids"],
+    )
+
+    composite = updated.composites.get(composite_id)
+    return {
+        "updated": True,
+        "composite_id": composite_id,
+        "dismantled": composite is None,
+        "composite_count": len(updated.composites),
+        "area_count": len(composite.area_ids) if composite else 0,
+    }
+
+
+async def _async_handle_sync_composites(
+    hass: HomeAssistant,
+    call: ServiceCall,
+) -> dict[str, Any]:
+    """Validate and rebuild composite runtime projections."""
+    area_registry = ar.async_get(hass)
+    _ = fr.async_get(hass)
+    valid_area_ids = {area.id for area in area_registry.async_list_areas()}
+    remove_invalid = bool(call.data.get("remove_invalid", True))
+
+    storage = ConciergeStorage(hass)
+    state, validation_errors = await storage.async_sync_composites(
+        valid_area_ids=valid_area_ids,
+        remove_invalid=remove_invalid,
+    )
+
+    # Validate same-floor membership for all remaining composites.
+    for composite_id, composite in state.composites.items():
+        try:
+            _validate_same_floor_area_ids(hass, composite.area_ids)
+        except vol.Invalid as err:
+            validation_errors.append(f"{composite_id}: {err}")
+
+    # Also prune stale selected entity IDs when member areas changed.
+    if remove_invalid:
+        for composite_id, composite in state.composites.items():
+            allowed_entity_ids = _entity_ids_for_area_ids(hass, composite.area_ids)
+            update_payload: dict[str, list[str]] = {}
+
+            for field_name in COMPOSITE_ENTITY_FIELDS:
+                current = getattr(composite, field_name, [])
+                if not isinstance(current, list):
+                    continue
+                filtered = [
+                    entity_id
+                    for entity_id in current
+                    if isinstance(entity_id, str) and entity_id in allowed_entity_ids
+                ]
+                if filtered != current:
+                    update_payload[field_name] = filtered
+
+            if update_payload:
+                await storage.async_update_composite_config(
+                    composite_id=composite_id,
+                    **update_payload,
+                )
+
+    return {
+        "synced": True,
+        "remove_invalid": remove_invalid,
+        "composite_count": len(state.composites),
+        "validation_errors": validation_errors,
+    }
 
 
 async def _async_handle_get_context(hass: HomeAssistant, call: ServiceCall) -> dict[str, Any]:
@@ -619,115 +936,149 @@ async def async_register_services(hass: HomeAssistant) -> None:
     if hass.services.has_service(DOMAIN, SERVICE_EXECUTE):
         return
 
+    def _bind(handler):
+        async def _wrapped(call: ServiceCall):
+            return await handler(hass, call)
+
+        return _wrapped
+
     hass.services.async_register(
         DOMAIN,
         SERVICE_EXECUTE,
-        lambda call: _async_handle_execute(hass, call),
+        _bind(_async_handle_execute),
         schema=SERVICE_EXECUTE_SCHEMA,
         supports_response=SupportsResponse.ONLY,
     )
     hass.services.async_register(
         DOMAIN,
         SERVICE_EXECUTE_DIRECT,
-        lambda call: _async_handle_execute_direct(hass, call),
+        _bind(_async_handle_execute_direct),
         schema=SERVICE_EXECUTE_DIRECT_SCHEMA,
         supports_response=SupportsResponse.ONLY,
     )
     hass.services.async_register(
         DOMAIN,
         SERVICE_GET_INTERACTIONS,
-        lambda call: _async_handle_get_interactions(hass, call),
+        _bind(_async_handle_get_interactions),
         schema=SERVICE_GET_INTERACTIONS_SCHEMA,
         supports_response=SupportsResponse.ONLY,
     )
     hass.services.async_register(
         DOMAIN,
         SERVICE_UPDATE_INTERACTION,
-        lambda call: _async_handle_update_interaction(hass, call),
+        _bind(_async_handle_update_interaction),
         schema=SERVICE_UPDATE_INTERACTION_SCHEMA,
         supports_response=SupportsResponse.ONLY,
     )
     hass.services.async_register(
         DOMAIN,
         SERVICE_CLEAR_INTERACTION,
-        lambda call: _async_handle_clear_interaction(hass, call),
+        _bind(_async_handle_clear_interaction),
         schema=SERVICE_CLEAR_INTERACTION_SCHEMA,
         supports_response=SupportsResponse.ONLY,
     )
     hass.services.async_register(
         DOMAIN,
         SERVICE_GET_SIGNAL,
-        lambda call: _async_handle_get_signal(hass, call),
+        _bind(_async_handle_get_signal),
         schema=SERVICE_GET_SIGNAL_SCHEMA,
         supports_response=SupportsResponse.ONLY,
     )
     hass.services.async_register(
         DOMAIN,
         SERVICE_GET_SIGNALS,
-        lambda call: _async_handle_get_signals(hass, call),
+        _bind(_async_handle_get_signals),
         schema=SERVICE_GET_SIGNALS_SCHEMA,
         supports_response=SupportsResponse.ONLY,
     )
     hass.services.async_register(
         DOMAIN,
         SERVICE_UPDATE_ROOM_CONFIG,
-        lambda call: _async_handle_update_room_config(hass, call),
+        _bind(_async_handle_update_room_config),
         schema=SERVICE_UPDATE_ROOM_CONFIG_SCHEMA,
         supports_response=SupportsResponse.ONLY,
     )
     hass.services.async_register(
         DOMAIN,
         SERVICE_UPDATE_IDENTITY_PROFILE,
-        lambda call: _async_handle_update_identity_profile(hass, call),
+        _bind(_async_handle_update_identity_profile),
         schema=SERVICE_UPDATE_IDENTITY_PROFILE_SCHEMA,
         supports_response=SupportsResponse.ONLY,
     )
     hass.services.async_register(
         DOMAIN,
+        SERVICE_UPDATE_PERSON_PROFILE,
+        _bind(_async_handle_update_person_profile),
+        schema=SERVICE_UPDATE_PERSON_PROFILE_SCHEMA,
+        supports_response=SupportsResponse.ONLY,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_UPDATE_VOICE_PROFILE,
+        _bind(_async_handle_update_voice_profile),
+        schema=SERVICE_UPDATE_VOICE_PROFILE_SCHEMA,
+        supports_response=SupportsResponse.ONLY,
+    )
+    hass.services.async_register(
+        DOMAIN,
         SERVICE_UPDATE_GLOBAL_CONTEXT,
-        lambda call: _async_handle_update_global_context(hass, call),
+        _bind(_async_handle_update_global_context),
         schema=SERVICE_UPDATE_GLOBAL_CONTEXT_SCHEMA,
         supports_response=SupportsResponse.ONLY,
     )
     hass.services.async_register(
         DOMAIN,
         SERVICE_UPDATE_EXECUTION_PREFERENCES,
-        lambda call: _async_handle_update_execution_preferences(hass, call),
+        _bind(_async_handle_update_execution_preferences),
         schema=SERVICE_UPDATE_EXEC_PREFS_SCHEMA,
         supports_response=SupportsResponse.ONLY,
     )
     hass.services.async_register(
         DOMAIN,
+        SERVICE_UPDATE_COMPOSITE_CONFIG,
+        _bind(_async_handle_update_composite_config),
+        schema=SERVICE_UPDATE_COMPOSITE_CONFIG_SCHEMA,
+        supports_response=SupportsResponse.ONLY,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_SYNC_COMPOSITES,
+        _bind(_async_handle_sync_composites),
+        schema=SERVICE_SYNC_COMPOSITES_SCHEMA,
+        supports_response=SupportsResponse.ONLY,
+    )
+    hass.services.async_register(
+        DOMAIN,
         SERVICE_GET_CONTEXT,
-        lambda call: _async_handle_get_context(hass, call),
+        _bind(_async_handle_get_context),
         schema=SERVICE_GET_CONTEXT_SCHEMA,
         supports_response=SupportsResponse.ONLY,
     )
     hass.services.async_register(
         DOMAIN,
         SERVICE_GET_SUMMARY,
-        lambda call: _async_handle_get_summary(hass, call),
+        _bind(_async_handle_get_summary),
         schema=SERVICE_GET_SUMMARY_SCHEMA,
         supports_response=SupportsResponse.ONLY,
     )
     hass.services.async_register(
         DOMAIN,
         SERVICE_PREVIEW_TTS_VOICE,
-        lambda call: _async_handle_preview_tts_voice(hass, call),
+        _bind(_async_handle_preview_tts_voice),
         schema=SERVICE_PREVIEW_TTS_VOICE_SCHEMA,
         supports_response=SupportsResponse.ONLY,
     )
     hass.services.async_register(
         DOMAIN,
         SERVICE_SYNC_ROOMS,
-        lambda call: _async_handle_sync_rooms(hass, call),
+        _bind(_async_handle_sync_rooms),
         schema=SERVICE_SYNC_ROOMS_SCHEMA,
         supports_response=SupportsResponse.ONLY,
     )
     hass.services.async_register(
         DOMAIN,
         SERVICE_REFRESH_ENTITY_STRUCTURE,
-        lambda call: _async_handle_refresh_entity_structure(hass, call),
+        _bind(_async_handle_refresh_entity_structure),
         schema=SERVICE_REFRESH_ENTITY_STRUCTURE_SCHEMA,
         supports_response=SupportsResponse.ONLY,
     )
@@ -743,8 +1094,12 @@ async def async_unregister_services(hass: HomeAssistant) -> None:
         SERVICE_GET_SIGNALS,
         SERVICE_UPDATE_ROOM_CONFIG,
         SERVICE_UPDATE_IDENTITY_PROFILE,
+        SERVICE_UPDATE_PERSON_PROFILE,
+        SERVICE_UPDATE_VOICE_PROFILE,
         SERVICE_UPDATE_GLOBAL_CONTEXT,
         SERVICE_UPDATE_EXECUTION_PREFERENCES,
+        SERVICE_UPDATE_COMPOSITE_CONFIG,
+        SERVICE_SYNC_COMPOSITES,
         SERVICE_GET_CONTEXT,
         SERVICE_GET_SUMMARY,
         SERVICE_PREVIEW_TTS_VOICE,

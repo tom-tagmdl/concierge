@@ -58,7 +58,9 @@ def _discover_action_provider_options(hass) -> list[SelectOptionDict]:
     options = [SelectOptionDict(value=PROVIDER_NONE, label="None")]
 
     if hass.config_entries.async_entries(PROVIDER_OPENAI):
-        options.append(SelectOptionDict(value=PROVIDER_OPENAI, label="OpenAI"))
+        options.append(
+            SelectOptionDict(value=PROVIDER_OPENAI, label="OpenAI (cloud hybrid)")
+        )
 
     return options
 
@@ -68,7 +70,9 @@ def _discover_tts_provider_options(hass) -> list[SelectOptionDict]:
     options = [SelectOptionDict(value=PROVIDER_NONE, label="None")]
 
     if hass.config_entries.async_entries(PROVIDER_OPENAI):
-        options.append(SelectOptionDict(value=PROVIDER_OPENAI, label="OpenAI TTS"))
+        options.append(
+            SelectOptionDict(value=PROVIDER_OPENAI, label="OpenAI TTS (cloud hybrid)")
+        )
     if hass.config_entries.async_entries(PROVIDER_GOOGLE_TRANSLATE):
         options.append(
             SelectOptionDict(

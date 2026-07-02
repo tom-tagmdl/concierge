@@ -3,7 +3,7 @@
     "step": {
       "user": {
         "title": "Set up Concierge",
-        "description": "Configure Concierge global orchestration settings",
+        "description": "Configure Concierge global orchestration settings. Choosing OpenAI means you are opting into a local/cloud hybrid.",
         "data": {
           "name": "Name",
           "ai_enabled": "Enable AI assistance",

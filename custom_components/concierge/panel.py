@@ -46,6 +46,39 @@ def _to_entity_row(entry: er.RegistryEntry) -> dict[str, str]:
     }
 
 
+def _person_ble_suggestions(
+    person: Any,
+    entity_registry: er.EntityRegistry,
+    device_registry: dr.DeviceRegistry,
+) -> tuple[list[str], dict[str, list[str]]]:
+    """Derive BLE enrollment candidates from a person's attached trackers."""
+    tracker_entity_ids = person.attributes.get("device_trackers", []) if getattr(person, "attributes", None) else []
+    candidates: dict[str, set[str]] = {}
+
+    for tracker_entity_id in tracker_entity_ids:
+        entry = entity_registry.entities.get(tracker_entity_id)
+        if entry is None or entry.device_id is None:
+            continue
+
+        device = device_registry.devices.get(entry.device_id)
+        if device is None:
+            continue
+
+        for connection_type, connection_id in getattr(device, "connections", set()):
+            if connection_type not in {dr.CONNECTION_BLUETOOTH, dr.CONNECTION_NETWORK_MAC}:
+                continue
+
+            candidate = str(connection_id).strip()
+            if not candidate:
+                continue
+
+            candidates.setdefault(candidate, set()).add(tracker_entity_id)
+
+    suggested_device_ids = sorted(candidates)
+    suggestion_sources = {device_id: sorted(candidates[device_id]) for device_id in suggested_device_ids}
+    return suggested_device_ids, suggestion_sources
+
+
 def _build_room_entity_catalog(hass, area_ids: set[str]) -> dict[str, dict[str, list[dict[str, str]]]]:
     """Build categorized entity catalogs for each room/area."""
     entity_registry = er.async_get(hass)
@@ -173,6 +206,61 @@ def _build_global_catalog(hass) -> dict[str, list[dict[str, str]]]:
     }
 
 
+def _build_composite_catalog(
+    composites_state: dict[str, dict[str, Any]],
+    room_catalog: dict[str, dict[str, list[dict[str, str]]]],
+) -> dict[str, dict[str, list[dict[str, str]]]]:
+    """Build aggregated selector catalogs for composites from member room catalogs."""
+    category_keys = (
+        "asset_entity_ids",
+        "room_sensor_entity_ids",
+        "room_health_entity_ids",
+        "human_health_entity_ids",
+        "light_entity_ids",
+        "shade_entity_ids",
+        "speaker_entity_ids",
+        "voice_device_entity_ids",
+        "dashboard_entity_ids",
+        "other_entity_ids",
+    )
+
+    composite_catalog: dict[str, dict[str, list[dict[str, str]]]] = {}
+    for composite_id, composite in composites_state.items():
+        area_ids = composite.get("area_ids") if isinstance(composite, dict) else []
+        if not isinstance(area_ids, list):
+            area_ids = []
+
+        merged: dict[str, dict[str, dict[str, str]]] = {
+            key: {}
+            for key in category_keys
+        }
+
+        for area_id in area_ids:
+            area_catalog = room_catalog.get(area_id, {}) if isinstance(area_id, str) else {}
+            for key in category_keys:
+                rows = area_catalog.get(key, [])
+                if not isinstance(rows, list):
+                    continue
+                for row in rows:
+                    if not isinstance(row, dict):
+                        continue
+                    entity_id = row.get("entity_id")
+                    if not isinstance(entity_id, str) or not entity_id:
+                        continue
+                    merged[key][entity_id] = {
+                        "entity_id": entity_id,
+                        "name": row.get("name", entity_id),
+                        "domain": row.get("domain", entity_id.split(".", 1)[0] if "." in entity_id else ""),
+                    }
+
+        composite_catalog[composite_id] = {
+            key: sorted(entities.values(), key=lambda item: str(item.get("name", "")).lower())
+            for key, entities in merged.items()
+        }
+
+    return composite_catalog
+
+
 def _is_asset_intelligence_connected(hass) -> bool:
     """Determine whether Asset Intelligence is installed and currently loaded."""
     entries = hass.config_entries.async_entries(_ASSET_INTELLIGENCE_DOMAIN)
@@ -197,10 +285,16 @@ class ConciergeStorageSnapshotView(HomeAssistantView):
         hass = request.app["hass"]
 
         rooms_state: dict = {}
+        composites_state: dict = {}
+        people_state: dict = {}
+        person_profiles_state: dict = {}
+        voice_profiles_state: dict = {}
         global_features: dict[str, dict[str, Any]] = {}
         global_context_usage: dict[str, dict[str, Any]] = {}
         try:
             state = await ConciergeStorage(hass).async_load_state()
+            entity_registry = er.async_get(hass)
+            device_registry = dr.async_get(hass)
             rooms_state = {
                 area_id: {
                     "area_id": room.area_id,
@@ -223,6 +317,66 @@ class ConciergeStorageSnapshotView(HomeAssistantView):
                     "persona_prompt": room.persona_prompt,
                 }
                 for area_id, room in state.rooms.items()
+            }
+            composites_state = {
+                composite_id: {
+                    "composite_id": composite.composite_id,
+                    "name": composite.name,
+                    "area_ids": composite.area_ids,
+                    "primary_area": composite.primary_area,
+                    "enabled": composite.enabled,
+                    "media_player_entity_ids": composite.media_player_entity_ids,
+                    "voice_device_entity_ids": composite.voice_device_entity_ids,
+                    "asset_entity_ids": composite.asset_entity_ids,
+                    "room_sensor_entity_ids": composite.room_sensor_entity_ids,
+                    "room_health_entity_ids": composite.room_health_entity_ids,
+                    "human_health_entity_ids": composite.human_health_entity_ids,
+                    "light_entity_ids": composite.light_entity_ids,
+                    "shade_entity_ids": composite.shade_entity_ids,
+                    "speaker_entity_ids": composite.speaker_entity_ids,
+                    "dashboard_entity_ids": composite.dashboard_entity_ids,
+                    "other_entity_ids": composite.other_entity_ids,
+                    "created_at": composite.created_at,
+                    "updated_at": composite.updated_at,
+                }
+                for composite_id, composite in state.composites.items()
+            }
+            people_state = {}
+            for person in hass.states.async_all("person"):
+                suggested_ble_device_ids, suggested_ble_device_sources = _person_ble_suggestions(
+                    person,
+                    entity_registry,
+                    device_registry,
+                )
+                people_state[person.entity_id] = {
+                    "entity_id": person.entity_id,
+                    "name": person.name,
+                    "state": person.state,
+                    "entity_picture": person.attributes.get("entity_picture"),
+                    "editable": person.attributes.get("editable"),
+                    "device_trackers": person.attributes.get("device_trackers", []),
+                    "in_zones": person.attributes.get("in_zones", []),
+                    "user_id": person.attributes.get("user_id"),
+                    "latitude": person.attributes.get("latitude"),
+                    "longitude": person.attributes.get("longitude"),
+                    "gps_accuracy": person.attributes.get("gps_accuracy"),
+                    "source": person.attributes.get("source"),
+                    "id": person.attributes.get("id"),
+                    "ble_device_suggestions": suggested_ble_device_ids,
+                    "ble_device_suggestion_sources": suggested_ble_device_sources,
+                }
+            voice_profiles_state = {
+                voice_profile_id: {
+                    "voice_profile_id": profile.voice_profile_id,
+                    "name": profile.name,
+                    "tts_voice": profile.tts_voice,
+                    "enrollment_state": profile.enrollment_state,
+                    "enrollment_source": profile.enrollment_source,
+                    "speaker_embedding_id": profile.speaker_embedding_id,
+                    "sample_count": profile.sample_count,
+                    "consent": profile.consent,
+                }
+                for voice_profile_id, profile in state.voice_profiles.items()
             }
             global_features = state.global_features
             global_context_usage = state.global_context_usage
@@ -263,6 +417,12 @@ class ConciergeStorageSnapshotView(HomeAssistantView):
             _LOGGER.exception("Concierge: failed building room entity catalog")
 
         try:
+            composite_catalog = _build_composite_catalog(composites_state, room_catalog)
+        except Exception:
+            composite_catalog = {composite_id: {} for composite_id in composites_state}
+            _LOGGER.exception("Concierge: failed building composite entity catalog")
+
+        try:
             global_catalog = _build_global_catalog(hass)
         except Exception:
             global_catalog = {
@@ -276,8 +436,13 @@ class ConciergeStorageSnapshotView(HomeAssistantView):
             {
                 "areas": areas,
                 "rooms": rooms_state,
+                "composites": composites_state,
+                "people": people_state,
+                "person_profiles": person_profiles_state,
+                "voice_profiles": voice_profiles_state,
                 "floors": floor_names,
                 "room_catalog": room_catalog,
+                "composite_catalog": composite_catalog,
                 "global_catalog": global_catalog,
                 "global_features": global_features,
                 "global_context_usage": global_context_usage,

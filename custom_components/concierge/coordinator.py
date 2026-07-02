@@ -73,6 +73,8 @@ class ConciergeCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "interaction_count": len(state.interactions),
             "signal_count": len(state.signals),
             "context_source_count": len(state.contexts),
+            "person_profile_count": len(state.person_profiles),
+            "voice_profile_count": len(state.voice_profiles),
         }
         room_configs = {
             area_id: {
@@ -91,4 +93,23 @@ class ConciergeCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "foundation_summary": foundation_summary,
             "capability_domains": sorted(integration_capabilities.keys()),
             "room_configs": room_configs,
+            "person_profiles": {
+                person_id: {
+                    "name": person.name,
+                    "linked_area_id": person.linked_area_id,
+                    "ble_device_ids": person.ble_device_ids,
+                    "aqara_presence_entity_ids": person.aqara_presence_entity_ids,
+                    "voice_profile_id": person.voice_profile_id,
+                }
+                for person_id, person in state.person_profiles.items()
+            },
+            "voice_profiles": {
+                voice_profile_id: {
+                    "name": profile.name,
+                    "tts_voice": profile.tts_voice,
+                    "enrollment_state": profile.enrollment_state,
+                    "sample_count": profile.sample_count,
+                }
+                for voice_profile_id, profile in state.voice_profiles.items()
+            },
         }

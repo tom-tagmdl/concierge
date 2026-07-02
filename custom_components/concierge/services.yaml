@@ -291,6 +291,108 @@ update_identity_profile:
       selector:
         boolean:
 
+update_person_profile:
+  name: Update Person Profile
+  description: Update person identity, consent, and device binding state.
+  fields:
+    person_id:
+      name: Person ID
+      required: true
+      selector:
+        text:
+    name:
+      name: Name
+      required: true
+      selector:
+        text:
+    linked_area_id:
+      name: Linked Area ID
+      required: false
+      selector:
+        text:
+    ble_device_ids:
+      name: BLE Device IDs
+      required: false
+      selector:
+        object:
+    aqara_presence_entity_ids:
+      name: Aqara Presence Entity IDs
+      required: false
+      selector:
+        object:
+    voice_profile_id:
+      name: Voice Profile ID
+      required: false
+      selector:
+        text:
+    consent:
+      name: Consent
+      required: false
+      selector:
+        object:
+    notes:
+      name: Notes
+      required: false
+      selector:
+        text:
+    set_as_default:
+      name: Set As Default
+      required: false
+      selector:
+        boolean:
+
+update_voice_profile:
+  name: Update Voice Profile
+  description: Update voice enrollment and speaker attribution state.
+  fields:
+    voice_profile_id:
+      name: Voice Profile ID
+      required: true
+      selector:
+        text:
+    name:
+      name: Name
+      required: true
+      selector:
+        text:
+    tts_voice:
+      name: TTS Voice
+      required: false
+      selector:
+        text:
+    enrollment_state:
+      name: Enrollment State
+      required: false
+      selector:
+        text:
+    enrollment_source:
+      name: Enrollment Source
+      required: false
+      selector:
+        text:
+    speaker_embedding_id:
+      name: Speaker Embedding ID
+      required: false
+      selector:
+        text:
+    sample_count:
+      name: Sample Count
+      required: false
+      selector:
+        number:
+          min: 0
+          max: 1000
+    consent:
+      name: Consent
+      required: false
+      selector:
+        object:
+    set_as_default:
+      name: Set As Default
+      required: false
+      selector:
+        boolean:
+
 update_global_context:
   name: Update Global Context
   description: Update context usage preferences and optional summary payloads.
@@ -340,6 +442,118 @@ update_execution_preferences:
       required: true
       selector:
         object:
+
+update_composite_config:
+  name: Update Composite Config
+  description: Create, rename, edit membership, or dismantle a merged-room composite configuration.
+  fields:
+    composite_id:
+      name: Composite ID
+      required: true
+      selector:
+        text:
+    name:
+      name: Composite Name
+      required: false
+      selector:
+        text:
+    area_ids:
+      name: Member Area IDs
+      required: false
+      selector:
+        text:
+          multiple: true
+    primary_area:
+      name: Primary Area
+      required: false
+      selector:
+        text:
+    enabled:
+      name: Enabled
+      required: false
+      selector:
+        boolean:
+    media_player_entity_ids:
+      name: Media Player Entity IDs
+      required: false
+      selector:
+        entity:
+          domain: media_player
+          multiple: true
+    voice_device_entity_ids:
+      name: Voice Device Entity IDs
+      required: false
+      selector:
+        entity:
+          domain: assist_satellite
+          multiple: true
+    asset_entity_ids:
+      name: Asset Entity IDs
+      required: false
+      selector:
+        entity:
+          multiple: true
+    room_sensor_entity_ids:
+      name: Room Sensor Entity IDs
+      required: false
+      selector:
+        entity:
+          multiple: true
+    room_health_entity_ids:
+      name: Room Health Entity IDs
+      required: false
+      selector:
+        entity:
+          multiple: true
+    human_health_entity_ids:
+      name: Human Health Entity IDs
+      required: false
+      selector:
+        entity:
+          multiple: true
+    light_entity_ids:
+      name: Light Entity IDs
+      required: false
+      selector:
+        entity:
+          domain: light
+          multiple: true
+    shade_entity_ids:
+      name: Shade Entity IDs
+      required: false
+      selector:
+        entity:
+          domain: cover
+          multiple: true
+    speaker_entity_ids:
+      name: Speaker Entity IDs
+      required: false
+      selector:
+        entity:
+          domain: media_player
+          multiple: true
+    dashboard_entity_ids:
+      name: Dashboard Entity IDs
+      required: false
+      selector:
+        entity:
+          multiple: true
+    other_entity_ids:
+      name: Other Entity IDs
+      required: false
+      selector:
+        entity:
+          multiple: true
+
+sync_composites:
+  name: Sync Composites
+  description: Validate composite memberships and optionally remove invalid area references.
+  fields:
+    remove_invalid:
+      name: Remove Invalid Members
+      required: false
+      selector:
+        boolean:
 
 get_context:
   name: Get Context

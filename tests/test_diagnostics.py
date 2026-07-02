@@ -45,4 +45,6 @@ async def test_diagnostics_include_state_summary(
     assert diagnostics["state_summary"]["room_count"] == 1
     assert diagnostics["state_summary"]["interaction_count"] == 1
     assert diagnostics["state_summary"]["context_count"] == 1
+    assert diagnostics["state_summary"]["person_profile_count"] == 0
+    assert diagnostics["state_summary"]["voice_profile_count"] == 0
     assert "great_room" in diagnostics["state"]["rooms"]

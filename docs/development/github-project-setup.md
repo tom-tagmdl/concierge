@@ -90,6 +90,11 @@ Optional milestone-based import:
 - github-project-seed-waves.csv
 - see github-project-waves.md for wave execution guidance
 
+If full CSV import fails:
+
+- import github-project-seed-minimal.csv first
+- then follow github-project-import-fallback.md
+
 2. Map fields during import:
 - Title -> Title
 - Body -> Body

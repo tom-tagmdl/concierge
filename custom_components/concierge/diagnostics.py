@@ -28,6 +28,8 @@ async def async_get_config_entry_diagnostics(
         "interaction_count": len(state.interactions),
         "signal_count": len(state.signals),
         "context_count": len(state.contexts),
+        "person_profile_count": len(state.person_profiles),
+        "voice_profile_count": len(state.voice_profiles),
         "execution_preference_count": len(state.execution_preferences),
         "global_context_usage_count": len(state.global_context_usage),
     }

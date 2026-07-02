@@ -39,6 +39,7 @@ $robocopyArgs = @(
     "docs"
     "/XF"
     "*.pyc"
+    "Thumbs.db"
 )
 
 if ($DryRun) {
