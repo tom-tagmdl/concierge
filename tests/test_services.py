@@ -247,6 +247,142 @@ async def test_voice_profile_service_persists_enrollment(
     assert state.default_voice_profile.voice_profile_id == "tom_voice"
 
 
+async def test_voice_enrollment_lifecycle_services_round_trip(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """Voice enrollment lifecycle services should persist deterministic state transitions."""
+    from custom_components.concierge.storage import ConciergeStorage
+
+    await hass.services.async_call(
+        DOMAIN,
+        "update_person_profile",
+        {
+            "person_id": "tom",
+            "name": "Tom Grounds",
+        },
+        blocking=True,
+    )
+
+    started = await hass.services.async_call(
+        DOMAIN,
+        "start_voice_enrollment",
+        {
+            "person_id": "tom",
+            "voice_profile_id": "tom_voice",
+            "voice_name": "Tom Voice",
+            "consent_acknowledged": True,
+            "local_only": True,
+        },
+        blocking=True,
+        return_response=True,
+    )
+    assert started["started"] is True
+    assert started["voice_profile_id"] == "tom_voice"
+
+    first_capture = await hass.services.async_call(
+        DOMAIN,
+        "capture_voice_enrollment_sample",
+        {
+            "voice_profile_id": "tom_voice",
+            "speech_text": "Hello Concierge, test phrase one.",
+            "phrase_index": 0,
+        },
+        blocking=True,
+        return_response=True,
+    )
+    second_capture = await hass.services.async_call(
+        DOMAIN,
+        "capture_voice_enrollment_sample",
+        {
+            "voice_profile_id": "tom_voice",
+            "speech_text": "Hello Concierge, test phrase two.",
+            "phrase_index": 1,
+        },
+        blocking=True,
+        return_response=True,
+    )
+    third_capture = await hass.services.async_call(
+        DOMAIN,
+        "capture_voice_enrollment_sample",
+        {
+            "voice_profile_id": "tom_voice",
+            "speech_text": "Hello Concierge, test phrase three.",
+            "phrase_index": 2,
+        },
+        blocking=True,
+        return_response=True,
+    )
+    assert first_capture["captured"] is True
+    assert second_capture["captured"] is True
+    assert third_capture["sample_count"] == 3
+
+    removed = await hass.services.async_call(
+        DOMAIN,
+        "remove_voice_enrollment_sample",
+        {
+            "voice_profile_id": "tom_voice",
+            "sample_id": first_capture["sample_id"],
+        },
+        blocking=True,
+        return_response=True,
+    )
+    assert removed["removed"] is True
+    assert removed["sample_count"] == 2
+
+    built = await hass.services.async_call(
+        DOMAIN,
+        "build_voice_profile",
+        {
+            "voice_profile_id": "tom_voice",
+            "person_id": "tom",
+            "min_samples": 2,
+        },
+        blocking=True,
+        return_response=True,
+    )
+    assert built["built"] is True
+    assert built["sample_count"] == 2
+    assert built["person_id"] == "tom"
+
+    storage = ConciergeStorage(hass)
+    state = await storage.async_load_state()
+    assert state.voice_profiles["tom_voice"].enrollment_state == "trained"
+    assert state.person_profiles["tom"].voice_profile_id == "tom_voice"
+
+    reset = await hass.services.async_call(
+        DOMAIN,
+        "reset_voice_profile",
+        {
+            "voice_profile_id": "tom_voice",
+            "preserve_consent": True,
+        },
+        blocking=True,
+        return_response=True,
+    )
+    assert reset["reset"] is True
+
+    reset_state = await storage.async_load_state()
+    assert reset_state.voice_profiles["tom_voice"].sample_count == 0
+    assert reset_state.voice_profiles["tom_voice"].enrollment_state == "untrained"
+
+    deleted = await hass.services.async_call(
+        DOMAIN,
+        "delete_voice_profile",
+        {
+            "voice_profile_id": "tom_voice",
+            "unlink_from_people": True,
+        },
+        blocking=True,
+        return_response=True,
+    )
+    assert deleted["deleted"] is True
+
+    final_state = await storage.async_load_state()
+    assert "tom_voice" not in final_state.voice_profiles
+    assert final_state.person_profiles["tom"].voice_profile_id is None
+
+
 async def test_sync_rooms_service_reports_success(
     hass: HomeAssistant,
     setup_integration,
@@ -525,3 +661,184 @@ async def test_sync_composites_prunes_stale_selected_entities(
     composite = state.composites["sync_test"]
     assert composite.area_ids == [kitchen.id]
     assert composite.light_entity_ids == [kitchen_light.entity_id]
+
+
+async def test_update_global_context_records_activity_timeline(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """Global context mutations should emit backend activity timeline entries."""
+    await hass.services.async_call(
+        DOMAIN,
+        "update_global_context",
+        {
+            "context_type": "weather",
+            "enabled": True,
+            "summary": "Sunny",
+            "detail": "High of 82",
+            "speakable": "Sunny and warm",
+        },
+        blocking=True,
+    )
+
+    timeline = await hass.services.async_call(
+        DOMAIN,
+        "get_activity_timeline",
+        {},
+        blocking=True,
+        return_response=True,
+    )
+    activities = timeline.get("activities", [])
+    assert any(
+        item.get("intent_class") == "update_global_context"
+        and item.get("outcome") == "success"
+        for item in activities
+    )
+
+
+async def test_execute_records_success_activity(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """Execute service should emit successful backend activity entries."""
+    await hass.services.async_call(
+        DOMAIN,
+        "execute",
+        {
+            "target": "light.kitchen",
+            "area_id": "living_room",
+            "intent_class": "home_control",
+        },
+        blocking=True,
+        return_response=True,
+    )
+
+    timeline = await hass.services.async_call(
+        DOMAIN,
+        "get_activity_timeline",
+        {"area_id": "living_room"},
+        blocking=True,
+        return_response=True,
+    )
+    activities = timeline.get("activities", [])
+    assert any(
+        item.get("intent_class") == "execute_orchestration"
+        and item.get("outcome") == "success"
+        for item in activities
+    )
+
+
+async def test_execute_direct_records_policy_denied_activity(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """Policy-denied execution should still be captured in backend activity timeline."""
+    await hass.services.async_call(
+        DOMAIN,
+        "update_person_profile",
+        {
+            "person_id": "minor_1",
+            "name": "Minor",
+            "is_minor": True,
+            "minor_allowed_intent_classes": ["media_only"],
+            "minor_allow_general_qna": False,
+        },
+        blocking=True,
+    )
+
+    with pytest.raises(Exception, match="minor_policy_denied"):
+        await hass.services.async_call(
+            DOMAIN,
+            "execute_direct",
+            {
+                "entity_id": "light.den",
+                "service": "homeassistant.turn_on",
+                "person_id": "minor_1",
+                "intent_class": "home_control",
+            },
+            blocking=True,
+            return_response=True,
+        )
+
+    timeline = await hass.services.async_call(
+        DOMAIN,
+        "get_activity_timeline",
+        {"person_id": "minor_1"},
+        blocking=True,
+        return_response=True,
+    )
+    activities = timeline.get("activities", [])
+    assert any(
+        item.get("intent_class") == "execute_direct"
+        and item.get("outcome") == "policy_denied"
+        for item in activities
+    )
+
+
+async def test_update_room_config_records_activity_with_room_scope(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """Room setup mutations should be backend-logged in activity timeline."""
+    await hass.services.async_call(
+        DOMAIN,
+        "update_room_config",
+        {
+            "area_id": "living_room",
+            "voice_device_entity_ids": [
+                "assist_satellite.home_assistant_voice_0a87d9_assist_satellite"
+            ],
+        },
+        blocking=True,
+    )
+
+    timeline = await hass.services.async_call(
+        DOMAIN,
+        "get_activity_timeline",
+        {"area_id": "living_room"},
+        blocking=True,
+        return_response=True,
+    )
+    activities = timeline.get("activities", [])
+    assert any(
+        item.get("intent_class") == "room_config_update"
+        and item.get("outcome") == "success"
+        and item.get("resolved_area_id") == "living_room"
+        for item in activities
+    )
+
+
+async def test_update_person_profile_records_activity_with_person_scope(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """Person setup mutations should be backend-logged in activity timeline."""
+    await hass.services.async_call(
+        DOMAIN,
+        "update_person_profile",
+        {
+            "person_id": "tom",
+            "name": "Tom",
+            "linked_area_id": "living_room",
+            "ble_device_ids": [],
+            "aqara_presence_entity_ids": [],
+            "minor_allowed_intent_classes": ["room_context_info"],
+            "minor_allow_general_qna": False,
+        },
+        blocking=True,
+    )
+
+    timeline = await hass.services.async_call(
+        DOMAIN,
+        "get_activity_timeline",
+        {"person_id": "tom"},
+        blocking=True,
+        return_response=True,
+    )
+    activities = timeline.get("activities", [])
+    assert any(
+        item.get("intent_class") == "update_person_profile"
+        and item.get("outcome") == "success"
+        and item.get("resolved_person_id") == "tom"
+        for item in activities
+    )

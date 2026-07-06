@@ -129,3 +129,26 @@ async def test_room_and_identity_state_round_trip(hass: HomeAssistant) -> None:
     assert state.default_person_profile.voice_profile_id == "tom_voice"
     assert state.default_voice_profile is not None
     assert state.default_voice_profile.sample_count == 4
+
+
+async def test_coordinator_nightly_archive_records_activity_lifecycle(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """Coordinator nightly archive job should emit backend activity lifecycle records."""
+    entry = setup_integration
+    coordinator = hass.data[DOMAIN][entry.entry_id]
+    await coordinator._async_handle_nightly_archive()
+
+    state = await ConciergeStorage(hass).async_load_state()
+    nightly = [
+        activity
+        for activity in state.activities.values()
+        if activity.intent_class == "coordinator_nightly_archive"
+    ]
+    assert nightly
+    latest = sorted(nightly, key=lambda item: item.started_at)[-1]
+    assert latest.actor_class == "concierge_coordinator"
+    assert latest.channel == "coordinator_job"
+    assert latest.outcome == "success"
+    assert latest.actions_taken

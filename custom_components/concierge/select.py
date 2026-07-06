@@ -14,36 +14,13 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
+from .const import TTS_PROVIDER_ENTITY_IDS, VOICE_SYSTEM_DEFAULT
 from .coordinator import ConciergeCoordinator
 from .storage import ConciergeStorage
 
 POSTURE_OPTIONS = ["day", "night", "sleep", "away"]
 MEDIA_PLAYER_NONE = "none"
 VOICE_DEVICE_NONE = "none"
-VOICE_SYSTEM_DEFAULT = "system_default"
-TTS_PROVIDER_ENTITY_IDS = {
-    "openai_conversation": "tts.openai_tts",
-    "google_translate": "tts.google_translate_en_com",
-}
-FALLBACK_VOICE_OPTIONS = {
-    "openai_conversation": [
-        "alloy",
-        "ash",
-        "ballad",
-        "cedar",
-        "coral",
-        "echo",
-        "fable",
-        "marin",
-        "nova",
-        "onyx",
-        "sage",
-        "shimmer",
-        "verse",
-    ],
-    "google_translate": ["default"],
-}
-
 
 def _tts_provider(entry: ConfigEntry) -> str:
     """Return configured TTS provider."""
@@ -99,17 +76,22 @@ def _voice_options(hass: HomeAssistant, entry: ConfigEntry, current_voice: str =
     if entity_id and TTS_DATA_COMPONENT in hass.data:
         entity_component = hass.data[TTS_DATA_COMPONENT]
         if tts_entity := entity_component.get_entity(entity_id):
-            language = getattr(tts_entity, "default_language", "en-US")
-            supported_voices = tts_entity.async_get_supported_voices(language)
-            if supported_voices:
-                voices = [voice.voice_id for voice in supported_voices]
+            languages = list(getattr(tts_entity, "supported_languages", []) or [])
+            default_language = getattr(tts_entity, "default_language", "")
+            if default_language and default_language not in languages:
+                languages.insert(0, default_language)
+            if not languages and default_language:
+                languages = [default_language]
 
-    if not voices:
-        voices = FALLBACK_VOICE_OPTIONS.get(provider, [])
+            for language in languages:
+                try:
+                    supported_voices = tts_entity.async_get_supported_voices(language)
+                except Exception:
+                    supported_voices = None
+                if supported_voices:
+                    voices.extend([voice.voice_id for voice in supported_voices if getattr(voice, "voice_id", "")])
 
     normalized = list(dict.fromkeys([*voices, *( [current_voice] if current_voice else [] )]))
-    if provider == "google_translate" and not normalized:
-        normalized = ["default"]
     return [VOICE_SYSTEM_DEFAULT, *normalized] if normalized else [VOICE_SYSTEM_DEFAULT]
 
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 import voluptuous as vol
 
 from homeassistant import config_entries
@@ -9,10 +11,20 @@ from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import callback
 from homeassistant.helpers.selector import (
     BooleanSelector,
+    NumberSelector,
+    NumberSelectorConfig,
+    NumberSelectorMode,
     SelectOptionDict,
     SelectSelector,
     SelectSelectorConfig,
     SelectSelectorMode,
+)
+
+from .archive_runtime import (
+    CONF_AUDIT_ARCHIVE_RETENTION_DAYS,
+    DEFAULT_AUDIT_ARCHIVE_RETENTION_DAYS,
+    is_valid_archive_destination_uri,
+    normalize_archive_destination,
 )
 
 from .const import (
@@ -27,6 +39,9 @@ CONF_TTS_ENABLED = "tts_enabled"
 CONF_TTS_PROVIDER = "tts_provider"
 CONF_MEDIA_PROVIDER = "media_provider"
 CONF_ASSET_INTELLIGENCE_PROVIDER = "asset_intelligence_provider"
+CONF_AUDIT_ARCHIVE_DESTINATION_URI = "audit_archive_destination_uri"
+CONF_AUDIT_ARCHIVE_ENABLED = "audit_archive_enabled"
+CONF_AUDIT_ARCHIVE_INCLUDE_REFERENCE_EXCERPTS = "audit_archive_include_reference_excerpts"
 
 DEFAULT_AI_ENABLED = False
 DEFAULT_AI_LOCAL_FIRST = True
@@ -35,12 +50,47 @@ DEFAULT_TTS_ENABLED = False
 DEFAULT_TTS_PROVIDER = "none"
 DEFAULT_MEDIA_PROVIDER = "none"
 DEFAULT_ASSET_INTELLIGENCE_PROVIDER = "none"
+DEFAULT_AUDIT_ARCHIVE_DESTINATION_URI = ""
+DEFAULT_AUDIT_ARCHIVE_ENABLED = False
+DEFAULT_AUDIT_ARCHIVE_INCLUDE_REFERENCE_EXCERPTS = False
 
 PROVIDER_NONE = "none"
 PROVIDER_OPENAI = "openai_conversation"
 PROVIDER_GOOGLE_TRANSLATE = "google_translate"
 PROVIDER_MUSIC_ASSISTANT = "music_assistant"
 PROVIDER_ASSET_INTELLIGENCE = "asset_intelligence"
+
+
+def _discover_archive_destination_options() -> list[SelectOptionDict]:
+    """Discover candidate archive destinations from attached HA storage roots."""
+    options: list[SelectOptionDict] = [
+        SelectOptionDict(value="", label="Not set")
+    ]
+    seen: set[str] = {""}
+    discovered_paths: list[str] = []
+    root_paths = ("/media", "/share")
+
+    for root in root_paths:
+        if not os.path.isdir(root):
+            continue
+        try:
+            for dirpath, _, _ in os.walk(root, topdown=True, followlinks=False):
+                normalized = normalize_archive_destination(dirpath)
+                if normalized and normalized not in seen:
+                    discovered_paths.append(normalized)
+                    seen.add(normalized)
+        except OSError:
+            continue
+
+    for path in sorted(discovered_paths, key=lambda item: item.lower()):
+        options.append(SelectOptionDict(value=path, label=path))
+
+    return options
+
+
+async def _async_discover_archive_destination_options(hass) -> list[SelectOptionDict]:
+    """Discover archive destination options without blocking the event loop."""
+    return await hass.async_add_executor_job(_discover_archive_destination_options)
 
 
 def _select(options: list[SelectOptionDict]) -> SelectSelector:
@@ -135,7 +185,11 @@ def _resolve_default_from_options(
     return next(iter(values), fallback)
 
 
-def _build_global_config_schema(hass, defaults: dict) -> vol.Schema:
+def _build_global_config_schema(
+    hass,
+    defaults: dict,
+    archive_destination_options: list[SelectOptionDict],
+) -> vol.Schema:
     """Return the initial global configuration schema."""
     action_provider_options = _discover_action_provider_options(hass)
     tts_provider_options = _discover_tts_provider_options(hass)
@@ -165,6 +219,21 @@ def _build_global_config_schema(hass, defaults: dict) -> vol.Schema:
         asset_intelligence_options,
         PROVIDER_ASSET_INTELLIGENCE,
     )
+    archive_destination_default = _resolve_default_from_options(
+        normalize_archive_destination(
+            defaults.get(
+                CONF_AUDIT_ARCHIVE_DESTINATION_URI,
+                DEFAULT_AUDIT_ARCHIVE_DESTINATION_URI,
+            )
+        ),
+        archive_destination_options,
+        "",
+    )
+    destination_is_valid = is_valid_archive_destination_uri(archive_destination_default)
+    archive_retention_days_default = max(
+        1,
+        int(defaults.get(CONF_AUDIT_ARCHIVE_RETENTION_DAYS, DEFAULT_AUDIT_ARCHIVE_RETENTION_DAYS)),
+    )
 
     schema: dict = {
         vol.Required("name", default=defaults.get("name", DEFAULT_NAME)): str,
@@ -193,6 +262,54 @@ def _build_global_config_schema(hass, defaults: dict) -> vol.Schema:
             CONF_ASSET_INTELLIGENCE_PROVIDER,
             default=asset_intelligence_default,
         ): _select(asset_intelligence_options),
+        vol.Required(
+            CONF_AUDIT_ARCHIVE_DESTINATION_URI,
+            default=archive_destination_default,
+            description={
+                "label": "Audit archive destination",
+            },
+        ): _select(archive_destination_options),
+        vol.Required(
+            CONF_AUDIT_ARCHIVE_ENABLED,
+            default=(
+                bool(defaults.get(CONF_AUDIT_ARCHIVE_ENABLED, DEFAULT_AUDIT_ARCHIVE_ENABLED))
+                if destination_is_valid
+                else False
+            ),
+            description={
+                "label": "Enable audit archive exports",
+            },
+        ): BooleanSelector(),
+        vol.Required(
+            CONF_AUDIT_ARCHIVE_INCLUDE_REFERENCE_EXCERPTS,
+            default=(
+                bool(
+                    defaults.get(
+                        CONF_AUDIT_ARCHIVE_INCLUDE_REFERENCE_EXCERPTS,
+                        DEFAULT_AUDIT_ARCHIVE_INCLUDE_REFERENCE_EXCERPTS,
+                    )
+                )
+                if destination_is_valid
+                else False
+            ),
+            description={
+                "label": "Include reference excerpts in archive exports",
+            },
+        ): BooleanSelector(),
+        vol.Required(
+            CONF_AUDIT_ARCHIVE_RETENTION_DAYS,
+            default=archive_retention_days_default,
+            description={
+                "label": "Archive retention days",
+            },
+        ): NumberSelector(
+            NumberSelectorConfig(
+                min=1,
+                max=3650,
+                step=1,
+                mode=NumberSelectorMode.BOX,
+            )
+        ),
     }
 
     return vol.Schema(schema)
@@ -205,14 +322,37 @@ class ConciergeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     async def async_step_user(self, user_input: dict | None = None):
         """Handle the initial step."""
+        archive_destination_options = await _async_discover_archive_destination_options(self.hass)
         if user_input is not None:
+            destination = normalize_archive_destination(
+                user_input.get(CONF_AUDIT_ARCHIVE_DESTINATION_URI, "")
+            )
+            user_input[CONF_AUDIT_ARCHIVE_DESTINATION_URI] = destination
+            user_input[CONF_AUDIT_ARCHIVE_RETENTION_DAYS] = max(
+                1,
+                int(user_input.get(CONF_AUDIT_ARCHIVE_RETENTION_DAYS, DEFAULT_AUDIT_ARCHIVE_RETENTION_DAYS)),
+            )
+
+            destination_is_valid = is_valid_archive_destination_uri(destination)
+
+            if destination and not is_valid_archive_destination_uri(destination):
+                return self.async_show_form(
+                    step_id="user",
+                    data_schema=_build_global_config_schema(self.hass, user_input, archive_destination_options),
+                    errors={"base": "invalid_archive_destination"},
+                )
+
+            if not destination_is_valid:
+                user_input[CONF_AUDIT_ARCHIVE_ENABLED] = False
+                user_input[CONF_AUDIT_ARCHIVE_INCLUDE_REFERENCE_EXCERPTS] = False
+
             await self.async_set_unique_id(DOMAIN)
             self._abort_if_unique_id_configured()
             return self.async_create_entry(title=user_input["name"], data=user_input)
 
         return self.async_show_form(
             step_id="user",
-            data_schema=_build_global_config_schema(self.hass, {"name": DEFAULT_NAME}),
+            data_schema=_build_global_config_schema(self.hass, {"name": DEFAULT_NAME}, archive_destination_options),
         )
 
     @staticmethod
@@ -231,7 +371,30 @@ class ConciergeOptionsFlow(config_entries.OptionsFlow):
 
     async def async_step_init(self, user_input: dict | None = None):
         """Manage options."""
+        archive_destination_options = await _async_discover_archive_destination_options(self.hass)
         if user_input is not None:
+            destination = normalize_archive_destination(
+                user_input.get(CONF_AUDIT_ARCHIVE_DESTINATION_URI, "")
+            )
+            user_input[CONF_AUDIT_ARCHIVE_DESTINATION_URI] = destination
+            user_input[CONF_AUDIT_ARCHIVE_RETENTION_DAYS] = max(
+                1,
+                int(user_input.get(CONF_AUDIT_ARCHIVE_RETENTION_DAYS, DEFAULT_AUDIT_ARCHIVE_RETENTION_DAYS)),
+            )
+
+            destination_is_valid = is_valid_archive_destination_uri(destination)
+
+            if destination and not is_valid_archive_destination_uri(destination):
+                return self.async_show_form(
+                    step_id="init",
+                    data_schema=_build_global_config_schema(self.hass, user_input, archive_destination_options),
+                    errors={"base": "invalid_archive_destination"},
+                )
+
+            if not destination_is_valid:
+                user_input[CONF_AUDIT_ARCHIVE_ENABLED] = False
+                user_input[CONF_AUDIT_ARCHIVE_INCLUDE_REFERENCE_EXCERPTS] = False
+
             return self.async_create_entry(title="", data=user_input)
 
         defaults = {
@@ -267,8 +430,36 @@ class ConciergeOptionsFlow(config_entries.OptionsFlow):
                     DEFAULT_ASSET_INTELLIGENCE_PROVIDER,
                 ),
             ),
+            CONF_AUDIT_ARCHIVE_DESTINATION_URI: self._config_entry.options.get(
+                CONF_AUDIT_ARCHIVE_DESTINATION_URI,
+                self._config_entry.data.get(
+                    CONF_AUDIT_ARCHIVE_DESTINATION_URI,
+                    DEFAULT_AUDIT_ARCHIVE_DESTINATION_URI,
+                ),
+            ),
+            CONF_AUDIT_ARCHIVE_ENABLED: self._config_entry.options.get(
+                CONF_AUDIT_ARCHIVE_ENABLED,
+                self._config_entry.data.get(
+                    CONF_AUDIT_ARCHIVE_ENABLED,
+                    DEFAULT_AUDIT_ARCHIVE_ENABLED,
+                ),
+            ),
+            CONF_AUDIT_ARCHIVE_INCLUDE_REFERENCE_EXCERPTS: self._config_entry.options.get(
+                CONF_AUDIT_ARCHIVE_INCLUDE_REFERENCE_EXCERPTS,
+                self._config_entry.data.get(
+                    CONF_AUDIT_ARCHIVE_INCLUDE_REFERENCE_EXCERPTS,
+                    DEFAULT_AUDIT_ARCHIVE_INCLUDE_REFERENCE_EXCERPTS,
+                ),
+            ),
+            CONF_AUDIT_ARCHIVE_RETENTION_DAYS: self._config_entry.options.get(
+                CONF_AUDIT_ARCHIVE_RETENTION_DAYS,
+                self._config_entry.data.get(
+                    CONF_AUDIT_ARCHIVE_RETENTION_DAYS,
+                    DEFAULT_AUDIT_ARCHIVE_RETENTION_DAYS,
+                ),
+            ),
         }
         return self.async_show_form(
             step_id="init",
-            data_schema=_build_global_config_schema(self.hass, defaults),
+            data_schema=_build_global_config_schema(self.hass, defaults, archive_destination_options),
         )

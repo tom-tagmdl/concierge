@@ -32,7 +32,11 @@
           "tts_enabled": "Enable text-to-speech",
           "tts_provider": "TTS provider",
           "media_provider": "Media provider",
-          "asset_intelligence_provider": "Asset Intelligence connection"
+          "asset_intelligence_provider": "Asset Intelligence connection",
+          "audit_archive_destination_uri": "Audit Archive Destination (external storage)",
+          "audit_archive_enabled": "Enable Audit Archive",
+          "audit_archive_include_reference_excerpts": "Include Reference Excerpts in audit archive",
+          "audit_archive_retention_days": "Audit Archive Retention Days"
         }
       }
     }

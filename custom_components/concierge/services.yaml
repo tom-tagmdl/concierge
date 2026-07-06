@@ -168,12 +168,6 @@ update_room_config:
         entity:
           domain: assist_satellite
           multiple: true
-    asset_entity_ids:
-      name: Asset Entity IDs
-      required: false
-      selector:
-        entity:
-          multiple: true
     room_sensor_entity_ids:
       name: Room Sensor Entity IDs
       required: false
@@ -330,6 +324,46 @@ update_person_profile:
       required: false
       selector:
         object:
+    mobile_notify_targets:
+      name: Mobile Notify Targets
+      required: false
+      selector:
+        object:
+    preferred_mobile_target:
+      name: Preferred Mobile Target
+      required: false
+      selector:
+        text:
+    mobile_voice_endpoint_enabled:
+      name: Mobile Voice Endpoint Enabled
+      required: false
+      selector:
+        boolean:
+    is_minor:
+      name: Is Minor
+      required: false
+      selector:
+        boolean:
+    guardian_controls_required:
+      name: Guardian Controls Required
+      required: false
+      selector:
+        boolean:
+    minor_allow_general_qna:
+      name: Minor Allow General Q&A
+      required: false
+      selector:
+        boolean:
+    minor_allowed_intent_classes:
+      name: Minor Allowed Intent Classes
+      required: false
+      selector:
+        object:
+    minor_content_filter_level:
+      name: Minor Content Filter Level
+      required: false
+      selector:
+        text:
     notes:
       name: Notes
       required: false
@@ -382,6 +416,39 @@ update_voice_profile:
         number:
           min: 0
           max: 1000
+    sample_items:
+      name: Sample Items
+      required: false
+      selector:
+        object:
+    attribution_confidence:
+      name: Attribution Confidence
+      required: false
+      selector:
+        number:
+          min: 0
+          max: 1
+          step: 0.01
+    enrollment_started_at:
+      name: Enrollment Started At
+      required: false
+      selector:
+        text:
+    last_sample_at:
+      name: Last Sample At
+      required: false
+      selector:
+        text:
+    last_built_at:
+      name: Last Built At
+      required: false
+      selector:
+        text:
+    disabled:
+      name: Disabled
+      required: false
+      selector:
+        boolean:
     consent:
       name: Consent
       required: false
@@ -389,6 +456,131 @@ update_voice_profile:
         object:
     set_as_default:
       name: Set As Default
+      required: false
+      selector:
+        boolean:
+
+start_voice_enrollment:
+  name: Start Voice Enrollment
+  description: Begin explicit voice enrollment for a person with consent and local-first defaults.
+  fields:
+    person_id:
+      name: Person ID
+      required: true
+      selector:
+        text:
+    voice_profile_id:
+      name: Voice Profile ID
+      required: false
+      selector:
+        text:
+    voice_name:
+      name: Voice Name
+      required: false
+      selector:
+        text:
+    consent_acknowledged:
+      name: Consent Acknowledged
+      required: true
+      selector:
+        boolean:
+    local_only:
+      name: Local Only
+      required: false
+      selector:
+        boolean:
+
+capture_voice_enrollment_sample:
+  name: Capture Voice Enrollment Sample
+  description: Capture one enrollment speech item for a voice profile.
+  fields:
+    voice_profile_id:
+      name: Voice Profile ID
+      required: true
+      selector:
+        text:
+    speech_text:
+      name: Speech Text
+      required: true
+      selector:
+        text:
+    source:
+      name: Source
+      required: false
+      selector:
+        text:
+    quality_score:
+      name: Quality Score
+      required: false
+      selector:
+        number:
+          min: 0
+          max: 1
+          step: 0.01
+
+remove_voice_enrollment_sample:
+  name: Remove Voice Enrollment Sample
+  description: Remove one captured enrollment speech item from a voice profile.
+  fields:
+    voice_profile_id:
+      name: Voice Profile ID
+      required: true
+      selector:
+        text:
+    sample_id:
+      name: Sample ID
+      required: true
+      selector:
+        text:
+
+build_voice_profile:
+  name: Build Voice Profile
+  description: Build or refresh a trained voice profile embedding from captured speech items.
+  fields:
+    voice_profile_id:
+      name: Voice Profile ID
+      required: true
+      selector:
+        text:
+    person_id:
+      name: Person ID
+      required: false
+      selector:
+        text:
+    min_samples:
+      name: Minimum Samples
+      required: false
+      selector:
+        number:
+          min: 1
+          max: 50
+
+reset_voice_profile:
+  name: Reset Voice Profile
+  description: Reset a voice profile to untrained state while preserving person linkage.
+  fields:
+    voice_profile_id:
+      name: Voice Profile ID
+      required: true
+      selector:
+        text:
+    preserve_consent:
+      name: Preserve Consent
+      required: false
+      selector:
+        boolean:
+
+delete_voice_profile:
+  name: Delete Voice Profile
+  description: Delete a voice profile and optionally unlink people bound to it.
+  fields:
+    voice_profile_id:
+      name: Voice Profile ID
+      required: true
+      selector:
+        text:
+    unlink_from_people:
+      name: Unlink From People
       required: false
       selector:
         boolean:
@@ -486,12 +678,6 @@ update_composite_config:
       selector:
         entity:
           domain: assist_satellite
-          multiple: true
-    asset_entity_ids:
-      name: Asset Entity IDs
-      required: false
-      selector:
-        entity:
           multiple: true
     room_sensor_entity_ids:
       name: Room Sensor Entity IDs
@@ -647,3 +833,211 @@ refresh_entity_structure:
       required: false
       selector:
         boolean:
+
+record_activity_event:
+  name: Record Activity Event
+  description: Append stitched Concierge orchestration metadata for an activity.
+  fields:
+    activity_id:
+      name: Activity ID
+      required: true
+      selector:
+        text:
+    correlation_id:
+      name: Correlation ID
+      required: true
+      selector:
+        text:
+    started_at:
+      name: Started At (ISO-8601)
+      required: true
+      selector:
+        text:
+    channel:
+      name: Channel
+      required: true
+      selector:
+        text:
+    actor_class:
+      name: Actor Class
+      required: true
+      selector:
+        text:
+    intent_class:
+      name: Intent Class
+      required: true
+      selector:
+        text:
+    request_summary:
+      name: Request Summary
+      required: false
+      selector:
+        text:
+    resolved_person_id:
+      name: Resolved Person ID
+      required: false
+      selector:
+        text:
+    resolved_area_id:
+      name: Resolved Area ID
+      required: false
+      selector:
+        text:
+    confidence:
+      name: Confidence
+      required: false
+      selector:
+        number:
+          min: 0
+          max: 1
+          step: 0.01
+    external_refs:
+      name: External References
+      required: false
+      selector:
+        object:
+
+close_activity_outcome:
+  name: Close Activity Outcome
+  description: Close a recorded activity with final outcome and policy gates.
+  fields:
+    activity_id:
+      name: Activity ID
+      required: true
+      selector:
+        text:
+    ended_at:
+      name: Ended At (ISO-8601)
+      required: true
+      selector:
+        text:
+    outcome:
+      name: Outcome
+      required: true
+      selector:
+        text:
+    outcome_reason:
+      name: Outcome Reason
+      required: false
+      selector:
+        text:
+    actions_taken:
+      name: Actions Taken
+      required: false
+      selector:
+        object:
+    policy_gates:
+      name: Policy Gates
+      required: false
+      selector:
+        object:
+
+get_activity_timeline:
+  name: Get Activity Timeline
+  description: Query stitched Concierge activities in chronological order.
+  fields:
+    start:
+      name: Start (ISO-8601)
+      required: false
+      selector:
+        text:
+    end:
+      name: End (ISO-8601)
+      required: false
+      selector:
+        text:
+    actor_class:
+      name: Actor Class
+      required: false
+      selector:
+        text:
+    person_id:
+      name: Person ID
+      required: false
+      selector:
+        text:
+    area_id:
+      name: Area ID
+      required: false
+      selector:
+        text:
+    channel:
+      name: Channel
+      required: false
+      selector:
+        text:
+
+export_activity_archive:
+  name: Export Activity Archive
+  description: Export a self-contained readable activity archive package.
+  fields:
+    start:
+      name: Start (ISO-8601)
+      required: false
+      selector:
+        text:
+    end:
+      name: End (ISO-8601)
+      required: false
+      selector:
+        text:
+    destination:
+      name: Destination URI or path
+      required: false
+      selector:
+        text:
+    include_reference_excerpts:
+      name: Include Reference Excerpts
+      required: false
+      selector:
+        boolean:
+
+resolve_mobile_context:
+  name: Resolve Mobile Context
+  description: Resolve person and room context for mobile typed or voice requests.
+  fields:
+    mobile_target_id:
+      name: Mobile Target ID
+      required: false
+      selector:
+        text:
+    person_id:
+      name: Person ID
+      required: false
+      selector:
+        text:
+    request_text:
+      name: Request Text
+      required: false
+      selector:
+        text:
+
+push_person_message:
+  name: Push Person Message
+  description: Send a mobile app notification using person-scoped target filtering.
+  fields:
+    person_id:
+      name: Person ID
+      required: true
+      selector:
+        text:
+    message:
+      name: Message
+      required: true
+      selector:
+        text:
+    title:
+      name: Title
+      required: false
+      selector:
+        text:
+    target_id:
+      name: Target ID
+      required: false
+      selector:
+        text:
+    data:
+      name: Data
+      required: false
+      selector:
+        object:

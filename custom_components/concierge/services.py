@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Any
+from datetime import datetime, timezone
+import json
+from pathlib import Path
+from typing import Any, Awaitable, Callable
+from urllib.parse import unquote, urlparse
+from uuid import uuid4
 
 import voluptuous as vol
 
@@ -12,19 +17,32 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import floor_registry as fr
 from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
 
+from .archive_runtime import archive_options_from_entry
 from .const import (
+    SERVICE_BUILD_VOICE_PROFILE,
+    SERVICE_CAPTURE_VOICE_ENROLLMENT_SAMPLE,
+    SERVICE_DELETE_VOICE_PROFILE,
     DOMAIN,
     EVENT_EXECUTION,
+    SERVICE_REMOVE_VOICE_ENROLLMENT_SAMPLE,
+    SERVICE_RESET_VOICE_PROFILE,
+    SERVICE_START_VOICE_ENROLLMENT,
     SERVICE_CLEAR_INTERACTION,
+    SERVICE_CLOSE_ACTIVITY_OUTCOME,
     SERVICE_EXECUTE,
     SERVICE_EXECUTE_DIRECT,
+    SERVICE_EXPORT_ACTIVITY_ARCHIVE,
+    SERVICE_GET_ACTIVITY_TIMELINE,
     SERVICE_GET_CONTEXT,
     SERVICE_GET_INTERACTIONS,
     SERVICE_GET_SIGNAL,
     SERVICE_GET_SIGNALS,
     SERVICE_GET_SUMMARY,
     SERVICE_PREVIEW_TTS_VOICE,
+    SERVICE_PUSH_PERSON_MESSAGE,
     SERVICE_REFRESH_ENTITY_STRUCTURE,
+    SERVICE_RECORD_ACTIVITY_EVENT,
+    SERVICE_RESOLVE_MOBILE_CONTEXT,
     SERVICE_SYNC_ROOMS,
     SERVICE_SYNC_COMPOSITES,
     SERVICE_UPDATE_COMPOSITE_CONFIG,
@@ -35,16 +53,34 @@ from .const import (
     SERVICE_UPDATE_INTERACTION,
     SERVICE_UPDATE_ROOM_CONFIG,
     SERVICE_UPDATE_VOICE_PROFILE,
+    TTS_PROVIDER_ENTITY_IDS,
 )
-from .models import ContextState, IdentityProfile, Interaction, PersonProfile, SignalState, VoiceProfile
+from .models import (
+    ActivityEvent,
+    ContextState,
+    IdentityProfile,
+    Interaction,
+    PersonProfile,
+    SignalState,
+    VoiceProfile,
+)
 from .storage import ConciergeStorage
 
+_PROVIDER_NONE = "none"
+_PROVIDER_ASSET_INTELLIGENCE = "asset_intelligence"
+
+TTS_PROVIDER_ENTITY_IDS = {
+    "openai_conversation": "tts.openai_tts",
+    "google_translate": "tts.google_translate_en_com",
+}
 SERVICE_EXECUTE_SCHEMA = vol.Schema(
     {
         vol.Required("target"): str,
         vol.Optional("area_id"): str,
         vol.Optional("composite_id"): str,
         vol.Optional("context"): dict,
+        vol.Optional("person_id"): str,
+        vol.Optional("intent_class", default="home_control"): str,
     }
 )
 
@@ -53,6 +89,8 @@ SERVICE_EXECUTE_DIRECT_SCHEMA = vol.Schema(
         vol.Required("entity_id"): str,
         vol.Required("service"): str,
         vol.Optional("data"): dict,
+        vol.Optional("person_id"): str,
+        vol.Optional("intent_class", default="home_control"): str,
     }
 )
 
@@ -91,15 +129,23 @@ SERVICE_UPDATE_ROOM_CONFIG_SCHEMA = vol.Schema(
         vol.Optional("media_player_entity_ids"): vol.All(list, [str]),
         vol.Optional("voice_device_entity_ids"): vol.All(list, [str]),
         vol.Optional("tts_voice"): str,
-        vol.Optional("asset_entity_ids"): vol.All(list, [str]),
+        vol.Optional("tts_language"): str,
+        vol.Optional("ai_knowledge_enabled"): bool,
+        vol.Optional("environment_information_outputs"): vol.All(list, [str]),
+        vol.Optional("device_groups"): list,
+        vol.Optional("asset_groups"): list,
         vol.Optional("room_sensor_entity_ids"): vol.All(list, [str]),
         vol.Optional("room_health_entity_ids"): vol.All(list, [str]),
         vol.Optional("human_health_entity_ids"): vol.All(list, [str]),
         vol.Optional("light_entity_ids"): vol.All(list, [str]),
+        vol.Optional("lamp_entity_ids"): vol.All(list, [str]),
         vol.Optional("shade_entity_ids"): vol.All(list, [str]),
         vol.Optional("speaker_entity_ids"): vol.All(list, [str]),
+        vol.Optional("tv_entity_ids"): vol.All(list, [str]),
         vol.Optional("dashboard_entity_ids"): vol.All(list, [str]),
         vol.Optional("other_entity_ids"): vol.All(list, [str]),
+        vol.Optional("weather_source_entity_ids"): vol.All(list, [str]),
+        vol.Optional("news_source_entity_ids"): vol.All(list, [str]),
         vol.Optional("persona"): str,
         vol.Optional("persona_prompt"): str,
     }
@@ -127,9 +173,17 @@ SERVICE_UPDATE_COMPOSITE_CONFIG_SCHEMA = vol.Schema(
         vol.Optional("area_ids"): vol.All(list, [str]),
         vol.Optional("primary_area"): str,
         vol.Optional("enabled"): bool,
+        vol.Optional("posture"): str,
         vol.Optional("media_player_entity_ids"): vol.All(list, [str]),
         vol.Optional("voice_device_entity_ids"): vol.All(list, [str]),
-        vol.Optional("asset_entity_ids"): vol.All(list, [str]),
+        vol.Optional("tts_voice"): str,
+        vol.Optional("tts_language"): str,
+        vol.Optional("device_groups"): list,
+        vol.Optional("persona"): str,
+        vol.Optional("persona_prompt"): str,
+        vol.Optional("ai_knowledge_enabled"): bool,
+        vol.Optional("environment_information_outputs"): vol.All(list, [str]),
+        vol.Optional("asset_groups"): list,
         vol.Optional("room_sensor_entity_ids"): vol.All(list, [str]),
         vol.Optional("room_health_entity_ids"): vol.All(list, [str]),
         vol.Optional("human_health_entity_ids"): vol.All(list, [str]),
@@ -138,6 +192,8 @@ SERVICE_UPDATE_COMPOSITE_CONFIG_SCHEMA = vol.Schema(
         vol.Optional("speaker_entity_ids"): vol.All(list, [str]),
         vol.Optional("dashboard_entity_ids"): vol.All(list, [str]),
         vol.Optional("other_entity_ids"): vol.All(list, [str]),
+        vol.Optional("weather_source_entity_ids"): vol.All(list, [str]),
+        vol.Optional("news_source_entity_ids"): vol.All(list, [str]),
     }
 )
 SERVICE_SYNC_COMPOSITES_SCHEMA = vol.Schema(
@@ -158,6 +214,7 @@ SERVICE_PREVIEW_TTS_VOICE_SCHEMA = vol.Schema(
         vol.Required("provider"): str,
         vol.Required("media_player_entity_id"): vol.All(list, [str]),
         vol.Optional("voice"): str,
+        vol.Optional("language"): str,
         vol.Optional(
             "message",
             default="Welcome to Concierge, where I will be able to help you in every room of your home",
@@ -186,6 +243,14 @@ SERVICE_UPDATE_PERSON_PROFILE_SCHEMA = vol.Schema(
         vol.Optional("aqara_presence_entity_ids", default=[]): vol.All(list, [str]),
         vol.Optional("voice_profile_id"): str,
         vol.Optional("consent", default={}): dict,
+        vol.Optional("mobile_notify_targets", default=[]): vol.All(list, [str]),
+        vol.Optional("preferred_mobile_target"): str,
+        vol.Optional("mobile_voice_endpoint_enabled", default=False): bool,
+        vol.Optional("is_minor", default=False): bool,
+        vol.Optional("guardian_controls_required", default=False): bool,
+        vol.Optional("minor_allow_general_qna", default=False): bool,
+        vol.Optional("minor_allowed_intent_classes", default=[]): vol.All(list, [str]),
+        vol.Optional("minor_content_filter_level", default="strict"): str,
         vol.Optional("notes", default=""): str,
         vol.Optional("set_as_default", default=False): bool,
     }
@@ -199,8 +264,61 @@ SERVICE_UPDATE_VOICE_PROFILE_SCHEMA = vol.Schema(
         vol.Optional("enrollment_source", default=""): str,
         vol.Optional("speaker_embedding_id", default=""): str,
         vol.Optional("sample_count", default=0): int,
+        vol.Optional("sample_items", default=[]): vol.All(list, [dict]),
+        vol.Optional("attribution_confidence"): vol.Coerce(float),
+        vol.Optional("enrollment_started_at", default=""): str,
+        vol.Optional("last_sample_at", default=""): str,
+        vol.Optional("last_built_at", default=""): str,
+        vol.Optional("disabled", default=False): bool,
         vol.Optional("consent", default={}): dict,
         vol.Optional("set_as_default", default=False): bool,
+    }
+)
+SERVICE_START_VOICE_ENROLLMENT_SCHEMA = vol.Schema(
+    {
+        vol.Required("person_id"): str,
+        vol.Optional("voice_profile_id"): str,
+        vol.Optional("voice_name"): str,
+        vol.Optional("consent_acknowledged", default=False): bool,
+        vol.Optional("local_only", default=True): bool,
+    }
+)
+SERVICE_CAPTURE_VOICE_ENROLLMENT_SAMPLE_SCHEMA = vol.Schema(
+    {
+        vol.Required("voice_profile_id"): str,
+        vol.Required("speech_text"): str,
+        vol.Optional("source", default="guided_phrase"): str,
+        vol.Optional("quality_score"): vol.Coerce(float),
+        vol.Optional("recording_path"): str,
+        vol.Optional("recording_mime_type"): str,
+        vol.Optional("recording_size_bytes"): int,
+        vol.Optional("recording_duration_ms"): int,
+        vol.Optional("phrase_index"): int,
+    }
+)
+SERVICE_REMOVE_VOICE_ENROLLMENT_SAMPLE_SCHEMA = vol.Schema(
+    {
+        vol.Required("voice_profile_id"): str,
+        vol.Required("sample_id"): str,
+    }
+)
+SERVICE_BUILD_VOICE_PROFILE_SCHEMA = vol.Schema(
+    {
+        vol.Required("voice_profile_id"): str,
+        vol.Optional("person_id"): str,
+        vol.Optional("min_samples", default=3): vol.All(int, vol.Range(min=1, max=50)),
+    }
+)
+SERVICE_RESET_VOICE_PROFILE_SCHEMA = vol.Schema(
+    {
+        vol.Required("voice_profile_id"): str,
+        vol.Optional("preserve_consent", default=True): bool,
+    }
+)
+SERVICE_DELETE_VOICE_PROFILE_SCHEMA = vol.Schema(
+    {
+        vol.Required("voice_profile_id"): str,
+        vol.Optional("unlink_from_people", default=True): bool,
     }
 )
 SERVICE_SYNC_ROOMS_SCHEMA = vol.Schema(
@@ -216,18 +334,673 @@ SERVICE_REFRESH_ENTITY_STRUCTURE_SCHEMA = vol.Schema(
         vol.Optional("remove_missing", default=True): bool,
     }
 )
-
-TTS_PROVIDER_ENTITY_IDS = {
-    "openai_conversation": "tts.openai_tts",
-    "google_translate": "tts.google_translate_en_com",
-}
-
+SERVICE_RECORD_ACTIVITY_EVENT_SCHEMA = vol.Schema(
+    {
+        vol.Required("activity_id"): str,
+        vol.Required("correlation_id"): str,
+        vol.Required("started_at"): str,
+        vol.Required("channel"): str,
+        vol.Required("actor_class"): str,
+        vol.Required("intent_class"): str,
+        vol.Optional("request_summary", default=""): str,
+        vol.Optional("resolved_person_id"): str,
+        vol.Optional("resolved_area_id"): str,
+        vol.Optional("confidence"): vol.Coerce(float),
+        vol.Optional("external_refs", default=[]): vol.All(list, [dict]),
+    }
+)
+SERVICE_CLOSE_ACTIVITY_OUTCOME_SCHEMA = vol.Schema(
+    {
+        vol.Required("activity_id"): str,
+        vol.Required("ended_at"): str,
+        vol.Required("outcome"): str,
+        vol.Optional("outcome_reason", default=""): str,
+        vol.Optional("actions_taken", default=[]): vol.All(list, [str]),
+        vol.Optional("policy_gates", default=[]): vol.All(list, [str]),
+    }
+)
+SERVICE_GET_ACTIVITY_TIMELINE_SCHEMA = vol.Schema(
+    {
+        vol.Optional("start"): str,
+        vol.Optional("end"): str,
+        vol.Optional("actor_class"): str,
+        vol.Optional("person_id"): str,
+        vol.Optional("area_id"): str,
+        vol.Optional("channel"): str,
+    }
+)
+SERVICE_EXPORT_ACTIVITY_ARCHIVE_SCHEMA = vol.Schema(
+    {
+        vol.Optional("start"): str,
+        vol.Optional("end"): str,
+        vol.Optional("destination"): str,
+        vol.Optional("include_reference_excerpts"): bool,
+    }
+)
+SERVICE_RESOLVE_MOBILE_CONTEXT_SCHEMA = vol.Schema(
+    {
+        vol.Optional("mobile_target_id"): str,
+        vol.Optional("person_id"): str,
+        vol.Optional("request_text", default=""): str,
+    }
+)
+SERVICE_PUSH_PERSON_MESSAGE_SCHEMA = vol.Schema(
+    {
+        vol.Required("person_id"): str,
+        vol.Required("message"): str,
+        vol.Optional("title", default="Concierge"): str,
+        vol.Optional("target_id"): str,
+        vol.Optional("data", default={}): dict,
+    }
+)
 
 def _resolve_target_from_alias(target: str, area_id: str | None, aliases: dict[str, str]) -> str:
     """Resolve execution alias to concrete target string if configured."""
     if area_id and target in aliases:
         return aliases[target]
     return target
+
+
+def _sanitize_request_summary(actor_class: str, request_summary: str) -> str:
+    """Apply guest/minor audit minimization to request summaries."""
+    if actor_class in {"guest", "minor"}:
+        return ""
+    return request_summary
+
+
+def _new_activity_id(prefix: str) -> str:
+    """Return a stable unique activity identifier."""
+    return f"{prefix}_{int(datetime.now(timezone.utc).timestamp() * 1000)}_{uuid4().hex[:8]}"
+
+
+def _safe_outcome_reason(err: Exception) -> str:
+    """Return compact outcome reason text suitable for activity timelines."""
+    text = str(err or "").strip()
+    return text[:500]
+
+
+def _area_name(hass: HomeAssistant, area_id: str | None) -> str:
+    """Resolve area label for timeline summaries."""
+    if not area_id:
+        return "room"
+    area = ar.async_get(hass).async_get_area(area_id)
+    if area is None:
+        return area_id
+    return area.name or area_id
+
+
+async def _async_with_activity(
+    hass: HomeAssistant,
+    call: ServiceCall,
+    *,
+    intent_class: str,
+    request_summary: str,
+    action_name: str,
+    resolved_area_id: str | None = None,
+    resolved_person_id: str | None = None,
+    channel: str = "service_call",
+    actor_class: str = "concierge",
+    confidence: float = 1.0,
+    external_refs: list[dict[str, Any]] | None = None,
+    policy_gates: list[str] | None = None,
+    runner: Callable[[], Awaitable[dict[str, Any]]],
+) -> dict[str, Any]:
+    """Wrap one service action with backend-authored activity lifecycle logging."""
+    storage = ConciergeStorage(hass)
+    started_at = datetime.now(timezone.utc).isoformat()
+    activity_id = _new_activity_id(intent_class)
+
+    await storage.async_record_activity_event(
+        ActivityEvent(
+            activity_id=activity_id,
+            correlation_id=activity_id,
+            started_at=started_at,
+            channel=channel,
+            actor_class=actor_class,
+            intent_class=intent_class,
+            request_summary=_sanitize_request_summary(actor_class, request_summary),
+            resolved_person_id=resolved_person_id,
+            resolved_area_id=resolved_area_id,
+            confidence=confidence,
+            external_refs=list(external_refs or []),
+        )
+    )
+
+    try:
+        result = await runner()
+    except vol.Invalid as err:
+        reason = _safe_outcome_reason(err)
+        deny_policy = list(policy_gates or [])
+        if "minor_policy_denied" in reason and "minor_policy" not in deny_policy:
+            deny_policy.append("minor_policy")
+        await storage.async_close_activity_event(
+            activity_id=activity_id,
+            ended_at=datetime.now(timezone.utc).isoformat(),
+            outcome="policy_denied",
+            outcome_reason=reason,
+            actions_taken=[action_name],
+            policy_gates=deny_policy,
+        )
+        raise
+    except Exception as err:
+        await storage.async_close_activity_event(
+            activity_id=activity_id,
+            ended_at=datetime.now(timezone.utc).isoformat(),
+            outcome="error",
+            outcome_reason=_safe_outcome_reason(err),
+            actions_taken=[action_name],
+            policy_gates=list(policy_gates or []),
+        )
+        raise
+
+    await storage.async_close_activity_event(
+        activity_id=activity_id,
+        ended_at=datetime.now(timezone.utc).isoformat(),
+        outcome="success",
+        outcome_reason="",
+        actions_taken=[action_name],
+        policy_gates=list(policy_gates or []),
+    )
+    return result
+
+
+ROOM_CONFIG_LIST_FIELDS: tuple[str, ...] = (
+    "device_groups",
+    "media_player_entity_ids",
+    "voice_device_entity_ids",
+    "asset_groups",
+    "room_sensor_entity_ids",
+    "room_health_entity_ids",
+    "human_health_entity_ids",
+    "light_entity_ids",
+    "lamp_entity_ids",
+    "shade_entity_ids",
+    "speaker_entity_ids",
+    "tv_entity_ids",
+    "dashboard_entity_ids",
+    "other_entity_ids",
+    "weather_source_entity_ids",
+    "news_source_entity_ids",
+    "environment_information_outputs",
+)
+
+ROOM_DEVICE_ACTIVITY_FIELDS: tuple[str, ...] = (
+    "device_groups",
+    "media_player_entity_ids",
+    "voice_device_entity_ids",
+    "light_entity_ids",
+    "lamp_entity_ids",
+    "shade_entity_ids",
+    "speaker_entity_ids",
+    "tv_entity_ids",
+    "room_sensor_entity_ids",
+)
+
+ROOM_INFO_ACTIVITY_FIELDS: tuple[str, ...] = (
+    "weather_source_entity_ids",
+    "news_source_entity_ids",
+    "asset_groups",
+    "environment_information_outputs",
+    "ai_knowledge_enabled",
+)
+
+
+def _label_for_activity_item(hass: HomeAssistant, value: str) -> str:
+    """Return friendly label for a diff item value."""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if "." in text:
+        state = hass.states.get(text)
+        if state is not None:
+            return str(state.attributes.get("friendly_name") or state.name or text)
+    return text
+
+
+def _asset_group_diff_key(group: Any) -> str:
+    """Build a stable comparison key for an asset group."""
+    if not isinstance(group, dict):
+        return json.dumps(group, sort_keys=True, separators=(",", ":"), default=str)
+
+    normalized = {
+        "group_name": str(group.get("group_name", "")).strip(),
+        "device_ids": sorted(
+            [str(device_id).strip() for device_id in group.get("device_ids", []) if str(device_id).strip()]
+        ),
+    }
+    return json.dumps(normalized, sort_keys=True, separators=(",", ":"))
+
+
+def _device_group_diff_key(group: Any) -> str:
+    """Build a stable comparison key for a room device group."""
+    if not isinstance(group, dict):
+        return json.dumps(group, sort_keys=True, separators=(",", ":"), default=str)
+
+    normalized = {
+        "group_name": str(group.get("group_name", "")).strip(),
+        "entity_ids": sorted(
+            [str(entity_id).strip() for entity_id in group.get("entity_ids", []) if str(entity_id).strip()]
+        ),
+    }
+    return json.dumps(normalized, sort_keys=True, separators=(",", ":"))
+
+
+def _device_group_diff_label(group: Any) -> str:
+    """Build a readable label for a room device group diff entry."""
+    if not isinstance(group, dict):
+        return str(group or "").strip()
+
+    group_name = str(group.get("group_name", "")).strip()
+    entity_ids = [str(entity_id).strip() for entity_id in group.get("entity_ids", []) if str(entity_id).strip()]
+
+    details: list[str] = []
+    if group_name:
+        details.append(group_name)
+    if entity_ids:
+        details.append(f"entities: {', '.join(entity_ids)}")
+    return " | ".join(details) if details else "device group"
+
+
+def _asset_group_diff_label(group: Any) -> str:
+    """Build a readable label for an asset group diff entry."""
+    if not isinstance(group, dict):
+        return str(group or "").strip()
+
+    group_name = str(group.get("group_name", "")).strip()
+    device_ids = [str(device_id).strip() for device_id in group.get("device_ids", []) if str(device_id).strip()]
+
+    details: list[str] = []
+    if group_name:
+        details.append(group_name)
+    if device_ids:
+        details.append(f"devices: {', '.join(device_ids)}")
+    return " | ".join(details) if details else "asset group"
+
+
+def _build_room_config_diff(
+    hass: HomeAssistant,
+    before_room: Any,
+    after_room: Any,
+    changed_keys: set[str],
+) -> list[dict[str, Any]]:
+    """Compute backend-authored room-config diff payload for timeline details."""
+    changes: list[dict[str, Any]] = []
+
+    for field in ROOM_CONFIG_LIST_FIELDS:
+        if field not in changed_keys:
+            continue
+        before_raw = list(getattr(before_room, field, []) or []) if before_room is not None else []
+        after_raw = list(getattr(after_room, field, []) or []) if after_room is not None else []
+
+        if field == "asset_groups":
+            before_values = {_asset_group_diff_key(item): item for item in before_raw}
+            after_values = {_asset_group_diff_key(item): item for item in after_raw}
+            added_values = [after_values[key] for key in sorted(after_values.keys() - before_values.keys())]
+            removed_values = [before_values[key] for key in sorted(before_values.keys() - after_values.keys())]
+        elif field == "device_groups":
+            before_values = {_device_group_diff_key(item): item for item in before_raw}
+            after_values = {_device_group_diff_key(item): item for item in after_raw}
+            added_values = [after_values[key] for key in sorted(after_values.keys() - before_values.keys())]
+            removed_values = [before_values[key] for key in sorted(before_values.keys() - after_values.keys())]
+        else:
+            before_values = {str(item).strip() for item in before_raw if str(item).strip()}
+            after_values = {str(item).strip() for item in after_raw if str(item).strip()}
+            added_values = sorted(after_values - before_values)
+            removed_values = sorted(before_values - after_values)
+        if not added_values and not removed_values:
+            continue
+        changes.append(
+            {
+                "field": field,
+                "added": [
+                    {
+                        "entity_id": value if isinstance(value, str) else (_device_group_diff_key(value) if field == "device_groups" else _asset_group_diff_key(value)),
+                        "label": (
+                            _device_group_diff_label(value)
+                            if field == "device_groups"
+                            else (_asset_group_diff_label(value) if field == "asset_groups" else _label_for_activity_item(hass, value))
+                        ),
+                    }
+                    for value in added_values
+                ],
+                "removed": [
+                    {
+                        "entity_id": value if isinstance(value, str) else (_device_group_diff_key(value) if field == "device_groups" else _asset_group_diff_key(value)),
+                        "label": (
+                            _device_group_diff_label(value)
+                            if field == "device_groups"
+                            else (_asset_group_diff_label(value) if field == "asset_groups" else _label_for_activity_item(hass, value))
+                        ),
+                    }
+                    for value in removed_values
+                ],
+            }
+        )
+
+    if "ai_knowledge_enabled" in changed_keys:
+        before_ai = bool(getattr(before_room, "ai_knowledge_enabled", False)) if before_room is not None else False
+        after_ai = bool(getattr(after_room, "ai_knowledge_enabled", False)) if after_room is not None else False
+        if before_ai != after_ai:
+            changes.append(
+                {
+                    "field": "ai_knowledge_enabled",
+                    "added": ([{"entity_id": "ai_knowledge_enabled", "label": "Enable AI Knowledge"}] if after_ai else []),
+                    "removed": ([{"entity_id": "ai_knowledge_enabled", "label": "Enable AI Knowledge"}] if not after_ai else []),
+                }
+            )
+
+    for scalar_field in ("persona", "persona_prompt", "tts_voice", "tts_language", "posture"):
+        if scalar_field not in changed_keys:
+            continue
+        before_value = "" if before_room is None else str(getattr(before_room, scalar_field, "") or "")
+        after_value = "" if after_room is None else str(getattr(after_room, scalar_field, "") or "")
+        if before_value == after_value:
+            continue
+        changes.append(
+            {
+                "field": scalar_field,
+                "added": ([{"entity_id": after_value, "label": after_value}] if after_value else []),
+                "removed": ([{"entity_id": before_value, "label": before_value}] if before_value else []),
+            }
+        )
+
+    return changes
+
+
+def _summarize_room_update(area_name: str, changed_keys: set[str], diff_changes: list[dict[str, Any]]) -> str:
+    """Create concise room update summary text for timeline rows."""
+    room_name = area_name or "room"
+    changed_device = bool(set(changed_keys) & set(ROOM_DEVICE_ACTIVITY_FIELDS))
+    changed_info = bool(set(changed_keys) & set(ROOM_INFO_ACTIVITY_FIELDS))
+    changed_persona = bool(set(changed_keys) & {"persona", "persona_prompt", "tts_voice", "tts_language", "posture"})
+
+    added_count = sum(len(change.get("added", [])) for change in diff_changes)
+    removed_count = sum(len(change.get("removed", [])) for change in diff_changes)
+
+    if changed_device:
+        if added_count > 0 and removed_count == 0:
+            return f"Concierge devices added to the {room_name}"
+        if removed_count > 0 and added_count == 0:
+            return f"Concierge devices removed from the {room_name}"
+        return f"Room Devices changed for the {room_name}"
+    if changed_info:
+        return f"Information Sources changed for the {room_name}"
+    if changed_persona:
+        return f"Room Persona changed for the {room_name}"
+    return f"Room configuration changed for the {room_name}"
+
+
+def _active_mobile_targets(profile: PersonProfile) -> list[str]:
+    """Return enabled mobile notify targets for a person profile."""
+    return [target for target in profile.mobile_notify_targets if isinstance(target, str) and target]
+
+
+def _select_mobile_target(profile: PersonProfile, requested_target: str | None = None) -> str:
+    """Choose a valid mobile target for a person using profile defaults."""
+    targets = _active_mobile_targets(profile)
+    if not targets:
+        raise vol.Invalid("person has no enabled mobile targets")
+
+    if requested_target:
+        if requested_target not in targets:
+            raise vol.Invalid("target_id is not enabled for this person")
+        return requested_target
+
+    if profile.preferred_mobile_target and profile.preferred_mobile_target in targets:
+        return profile.preferred_mobile_target
+
+    return targets[0]
+
+
+def _parse_iso_datetime(value: str | None) -> datetime | None:
+    """Parse ISO datetime strings while tolerating trailing Z timezone marker."""
+    if not value:
+        return None
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _voice_profile_id_for_person(person_id: str) -> str:
+    """Build a stable voice profile identifier from a person entity id."""
+    normalized = str(person_id or "").strip().lower().replace(".", "_").replace(" ", "_")
+    normalized = "".join(ch for ch in normalized if ch.isalnum() or ch in {"_", "-"})
+    return f"{normalized or 'person'}_voice"
+
+
+def _voice_confidence_for_sample_count(sample_count: int) -> float:
+    """Return deterministic confidence estimate based on captured sample count."""
+    bounded = max(0, int(sample_count))
+    return min(0.95, 0.55 + (0.05 * bounded))
+
+
+def _voice_sample_recording_paths(sample_items: list[dict[str, Any]]) -> list[Path]:
+    """Return safe attached-storage recording paths referenced by voice sample metadata."""
+    paths: list[Path] = []
+    for sample in sample_items:
+        raw_path = str(sample.get("recording_path", "") or "").strip()
+        if not raw_path:
+            continue
+        try:
+            path = Path(raw_path)
+        except (TypeError, ValueError):
+            continue
+        normalized = str(path).replace("\\", "/")
+        if not (normalized.startswith("/media/") or normalized.startswith("/share/")):
+            continue
+        paths.append(path)
+    return paths
+
+
+def _delete_voice_recordings(paths: list[Path]) -> None:
+    """Delete captured raw-audio files and prune empty parent folders when possible."""
+    for path in paths:
+        try:
+            if path.exists() and path.is_file():
+                path.unlink()
+        except OSError:
+            continue
+
+        parent = path.parent
+        for _ in range(3):
+            try:
+                if not parent.exists():
+                    break
+                parent.rmdir()
+            except OSError:
+                break
+            parent = parent.parent
+
+
+def _event_matches_filters(event: ActivityEvent, call: ServiceCall) -> bool:
+    """Apply timeline filters to one activity event."""
+    start_dt = _parse_iso_datetime(call.data.get("start"))
+    end_dt = _parse_iso_datetime(call.data.get("end"))
+    event_start = _parse_iso_datetime(event.started_at)
+
+    if start_dt and event_start and event_start < start_dt:
+        return False
+    if end_dt and event_start and event_start > end_dt:
+        return False
+    if call.data.get("actor_class") and event.actor_class != call.data["actor_class"]:
+        return False
+    if call.data.get("person_id") and event.resolved_person_id != call.data["person_id"]:
+        return False
+    if call.data.get("area_id") and event.resolved_area_id != call.data["area_id"]:
+        return False
+    if call.data.get("channel") and event.channel != call.data["channel"]:
+        return False
+    return True
+
+
+def _archive_destination_path(destination_uri: str) -> Path:
+    """Resolve configured archive destination URI to a local/UNC path."""
+    raw = destination_uri.strip()
+    if not raw:
+        raise vol.Invalid("archive destination is required")
+
+    if raw.lower().startswith("file://"):
+        parsed = urlparse(raw)
+        path_value = unquote(parsed.path or "")
+        if parsed.netloc:
+            path_value = f"//{parsed.netloc}{path_value}"
+        return Path(path_value)
+
+    # Accept UNC-style //server/share and Windows drive paths.
+    return Path(raw)
+
+
+def _serialize_activity(event: ActivityEvent, include_reference_excerpts: bool) -> dict[str, Any]:
+    """Project activity event to stable payload for timeline/archive outputs."""
+    payload = {
+        "activity_id": event.activity_id,
+        "correlation_id": event.correlation_id,
+        "started_at": event.started_at,
+        "ended_at": event.ended_at,
+        "channel": event.channel,
+        "actor_class": event.actor_class,
+        "intent_class": event.intent_class,
+        "request_summary": _sanitize_request_summary(event.actor_class, event.request_summary),
+        "resolved_person_id": event.resolved_person_id,
+        "resolved_area_id": event.resolved_area_id,
+        "confidence": event.confidence,
+        "outcome": event.outcome,
+        "outcome_reason": event.outcome_reason,
+        "actions_taken": list(event.actions_taken),
+        "policy_gates": list(event.policy_gates),
+    }
+    payload["external_refs"] = list(event.external_refs) if include_reference_excerpts else []
+    return payload
+
+
+def _effective_minor_fields(call: ServiceCall) -> tuple[bool, bool, list[str], str, bool, bool]:
+    """Resolve explicit minor policy fields with consent fallback for UI compatibility."""
+    consent = dict(call.data.get("consent", {}))
+    classification = consent.get("household_classification", {}) if isinstance(consent, dict) else {}
+    minor_policy = consent.get("minor_interaction_policy", {}) if isinstance(consent, dict) else {}
+    targets = consent.get("interaction_targets", {}) if isinstance(consent, dict) else {}
+
+    is_minor = bool(call.data.get("is_minor", classification.get("is_minor", False)))
+    guardian_controls_required = bool(
+        call.data.get(
+            "guardian_controls_required",
+            classification.get("guardian_controls_required", is_minor),
+        )
+    )
+    minor_allow_general_qna = bool(
+        call.data.get(
+            "minor_allow_general_qna",
+            minor_policy.get("allow_general_qna", False),
+        )
+    )
+    minor_allowed_intent_classes = list(
+        call.data.get(
+            "minor_allowed_intent_classes",
+            minor_policy.get("allowed_intent_classes", ["room_context_info", "household_help"]),
+        )
+    )
+    minor_content_filter_level = str(
+        call.data.get(
+            "minor_content_filter_level",
+            minor_policy.get("enforce_content_filter_level", "strict"),
+        )
+    )
+    mobile_voice_endpoint_enabled = bool(
+        call.data.get(
+            "mobile_voice_endpoint_enabled",
+            targets.get("mobile_voice_endpoint_enabled", False),
+        )
+    )
+
+    return (
+        is_minor,
+        guardian_controls_required,
+        minor_allowed_intent_classes,
+        minor_content_filter_level,
+        minor_allow_general_qna,
+        mobile_voice_endpoint_enabled,
+    )
+
+
+def _resolve_integration_capabilities(hass: HomeAssistant) -> dict[str, bool]:
+    """Resolve Concierge capability flags from config entry options/data."""
+    entries = hass.config_entries.async_entries(DOMAIN)
+    if not entries:
+        return {
+            "cap_ai": False,
+            "cap_tts": False,
+            "cap_persona": False,
+            "cap_assets": False,
+            "cap_voice_enrollment": False,
+            "cap_extended_history": False,
+        }
+
+    entry = entries[0]
+    options = entry.options
+    data = entry.data
+
+    ai_enabled = bool(options.get("ai_enabled", data.get("ai_enabled", False)))
+    action_provider = str(
+        options.get("action_provider", data.get("action_provider", _PROVIDER_NONE))
+        or _PROVIDER_NONE
+    ).strip() or _PROVIDER_NONE
+    tts_enabled = bool(options.get("tts_enabled", data.get("tts_enabled", False)))
+    tts_provider = str(
+        options.get("tts_provider", data.get("tts_provider", _PROVIDER_NONE))
+        or _PROVIDER_NONE
+    ).strip() or _PROVIDER_NONE
+    asset_intelligence_provider = str(
+        options.get(
+            "asset_intelligence_provider",
+            data.get("asset_intelligence_provider", _PROVIDER_NONE),
+        )
+        or _PROVIDER_NONE
+    ).strip() or _PROVIDER_NONE
+
+    archive_options = archive_options_from_entry(entry)
+    cap_ai = bool(ai_enabled and action_provider != _PROVIDER_NONE)
+    cap_tts = bool(tts_enabled and tts_provider != _PROVIDER_NONE)
+    cap_persona = bool(cap_ai or cap_tts)
+    cap_assets = bool(asset_intelligence_provider == _PROVIDER_ASSET_INTELLIGENCE)
+    cap_voice_enrollment = bool(
+        archive_options.get("destination_configured") and archive_options.get("archive_enabled")
+    )
+    cap_extended_history = bool(
+        archive_options.get("destination_configured") and archive_options.get("archive_enabled")
+    )
+
+    return {
+        "cap_ai": cap_ai,
+        "cap_tts": cap_tts,
+        "cap_persona": cap_persona,
+        "cap_assets": cap_assets,
+        "cap_voice_enrollment": cap_voice_enrollment,
+        "cap_extended_history": cap_extended_history,
+    }
+
+
+def _enforce_minor_intent_policy(
+    *,
+    state,
+    person_id: str | None,
+    intent_class: str,
+) -> None:
+    """Block disallowed intent classes for minors based on configured person policy."""
+    if not person_id:
+        return
+    profile = state.person_profiles.get(person_id)
+    if profile is None or not profile.is_minor:
+        return
+
+    allowed = set(profile.minor_allowed_intent_classes)
+    if intent_class == "general_qna" and not profile.minor_allow_general_qna:
+        raise vol.Invalid("minor_policy_denied: general_qna_disabled")
+
+    if allowed and intent_class not in allowed and not (
+        intent_class == "general_qna" and profile.minor_allow_general_qna
+    ):
+        raise vol.Invalid("minor_policy_denied: intent_class_not_allowed")
 
 
 async def _async_handle_execute(hass: HomeAssistant, call: ServiceCall) -> dict[str, Any]:
@@ -243,50 +1016,92 @@ async def _async_handle_execute(hass: HomeAssistant, call: ServiceCall) -> dict[
         room.aliases if room else {},
     )
 
-    if resolved_target.startswith("scene."):
-        domain = "scene"
-        service = "turn_on"
-        data: dict[str, Any] = {"entity_id": resolved_target}
-    elif resolved_target.startswith("script."):
-        domain = "script"
-        service = "turn_on"
-        data = {"entity_id": resolved_target}
-    else:
-        domain = "homeassistant"
-        service = "turn_on"
-        data = {"entity_id": resolved_target}
+    async def _runner() -> dict[str, Any]:
+        _enforce_minor_intent_policy(
+            state=state,
+            person_id=call.data.get("person_id"),
+            intent_class=call.data.get("intent_class", "home_control"),
+        )
 
-    await hass.services.async_call(domain, service, data, blocking=True)
+        if resolved_target.startswith("scene."):
+            domain = "scene"
+            service = "turn_on"
+            data: dict[str, Any] = {"entity_id": resolved_target}
+        elif resolved_target.startswith("script."):
+            domain = "script"
+            service = "turn_on"
+            data = {"entity_id": resolved_target}
+        else:
+            domain = "homeassistant"
+            service = "turn_on"
+            data = {"entity_id": resolved_target}
 
-    payload = {
-        "target": call.data["target"],
-        "resolved_target": resolved_target,
-        "area_id": area_id,
-        "composite_id": call.data.get("composite_id"),
-        "context": call.data.get("context", {}),
-    }
-    hass.bus.async_fire(EVENT_EXECUTION, payload)
-    return {"executed": True, "resolved_target": resolved_target}
+        await hass.services.async_call(domain, service, data, blocking=True)
+
+        payload = {
+            "target": call.data["target"],
+            "resolved_target": resolved_target,
+            "area_id": area_id,
+            "composite_id": call.data.get("composite_id"),
+            "context": call.data.get("context", {}),
+        }
+        hass.bus.async_fire(EVENT_EXECUTION, payload)
+        return {"executed": True, "resolved_target": resolved_target}
+
+    return await _async_with_activity(
+        hass,
+        call,
+        intent_class="execute_orchestration",
+        request_summary=f"Execute request for {_area_name(hass, area_id)}",
+        action_name="execute",
+        resolved_area_id=area_id,
+        resolved_person_id=call.data.get("person_id"),
+        channel="service_execute",
+        external_refs=[{"ref_type": "execute_target", "target": call.data["target"], "resolved_target": resolved_target}],
+        runner=_runner,
+    )
 
 
 async def _async_handle_execute_direct(hass: HomeAssistant, call: ServiceCall) -> dict[str, Any]:
     """Execute a direct service/entity action without orchestration."""
+    storage = ConciergeStorage(hass)
+    state = await storage.async_load_state()
     service_ref = call.data["service"]
-    if "." not in service_ref:
-        raise vol.Invalid("service must be in domain.service format")
 
-    domain, service = service_ref.split(".", 1)
-    data: dict[str, Any] = {"entity_id": call.data["entity_id"]}
-    data.update(call.data.get("data", {}))
-    await hass.services.async_call(domain, service, data, blocking=True)
+    async def _runner() -> dict[str, Any]:
+        _enforce_minor_intent_policy(
+            state=state,
+            person_id=call.data.get("person_id"),
+            intent_class=call.data.get("intent_class", "home_control"),
+        )
 
-    payload = {
-        "entity_id": call.data["entity_id"],
-        "service": service_ref,
-        "data": call.data.get("data", {}),
-    }
-    hass.bus.async_fire(EVENT_EXECUTION, payload)
-    return {"executed": True}
+        if "." not in service_ref:
+            raise vol.Invalid("service must be in domain.service format")
+
+        domain, service = service_ref.split(".", 1)
+        data: dict[str, Any] = {"entity_id": call.data["entity_id"]}
+        data.update(call.data.get("data", {}))
+        await hass.services.async_call(domain, service, data, blocking=True)
+
+        payload = {
+            "entity_id": call.data["entity_id"],
+            "service": service_ref,
+            "data": call.data.get("data", {}),
+        }
+        hass.bus.async_fire(EVENT_EXECUTION, payload)
+        return {"executed": True}
+
+    return await _async_with_activity(
+        hass,
+        call,
+        intent_class="execute_direct",
+        request_summary=f"Direct execution request for {call.data.get('entity_id', 'entity')}",
+        action_name="execute_direct",
+        resolved_person_id=call.data.get("person_id"),
+        channel="service_execute",
+        external_refs=[{"ref_type": "execute_direct", "entity_id": call.data.get("entity_id"), "service": service_ref}],
+        runner=_runner,
+    )
 
 
 async def _async_handle_get_interactions(hass: HomeAssistant, call: ServiceCall) -> dict[str, Any]:
@@ -315,24 +1130,49 @@ async def _async_handle_get_interactions(hass: HomeAssistant, call: ServiceCall)
 
 async def _async_handle_update_interaction(hass: HomeAssistant, call: ServiceCall) -> dict[str, Any]:
     """Upsert runtime interaction state."""
-    storage = ConciergeStorage(hass)
-    interaction = Interaction(
-        interaction_id=call.data["interaction_id"],
-        area_id=call.data.get("area_id"),
-        message=call.data["message"],
-        level=call.data.get("level", "info"),
-        state=call.data.get("state", "active"),
-        priority=int(call.data.get("priority", 0)),
+    async def _runner() -> dict[str, Any]:
+        storage = ConciergeStorage(hass)
+        interaction = Interaction(
+            interaction_id=call.data["interaction_id"],
+            area_id=call.data.get("area_id"),
+            message=call.data["message"],
+            level=call.data.get("level", "info"),
+            state=call.data.get("state", "active"),
+            priority=int(call.data.get("priority", 0)),
+        )
+        state = await storage.async_upsert_interaction(interaction)
+        return {"interaction_count": len(state.interactions)}
+
+    return await _async_with_activity(
+        hass,
+        call,
+        intent_class="update_interaction",
+        request_summary="Interaction state updated",
+        action_name="update_interaction",
+        resolved_area_id=call.data.get("area_id"),
+        channel="service_mutation",
+        external_refs=[{"ref_type": "interaction", "interaction_id": call.data.get("interaction_id")}],
+        runner=_runner,
     )
-    state = await storage.async_upsert_interaction(interaction)
-    return {"interaction_count": len(state.interactions)}
 
 
 async def _async_handle_clear_interaction(hass: HomeAssistant, call: ServiceCall) -> dict[str, Any]:
     """Remove an interaction from runtime state."""
-    storage = ConciergeStorage(hass)
-    state = await storage.async_remove_interaction(call.data["interaction_id"])
-    return {"interaction_count": len(state.interactions)}
+    async def _runner() -> dict[str, Any]:
+        storage = ConciergeStorage(hass)
+        state = await storage.async_remove_interaction(call.data["interaction_id"])
+        return {"interaction_count": len(state.interactions)}
+
+    return await _async_with_activity(
+        hass,
+        call,
+        intent_class="clear_interaction",
+        request_summary="Interaction cleared",
+        action_name="clear_interaction",
+        channel="service_mutation",
+        external_refs=[{"ref_type": "interaction", "interaction_id": call.data.get("interaction_id")}],
+        runner=_runner,
+    )
 
 
 async def _async_handle_get_signal(hass: HomeAssistant, call: ServiceCall) -> dict[str, Any]:
@@ -371,21 +1211,55 @@ async def _async_handle_get_signals(hass: HomeAssistant, call: ServiceCall) -> d
 
 async def _async_handle_update_room_config(hass: HomeAssistant, call: ServiceCall) -> dict[str, Any]:
     """Upsert room configuration with deterministic aliases/overlays."""
+    area_id = call.data["area_id"]
+    changed_keys = {key for key in call.data.keys() if key != "area_id"}
     aliases = call.data.get("aliases")
     global_overlays = call.data.get("global_overlays")
     media_player_entity_ids = call.data.get("media_player_entity_ids")
     voice_device_entity_ids = call.data.get("voice_device_entity_ids")
-    asset_entity_ids = call.data.get("asset_entity_ids")
+    device_groups = call.data.get("device_groups")
+    asset_groups = call.data.get("asset_groups")
     room_sensor_entity_ids = call.data.get("room_sensor_entity_ids")
     room_health_entity_ids = call.data.get("room_health_entity_ids")
     human_health_entity_ids = call.data.get("human_health_entity_ids")
     light_entity_ids = call.data.get("light_entity_ids")
+    lamp_entity_ids = call.data.get("lamp_entity_ids")
     shade_entity_ids = call.data.get("shade_entity_ids")
     speaker_entity_ids = call.data.get("speaker_entity_ids")
+    tv_entity_ids = call.data.get("tv_entity_ids")
     dashboard_entity_ids = call.data.get("dashboard_entity_ids")
     other_entity_ids = call.data.get("other_entity_ids")
+    weather_source_entity_ids = call.data.get("weather_source_entity_ids")
+    news_source_entity_ids = call.data.get("news_source_entity_ids")
+    environment_information_outputs = call.data.get("environment_information_outputs")
     persona = call.data.get("persona")
     persona_prompt = call.data.get("persona_prompt")
+    tts_voice = call.data.get("tts_voice")
+    tts_language = call.data.get("tts_language")
+    ai_knowledge_enabled = call.data.get("ai_knowledge_enabled")
+    capabilities = _resolve_integration_capabilities(hass)
+
+    if not capabilities["cap_ai"] and ai_knowledge_enabled is not None:
+        ai_knowledge_enabled = False
+    if not capabilities["cap_assets"]:
+        if asset_groups is not None:
+            asset_groups = []
+        if environment_information_outputs is not None:
+            environment_information_outputs = []
+    if not capabilities["cap_persona"]:
+        if persona is not None:
+            persona = ""
+        if persona_prompt is not None:
+            persona_prompt = ""
+        if tts_voice is not None:
+            tts_voice = ""
+        if tts_language is not None:
+            tts_language = ""
+    elif not capabilities["cap_tts"]:
+        if tts_voice is not None:
+            tts_voice = ""
+        if tts_language is not None:
+            tts_language = ""
     if aliases is not None and not all(isinstance(v, str) for v in aliases.values()):
         raise vol.Invalid("aliases values must be strings")
     if global_overlays is not None and not all(
@@ -400,40 +1274,131 @@ async def _async_handle_update_room_config(hass: HomeAssistant, call: ServiceCal
         isinstance(v, str) for v in voice_device_entity_ids
     ):
         raise vol.Invalid("voice_device_entity_ids values must be strings")
+    if device_groups is not None and not isinstance(device_groups, list):
+        raise vol.Invalid("device_groups values must be lists")
+    if asset_groups is not None and not isinstance(asset_groups, list):
+        raise vol.Invalid("asset_groups values must be lists")
     for field_name, entity_ids in (
-        ("asset_entity_ids", asset_entity_ids),
         ("room_sensor_entity_ids", room_sensor_entity_ids),
         ("room_health_entity_ids", room_health_entity_ids),
         ("human_health_entity_ids", human_health_entity_ids),
         ("light_entity_ids", light_entity_ids),
+        ("lamp_entity_ids", lamp_entity_ids),
         ("shade_entity_ids", shade_entity_ids),
         ("speaker_entity_ids", speaker_entity_ids),
+        ("tv_entity_ids", tv_entity_ids),
         ("dashboard_entity_ids", dashboard_entity_ids),
         ("other_entity_ids", other_entity_ids),
+        ("weather_source_entity_ids", weather_source_entity_ids),
+        ("news_source_entity_ids", news_source_entity_ids),
+        ("environment_information_outputs", environment_information_outputs),
     ):
         if entity_ids is not None and not all(isinstance(v, str) for v in entity_ids):
             raise vol.Invalid(f"{field_name} values must be strings")
 
     storage = ConciergeStorage(hass)
-    state = await storage.async_update_room_config(
-        area_id=call.data["area_id"],
-        aliases=aliases,
-        global_overlays=global_overlays,
-        posture=call.data.get("posture"),
-        media_player_entity_ids=media_player_entity_ids,
-        voice_device_entity_ids=voice_device_entity_ids,
-        tts_voice=call.data.get("tts_voice"),
-        asset_entity_ids=asset_entity_ids,
-        room_sensor_entity_ids=room_sensor_entity_ids,
-        room_health_entity_ids=room_health_entity_ids,
-        human_health_entity_ids=human_health_entity_ids,
-        light_entity_ids=light_entity_ids,
-        shade_entity_ids=shade_entity_ids,
-        speaker_entity_ids=speaker_entity_ids,
-        dashboard_entity_ids=dashboard_entity_ids,
-        other_entity_ids=other_entity_ids,
-        persona=persona,
-        persona_prompt=persona_prompt,
+    before_state = await storage.async_load_state()
+    before_room = before_state.rooms.get(area_id)
+    started_at = datetime.now(timezone.utc).isoformat()
+    activity_id = _new_activity_id("room_cfg")
+    area_name = _area_name(hass, area_id)
+
+    await storage.async_record_activity_event(
+        ActivityEvent(
+            activity_id=activity_id,
+            correlation_id=activity_id,
+            started_at=started_at,
+            channel="service_mutation",
+            actor_class="concierge",
+            intent_class="room_config_update",
+            request_summary=f"Room configuration update requested for the {area_name}",
+            resolved_area_id=area_id,
+            confidence=1.0,
+            external_refs=[],
+        )
+    )
+
+    try:
+        state = await storage.async_update_room_config(
+            area_id=area_id,
+            aliases=aliases,
+            global_overlays=global_overlays,
+            posture=call.data.get("posture"),
+            media_player_entity_ids=media_player_entity_ids,
+            voice_device_entity_ids=voice_device_entity_ids,
+            tts_voice=tts_voice,
+            tts_language=tts_language,
+            ai_knowledge_enabled=ai_knowledge_enabled,
+            environment_information_outputs=environment_information_outputs,
+            device_groups=device_groups,
+            asset_groups=asset_groups,
+            room_sensor_entity_ids=room_sensor_entity_ids,
+            room_health_entity_ids=room_health_entity_ids,
+            human_health_entity_ids=human_health_entity_ids,
+            light_entity_ids=light_entity_ids,
+            lamp_entity_ids=lamp_entity_ids,
+            shade_entity_ids=shade_entity_ids,
+            speaker_entity_ids=speaker_entity_ids,
+            tv_entity_ids=tv_entity_ids,
+            dashboard_entity_ids=dashboard_entity_ids,
+            other_entity_ids=other_entity_ids,
+            weather_source_entity_ids=weather_source_entity_ids,
+            news_source_entity_ids=news_source_entity_ids,
+            persona=persona,
+            persona_prompt=persona_prompt,
+        )
+    except vol.Invalid as err:
+        reason = _safe_outcome_reason(err)
+        deny_policy: list[str] = []
+        if "minor_policy_denied" in reason:
+            deny_policy.append("minor_policy")
+        await storage.async_close_activity_event(
+            activity_id=activity_id,
+            ended_at=datetime.now(timezone.utc).isoformat(),
+            outcome="policy_denied",
+            outcome_reason=reason,
+            actions_taken=["update_room_config"],
+            policy_gates=deny_policy,
+        )
+        raise
+    except Exception as err:
+        await storage.async_close_activity_event(
+            activity_id=activity_id,
+            ended_at=datetime.now(timezone.utc).isoformat(),
+            outcome="error",
+            outcome_reason=_safe_outcome_reason(err),
+            actions_taken=["update_room_config"],
+            policy_gates=[],
+        )
+        raise
+
+    after_room = state.rooms.get(area_id)
+    diff_changes = _build_room_config_diff(hass, before_room, after_room, changed_keys)
+    summary = _summarize_room_update(area_name, changed_keys, diff_changes)
+
+    if diff_changes:
+        try:
+            activity = (await storage.async_load_state()).activities.get(activity_id)
+            if activity is not None:
+                activity.request_summary = summary
+                activity.external_refs = [
+                    {
+                        "ref_type": "room_config_diff",
+                        "changes": diff_changes,
+                    }
+                ]
+                await storage.async_record_activity_event(activity)
+        except Exception:
+            # Activity enrichment should not block successful configuration writes.
+            pass
+
+    await storage.async_close_activity_event(
+        activity_id=activity_id,
+        ended_at=datetime.now(timezone.utc).isoformat(),
+        outcome="success",
+        outcome_reason="",
+        actions_taken=["update_room_config"],
+        policy_gates=[],
     )
     return {"room_count": len(state.rooms)}
 
@@ -443,29 +1408,41 @@ async def _async_handle_update_identity_profile(
     call: ServiceCall,
 ) -> dict[str, Any]:
     """Insert or update identity preferences for Concierge presentation."""
-    storage = ConciergeStorage(hass)
-    profile = IdentityProfile(
-        profile_id=call.data["profile_id"],
-        name=call.data["name"],
-        persona=call.data.get("persona", "concise"),
-        tts_voice=call.data.get("tts_voice", ""),
-        verbosity=call.data.get("verbosity", "standard"),
-        allow_ai=bool(call.data.get("allow_ai", True)),
-        content_type=call.data.get("content_type", "general"),
-        detail_level=call.data.get("detail_level", "medium"),
+    async def _runner() -> dict[str, Any]:
+        storage = ConciergeStorage(hass)
+        profile = IdentityProfile(
+            profile_id=call.data["profile_id"],
+            name=call.data["name"],
+            persona=call.data.get("persona", "concise"),
+            tts_voice=call.data.get("tts_voice", ""),
+            verbosity=call.data.get("verbosity", "standard"),
+            allow_ai=bool(call.data.get("allow_ai", True)),
+            content_type=call.data.get("content_type", "general"),
+            detail_level=call.data.get("detail_level", "medium"),
+        )
+        state = await storage.async_update_identity_profile(
+            profile,
+            set_as_default=bool(call.data.get("set_as_default", False)),
+        )
+        return {
+            "identity_profile_count": len(state.identity_profiles),
+            "default_profile_id": (
+                state.default_identity_profile.profile_id
+                if state.default_identity_profile is not None
+                else None
+            ),
+        }
+
+    return await _async_with_activity(
+        hass,
+        call,
+        intent_class="update_identity_profile",
+        request_summary=f"Identity profile updated: {call.data.get('name', call.data.get('profile_id', 'profile'))}",
+        action_name="update_identity_profile",
+        channel="service_mutation",
+        external_refs=[{"ref_type": "identity_profile", "profile_id": call.data.get("profile_id")}],
+        runner=_runner,
     )
-    state = await storage.async_update_identity_profile(
-        profile,
-        set_as_default=bool(call.data.get("set_as_default", False)),
-    )
-    return {
-        "identity_profile_count": len(state.identity_profiles),
-        "default_profile_id": (
-            state.default_identity_profile.profile_id
-            if state.default_identity_profile is not None
-            else None
-        ),
-    }
 
 
 async def _async_handle_update_person_profile(
@@ -473,27 +1450,86 @@ async def _async_handle_update_person_profile(
     call: ServiceCall,
 ) -> dict[str, Any]:
     """Insert or update person identity and consent state."""
-    storage = ConciergeStorage(hass)
-    profile = PersonProfile(
-        person_id=call.data["person_id"],
-        name=call.data["name"],
-        linked_area_id=call.data.get("linked_area_id"),
-        ble_device_ids=list(call.data.get("ble_device_ids", [])),
-        aqara_presence_entity_ids=list(call.data.get("aqara_presence_entity_ids", [])),
-        voice_profile_id=call.data.get("voice_profile_id"),
-        consent=dict(call.data.get("consent", {})),
-        notes=call.data.get("notes", ""),
+    consent = dict(call.data.get("consent", {}))
+    interaction_targets = (
+        consent.get("interaction_targets", {}) if isinstance(consent, dict) else {}
     )
-    state = await storage.async_update_person_profile(
-        profile,
-        set_as_default=bool(call.data.get("set_as_default", False)),
+    mobile_notify_targets = list(
+        call.data.get("mobile_notify_targets", interaction_targets.get("mobile_notify_targets", []))
     )
-    return {
-        "person_profile_count": len(state.person_profiles),
-        "default_person_id": (
-            state.default_person_profile.person_id if state.default_person_profile is not None else None
-        ),
-    }
+    preferred_mobile_target = call.data.get(
+        "preferred_mobile_target",
+        interaction_targets.get("preferred_mobile_target"),
+    )
+    (
+        is_minor,
+        guardian_controls_required,
+        minor_allowed_intent_classes,
+        minor_content_filter_level,
+        minor_allow_general_qna,
+        mobile_voice_endpoint_enabled,
+    ) = _effective_minor_fields(call)
+    capabilities = _resolve_integration_capabilities(hass)
+    voice_profile_id = call.data.get("voice_profile_id")
+
+    if not capabilities["cap_ai"]:
+        minor_allow_general_qna = False
+        minor_allowed_intent_classes = ["room_context_info", "household_help"]
+        minor_content_filter_level = "strict"
+
+    if not capabilities["cap_tts"]:
+        mobile_voice_endpoint_enabled = False
+        voice_profile_id = None
+
+    if is_minor and not minor_allowed_intent_classes:
+        raise vol.Invalid("minor_allowed_intent_classes must not be empty when is_minor is true")
+
+    if preferred_mobile_target and preferred_mobile_target not in mobile_notify_targets:
+        raise vol.Invalid("preferred_mobile_target must be in mobile_notify_targets")
+
+    async def _runner() -> dict[str, Any]:
+        storage = ConciergeStorage(hass)
+        profile = PersonProfile(
+            person_id=call.data["person_id"],
+            name=call.data["name"],
+            linked_area_id=call.data.get("linked_area_id"),
+            ble_device_ids=list(call.data.get("ble_device_ids", [])),
+            aqara_presence_entity_ids=list(call.data.get("aqara_presence_entity_ids", [])),
+            voice_profile_id=voice_profile_id,
+            consent=consent,
+            mobile_notify_targets=mobile_notify_targets,
+            preferred_mobile_target=preferred_mobile_target,
+            mobile_voice_endpoint_enabled=mobile_voice_endpoint_enabled,
+            is_minor=is_minor,
+            guardian_controls_required=guardian_controls_required,
+            minor_allow_general_qna=minor_allow_general_qna,
+            minor_allowed_intent_classes=minor_allowed_intent_classes,
+            minor_content_filter_level=minor_content_filter_level,
+            notes=call.data.get("notes", ""),
+        )
+        state = await storage.async_update_person_profile(
+            profile,
+            set_as_default=bool(call.data.get("set_as_default", False)),
+        )
+        return {
+            "person_profile_count": len(state.person_profiles),
+            "default_person_id": (
+                state.default_person_profile.person_id if state.default_person_profile is not None else None
+            ),
+        }
+
+    return await _async_with_activity(
+        hass,
+        call,
+        intent_class="update_person_profile",
+        request_summary=f"Person profile updated: {call.data.get('name', call.data.get('person_id', 'person'))}",
+        action_name="update_person_profile",
+        resolved_person_id=call.data.get("person_id"),
+        resolved_area_id=call.data.get("linked_area_id"),
+        channel="service_mutation",
+        external_refs=[{"ref_type": "person_profile", "person_id": call.data.get("person_id")}],
+        runner=_runner,
+    )
 
 
 async def _async_handle_update_voice_profile(
@@ -501,54 +1537,560 @@ async def _async_handle_update_voice_profile(
     call: ServiceCall,
 ) -> dict[str, Any]:
     """Insert or update voice enrollment and attribution state."""
-    storage = ConciergeStorage(hass)
-    profile = VoiceProfile(
-        voice_profile_id=call.data["voice_profile_id"],
-        name=call.data["name"],
-        tts_voice=call.data.get("tts_voice", ""),
-        enrollment_state=call.data.get("enrollment_state", "untrained"),
-        enrollment_source=call.data.get("enrollment_source", ""),
-        speaker_embedding_id=call.data.get("speaker_embedding_id", ""),
-        sample_count=int(call.data.get("sample_count", 0)),
-        consent=dict(call.data.get("consent", {})),
+    async def _runner() -> dict[str, Any]:
+        storage = ConciergeStorage(hass)
+        profile = VoiceProfile(
+            voice_profile_id=call.data["voice_profile_id"],
+            name=call.data["name"],
+            tts_voice=call.data.get("tts_voice", ""),
+            enrollment_state=call.data.get("enrollment_state", "untrained"),
+            enrollment_source=call.data.get("enrollment_source", ""),
+            speaker_embedding_id=call.data.get("speaker_embedding_id", ""),
+            sample_count=int(call.data.get("sample_count", 0)),
+            sample_items=list(call.data.get("sample_items", [])),
+            attribution_confidence=(
+                float(call.data["attribution_confidence"])
+                if call.data.get("attribution_confidence") is not None
+                else None
+            ),
+            enrollment_started_at=call.data.get("enrollment_started_at", ""),
+            last_sample_at=call.data.get("last_sample_at", ""),
+            last_built_at=call.data.get("last_built_at", ""),
+            disabled=bool(call.data.get("disabled", False)),
+            consent=dict(call.data.get("consent", {})),
+        )
+        state = await storage.async_update_voice_profile(
+            profile,
+            set_as_default=bool(call.data.get("set_as_default", False)),
+        )
+        return {
+            "voice_profile_count": len(state.voice_profiles),
+            "default_voice_profile_id": (
+                state.default_voice_profile.voice_profile_id if state.default_voice_profile is not None else None
+            ),
+        }
+
+    return await _async_with_activity(
+        hass,
+        call,
+        intent_class="update_voice_profile",
+        request_summary=f"Voice profile updated: {call.data.get('name', call.data.get('voice_profile_id', 'voice'))}",
+        action_name="update_voice_profile",
+        channel="service_mutation",
+        external_refs=[{"ref_type": "voice_profile", "voice_profile_id": call.data.get("voice_profile_id")}],
+        runner=_runner,
     )
-    state = await storage.async_update_voice_profile(
-        profile,
-        set_as_default=bool(call.data.get("set_as_default", False)),
+
+
+async def _async_handle_start_voice_enrollment(
+    hass: HomeAssistant,
+    call: ServiceCall,
+) -> dict[str, Any]:
+    """Start or resume explicit voice enrollment for a person profile."""
+    capabilities = _resolve_integration_capabilities(hass)
+    if not capabilities["cap_voice_enrollment"]:
+        raise vol.Invalid(
+            "voice enrollment is unavailable until attached storage and archive export are enabled in Concierge options"
+        )
+    person_id = call.data["person_id"]
+    if not bool(call.data.get("consent_acknowledged", False)):
+        raise vol.Invalid("voice enrollment requires explicit consent_acknowledged=true")
+
+    async def _runner() -> dict[str, Any]:
+        storage = ConciergeStorage(hass)
+        state = await storage.async_load_state()
+        existing_person = state.person_profiles.get(person_id)
+        person_name = (
+            existing_person.name
+            if existing_person is not None
+            else str(call.data.get("voice_name") or person_id)
+        )
+        voice_profile_id = (
+            str(call.data.get("voice_profile_id") or "").strip()
+            or str(existing_person.voice_profile_id or "").strip()
+            if existing_person is not None
+            else ""
+        )
+        if not voice_profile_id:
+            voice_profile_id = _voice_profile_id_for_person(person_id)
+
+        existing_voice = state.voice_profiles.get(voice_profile_id)
+        now_iso = datetime.now(timezone.utc).isoformat()
+        existing_consent = dict(existing_voice.consent) if existing_voice is not None else {}
+        voice_consent = dict(existing_consent.get("voice_enrollment", {}))
+        local_only = bool(call.data.get("local_only", True))
+        voice_consent.update(
+            {
+                "enabled": True,
+                "local_only": local_only,
+                "consent_acknowledged": True,
+                "consent_acknowledged_at": now_iso,
+            }
+        )
+        merged_consent = {
+            **existing_consent,
+            "voice_enrollment": voice_consent,
+        }
+
+        profile = VoiceProfile(
+            voice_profile_id=voice_profile_id,
+            name=str(call.data.get("voice_name") or person_name),
+            tts_voice=existing_voice.tts_voice if existing_voice is not None else "",
+            enrollment_state=(
+                "capturing"
+                if existing_voice is not None and int(existing_voice.sample_count) > 0
+                else "enrollment_in_progress"
+            ),
+            enrollment_source=(existing_voice.enrollment_source if existing_voice is not None else "people_setup") or "people_setup",
+            speaker_embedding_id=existing_voice.speaker_embedding_id if existing_voice is not None else "",
+            sample_count=int(existing_voice.sample_count) if existing_voice is not None else 0,
+            sample_items=list(existing_voice.sample_items) if existing_voice is not None else [],
+            attribution_confidence=existing_voice.attribution_confidence if existing_voice is not None else None,
+            enrollment_started_at=(
+                existing_voice.enrollment_started_at if existing_voice and existing_voice.enrollment_started_at else now_iso
+            ),
+            last_sample_at=existing_voice.last_sample_at if existing_voice is not None else "",
+            last_built_at=existing_voice.last_built_at if existing_voice is not None else "",
+            disabled=False,
+            consent=merged_consent,
+        )
+
+        await storage.async_update_voice_profile(profile)
+
+        if existing_person is not None:
+            person_profile = PersonProfile(
+                person_id=existing_person.person_id,
+                name=existing_person.name,
+                linked_area_id=existing_person.linked_area_id,
+                ble_device_ids=list(existing_person.ble_device_ids),
+                aqara_presence_entity_ids=list(existing_person.aqara_presence_entity_ids),
+                voice_profile_id=voice_profile_id,
+                consent=dict(existing_person.consent),
+                mobile_notify_targets=list(existing_person.mobile_notify_targets),
+                preferred_mobile_target=existing_person.preferred_mobile_target,
+                mobile_voice_endpoint_enabled=existing_person.mobile_voice_endpoint_enabled,
+                is_minor=existing_person.is_minor,
+                guardian_controls_required=existing_person.guardian_controls_required,
+                minor_allow_general_qna=existing_person.minor_allow_general_qna,
+                minor_allowed_intent_classes=list(existing_person.minor_allowed_intent_classes),
+                minor_content_filter_level=existing_person.minor_content_filter_level,
+                notes=existing_person.notes,
+            )
+            await storage.async_update_person_profile(
+                person_profile,
+                set_as_default=(
+                    state.default_person_profile is not None
+                    and state.default_person_profile.person_id == person_profile.person_id
+                ),
+            )
+
+        return {
+            "started": True,
+            "person_id": person_id,
+            "voice_profile_id": voice_profile_id,
+            "enrollment_state": profile.enrollment_state,
+            "sample_count": profile.sample_count,
+            "local_only": local_only,
+        }
+
+    return await _async_with_activity(
+        hass,
+        call,
+        intent_class="start_voice_enrollment",
+        request_summary=f"Voice enrollment started for {person_id}",
+        action_name="start_voice_enrollment",
+        resolved_person_id=person_id,
+        channel="service_mutation",
+        external_refs=[{"ref_type": "voice_enrollment_start", "person_id": person_id}],
+        policy_gates=["explicit_consent", "local_first_default"],
+        runner=_runner,
     )
-    return {
-        "voice_profile_count": len(state.voice_profiles),
-        "default_voice_profile_id": (
-            state.default_voice_profile.voice_profile_id if state.default_voice_profile is not None else None
-        ),
-    }
+
+
+async def _async_handle_capture_voice_enrollment_sample(
+    hass: HomeAssistant,
+    call: ServiceCall,
+) -> dict[str, Any]:
+    """Capture one speech item for a voice profile during enrollment."""
+    capabilities = _resolve_integration_capabilities(hass)
+    if not capabilities["cap_voice_enrollment"]:
+        raise vol.Invalid(
+            "voice enrollment capture is unavailable until attached storage and archive export are enabled in Concierge options"
+        )
+    voice_profile_id = call.data["voice_profile_id"]
+    speech_text = str(call.data.get("speech_text", "")).strip()
+    if not speech_text:
+        raise vol.Invalid("speech_text is required")
+
+    async def _runner() -> dict[str, Any]:
+        storage = ConciergeStorage(hass)
+        state = await storage.async_load_state()
+        existing_voice = state.voice_profiles.get(voice_profile_id)
+        if existing_voice is None:
+            raise vol.Invalid("voice_profile_id is not configured")
+        if existing_voice.disabled:
+            raise vol.Invalid("voice profile is disabled")
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        sample_items = list(existing_voice.sample_items)
+        sample_id = f"sample_{int(datetime.now(timezone.utc).timestamp() * 1000)}_{uuid4().hex[:8]}"
+        sample_payload: dict[str, Any] = {
+            "sample_id": sample_id,
+            "speech_text": speech_text,
+            "captured_at": now_iso,
+            "source": str(call.data.get("source", "guided_phrase") or "guided_phrase"),
+        }
+        if call.data.get("quality_score") is not None:
+            sample_payload["quality_score"] = float(call.data["quality_score"])
+        if call.data.get("recording_path"):
+            sample_payload["recording_path"] = str(call.data["recording_path"])
+        if call.data.get("recording_mime_type"):
+            sample_payload["recording_mime_type"] = str(call.data["recording_mime_type"])
+        if call.data.get("recording_size_bytes") is not None:
+            sample_payload["recording_size_bytes"] = int(call.data["recording_size_bytes"])
+        if call.data.get("recording_duration_ms") is not None:
+            sample_payload["recording_duration_ms"] = int(call.data["recording_duration_ms"])
+        if call.data.get("phrase_index") is not None:
+            sample_payload["phrase_index"] = int(call.data["phrase_index"])
+        sample_items.append(sample_payload)
+
+        updated = VoiceProfile(
+            voice_profile_id=existing_voice.voice_profile_id,
+            name=existing_voice.name,
+            tts_voice=existing_voice.tts_voice,
+            enrollment_state="capturing",
+            enrollment_source=existing_voice.enrollment_source,
+            speaker_embedding_id=existing_voice.speaker_embedding_id,
+            sample_count=len(sample_items),
+            sample_items=sample_items,
+            attribution_confidence=existing_voice.attribution_confidence,
+            enrollment_started_at=existing_voice.enrollment_started_at or now_iso,
+            last_sample_at=now_iso,
+            last_built_at=existing_voice.last_built_at,
+            disabled=existing_voice.disabled,
+            consent=dict(existing_voice.consent),
+        )
+        await storage.async_update_voice_profile(updated)
+        return {
+            "captured": True,
+            "voice_profile_id": voice_profile_id,
+            "sample_id": sample_id,
+            "sample_count": updated.sample_count,
+        }
+
+    return await _async_with_activity(
+        hass,
+        call,
+        intent_class="capture_voice_enrollment_sample",
+        request_summary=f"Voice sample captured for {voice_profile_id}",
+        action_name="capture_voice_enrollment_sample",
+        channel="service_mutation",
+        external_refs=[{"ref_type": "voice_sample", "voice_profile_id": voice_profile_id}],
+        policy_gates=["local_first_default"],
+        runner=_runner,
+    )
+
+
+async def _async_handle_remove_voice_enrollment_sample(
+    hass: HomeAssistant,
+    call: ServiceCall,
+) -> dict[str, Any]:
+    """Remove one previously captured speech item from a voice profile."""
+    capabilities = _resolve_integration_capabilities(hass)
+    if not capabilities["cap_voice_enrollment"]:
+        raise vol.Invalid(
+            "voice enrollment sample management is unavailable until attached storage and archive export are enabled in Concierge options"
+        )
+    voice_profile_id = call.data["voice_profile_id"]
+    sample_id = call.data["sample_id"]
+
+    async def _runner() -> dict[str, Any]:
+        storage = ConciergeStorage(hass)
+        state = await storage.async_load_state()
+        existing_voice = state.voice_profiles.get(voice_profile_id)
+        if existing_voice is None:
+            raise vol.Invalid("voice_profile_id is not configured")
+
+        sample_items = [
+            sample
+            for sample in list(existing_voice.sample_items)
+            if str(sample.get("sample_id", "")) != sample_id
+        ]
+        if len(sample_items) == len(existing_voice.sample_items):
+            raise vol.Invalid("sample_id not found")
+
+        removed_items = [
+            sample
+            for sample in list(existing_voice.sample_items)
+            if str(sample.get("sample_id", "")) == sample_id
+        ]
+        recording_paths = _voice_sample_recording_paths(removed_items)
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        updated = VoiceProfile(
+            voice_profile_id=existing_voice.voice_profile_id,
+            name=existing_voice.name,
+            tts_voice=existing_voice.tts_voice,
+            enrollment_state="capturing" if sample_items else "enrollment_in_progress",
+            enrollment_source=existing_voice.enrollment_source,
+            speaker_embedding_id="" if not sample_items else existing_voice.speaker_embedding_id,
+            sample_count=len(sample_items),
+            sample_items=sample_items,
+            attribution_confidence=(
+                existing_voice.attribution_confidence if sample_items else None
+            ),
+            enrollment_started_at=existing_voice.enrollment_started_at,
+            last_sample_at=now_iso if sample_items else "",
+            last_built_at=(existing_voice.last_built_at if sample_items else ""),
+            disabled=existing_voice.disabled,
+            consent=dict(existing_voice.consent),
+        )
+        await storage.async_update_voice_profile(updated)
+        if recording_paths:
+            await hass.async_add_executor_job(_delete_voice_recordings, recording_paths)
+        return {
+            "removed": True,
+            "voice_profile_id": voice_profile_id,
+            "sample_count": updated.sample_count,
+        }
+
+    return await _async_with_activity(
+        hass,
+        call,
+        intent_class="remove_voice_enrollment_sample",
+        request_summary=f"Voice sample removed for {voice_profile_id}",
+        action_name="remove_voice_enrollment_sample",
+        channel="service_mutation",
+        external_refs=[{"ref_type": "voice_sample", "voice_profile_id": voice_profile_id, "sample_id": sample_id}],
+        runner=_runner,
+    )
+
+
+async def _async_handle_build_voice_profile(
+    hass: HomeAssistant,
+    call: ServiceCall,
+) -> dict[str, Any]:
+    """Build a trained voice profile from captured enrollment samples."""
+    capabilities = _resolve_integration_capabilities(hass)
+    if not capabilities["cap_voice_enrollment"]:
+        raise vol.Invalid(
+            "voice profile build is unavailable until attached storage and archive export are enabled in Concierge options"
+        )
+    voice_profile_id = call.data["voice_profile_id"]
+    min_samples = int(call.data.get("min_samples", 3))
+
+    async def _runner() -> dict[str, Any]:
+        storage = ConciergeStorage(hass)
+        state = await storage.async_load_state()
+        existing_voice = state.voice_profiles.get(voice_profile_id)
+        if existing_voice is None:
+            raise vol.Invalid("voice_profile_id is not configured")
+        if existing_voice.disabled:
+            raise vol.Invalid("voice profile is disabled")
+
+        sample_count = len(existing_voice.sample_items)
+        if sample_count < min_samples:
+            raise vol.Invalid(f"voice profile requires at least {min_samples} samples")
+
+        recording_paths = _voice_sample_recording_paths(list(existing_voice.sample_items))
+        retained_sample_items = [
+            {
+                key: value
+                for key, value in sample.items()
+                if key not in {"recording_path", "recording_mime_type", "recording_size_bytes", "recording_duration_ms"}
+            }
+            for sample in list(existing_voice.sample_items)
+        ]
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        embedding_id = f"spk_{uuid4().hex}"
+        confidence = _voice_confidence_for_sample_count(sample_count)
+        updated = VoiceProfile(
+            voice_profile_id=existing_voice.voice_profile_id,
+            name=existing_voice.name,
+            tts_voice=existing_voice.tts_voice,
+            enrollment_state="trained",
+            enrollment_source=existing_voice.enrollment_source,
+            speaker_embedding_id=embedding_id,
+            sample_count=sample_count,
+            sample_items=retained_sample_items,
+            attribution_confidence=confidence,
+            enrollment_started_at=existing_voice.enrollment_started_at,
+            last_sample_at=existing_voice.last_sample_at,
+            last_built_at=now_iso,
+            disabled=False,
+            consent=dict(existing_voice.consent),
+        )
+        await storage.async_update_voice_profile(updated)
+        if recording_paths:
+            await hass.async_add_executor_job(_delete_voice_recordings, recording_paths)
+
+        person_id = str(call.data.get("person_id") or "").strip()
+        if person_id:
+            person_profile = state.person_profiles.get(person_id)
+            if person_profile is None:
+                raise vol.Invalid("person_id is not configured")
+            person_profile.voice_profile_id = voice_profile_id
+            await storage.async_update_person_profile(
+                person_profile,
+                set_as_default=(
+                    state.default_person_profile is not None
+                    and state.default_person_profile.person_id == person_id
+                ),
+            )
+
+        return {
+            "built": True,
+            "voice_profile_id": voice_profile_id,
+            "sample_count": sample_count,
+            "speaker_embedding_id": embedding_id,
+            "attribution_confidence": confidence,
+            "person_id": person_id or None,
+        }
+
+    return await _async_with_activity(
+        hass,
+        call,
+        intent_class="build_voice_profile",
+        request_summary=f"Voice profile built: {voice_profile_id}",
+        action_name="build_voice_profile",
+        resolved_person_id=call.data.get("person_id"),
+        channel="service_mutation",
+        external_refs=[{"ref_type": "voice_profile", "voice_profile_id": voice_profile_id}],
+        runner=_runner,
+    )
+
+
+async def _async_handle_reset_voice_profile(
+    hass: HomeAssistant,
+    call: ServiceCall,
+) -> dict[str, Any]:
+    """Reset a voice profile to untrained state while preserving identity linkage."""
+    voice_profile_id = call.data["voice_profile_id"]
+    preserve_consent = bool(call.data.get("preserve_consent", True))
+
+    async def _runner() -> dict[str, Any]:
+        storage = ConciergeStorage(hass)
+        state = await storage.async_load_state()
+        existing_voice = state.voice_profiles.get(voice_profile_id)
+        if existing_voice is None:
+            raise vol.Invalid("voice_profile_id is not configured")
+
+        recording_paths = _voice_sample_recording_paths(list(existing_voice.sample_items))
+
+        updated = VoiceProfile(
+            voice_profile_id=existing_voice.voice_profile_id,
+            name=existing_voice.name,
+            tts_voice=existing_voice.tts_voice,
+            enrollment_state="untrained",
+            enrollment_source=existing_voice.enrollment_source,
+            speaker_embedding_id="",
+            sample_count=0,
+            sample_items=[],
+            attribution_confidence=None,
+            enrollment_started_at=existing_voice.enrollment_started_at,
+            last_sample_at="",
+            last_built_at="",
+            disabled=False,
+            consent=(dict(existing_voice.consent) if preserve_consent else {}),
+        )
+        await storage.async_update_voice_profile(updated)
+        if recording_paths:
+            await hass.async_add_executor_job(_delete_voice_recordings, recording_paths)
+        return {
+            "reset": True,
+            "voice_profile_id": voice_profile_id,
+            "preserve_consent": preserve_consent,
+        }
+
+    return await _async_with_activity(
+        hass,
+        call,
+        intent_class="reset_voice_profile",
+        request_summary=f"Voice profile reset: {voice_profile_id}",
+        action_name="reset_voice_profile",
+        channel="service_mutation",
+        external_refs=[{"ref_type": "voice_profile", "voice_profile_id": voice_profile_id}],
+        runner=_runner,
+    )
+
+
+async def _async_handle_delete_voice_profile(
+    hass: HomeAssistant,
+    call: ServiceCall,
+) -> dict[str, Any]:
+    """Delete a voice profile and optionally unlink associated people."""
+    voice_profile_id = call.data["voice_profile_id"]
+    unlink_from_people = bool(call.data.get("unlink_from_people", True))
+
+    async def _runner() -> dict[str, Any]:
+        storage = ConciergeStorage(hass)
+        current_state = await storage.async_load_state()
+        existing_voice = current_state.voice_profiles.get(voice_profile_id)
+        recording_paths = _voice_sample_recording_paths(list(existing_voice.sample_items)) if existing_voice else []
+        storage = ConciergeStorage(hass)
+        state = await storage.async_delete_voice_profile(
+            voice_profile_id,
+            unlink_from_people=unlink_from_people,
+        )
+        if recording_paths:
+            await hass.async_add_executor_job(_delete_voice_recordings, recording_paths)
+        return {
+            "deleted": True,
+            "voice_profile_id": voice_profile_id,
+            "unlink_from_people": unlink_from_people,
+            "voice_profile_count": len(state.voice_profiles),
+        }
+
+    return await _async_with_activity(
+        hass,
+        call,
+        intent_class="delete_voice_profile",
+        request_summary=f"Voice profile deleted: {voice_profile_id}",
+        action_name="delete_voice_profile",
+        channel="service_mutation",
+        external_refs=[{"ref_type": "voice_profile", "voice_profile_id": voice_profile_id}],
+        runner=_runner,
+    )
 
 
 async def _async_handle_update_global_context(hass: HomeAssistant, call: ServiceCall) -> dict[str, Any]:
     """Update global context usage and optional cached speakable values."""
-    storage = ConciergeStorage(hass)
-    if call.data["context_type"] in {"weather", "news", "alarm_status"}:
-        await storage.async_update_global_feature(
-            feature_key=call.data["context_type"],
+    async def _runner() -> dict[str, Any]:
+        storage = ConciergeStorage(hass)
+        if call.data["context_type"] in {"weather", "news", "alarm_status"}:
+            await storage.async_update_global_feature(
+                feature_key=call.data["context_type"],
+                enabled=call.data["enabled"],
+                options=call.data.get("options"),
+            )
+
+        state = await storage.async_update_global_context_usage(
+            context_type=call.data["context_type"],
             enabled=call.data["enabled"],
             options=call.data.get("options"),
         )
 
-    state = await storage.async_update_global_context_usage(
-        context_type=call.data["context_type"],
-        enabled=call.data["enabled"],
-        options=call.data.get("options"),
-    )
+        context = ContextState(
+            context_type=call.data["context_type"],
+            available=call.data["enabled"],
+            summary=call.data.get("summary", ""),
+            detail=call.data.get("detail", ""),
+            speakable=call.data.get("speakable", ""),
+        )
+        state = await storage.async_upsert_context(context)
+        return {"context_count": len(state.contexts), "usage_count": len(state.global_context_usage)}
 
-    context = ContextState(
-        context_type=call.data["context_type"],
-        available=call.data["enabled"],
-        summary=call.data.get("summary", ""),
-        detail=call.data.get("detail", ""),
-        speakable=call.data.get("speakable", ""),
+    return await _async_with_activity(
+        hass,
+        call,
+        intent_class="update_global_context",
+        request_summary=f"Global context updated: {call.data.get('context_type', 'context')}",
+        action_name="update_global_context",
+        channel="service_mutation",
+        external_refs=[{"ref_type": "global_context", "context_type": call.data.get("context_type")}],
+        runner=_runner,
     )
-    state = await storage.async_upsert_context(context)
-    return {"context_count": len(state.contexts), "usage_count": len(state.global_context_usage)}
 
 
 async def _async_handle_update_execution_preferences(
@@ -556,12 +2098,24 @@ async def _async_handle_update_execution_preferences(
     call: ServiceCall,
 ) -> dict[str, Any]:
     """Update execution preferences at area/composite scope."""
-    storage = ConciergeStorage(hass)
-    state = await storage.async_update_execution_preferences(
-        scope_id=call.data["scope_id"],
-        preferences=call.data["preferences"],
+    async def _runner() -> dict[str, Any]:
+        storage = ConciergeStorage(hass)
+        state = await storage.async_update_execution_preferences(
+            scope_id=call.data["scope_id"],
+            preferences=call.data["preferences"],
+        )
+        return {"execution_preference_count": len(state.execution_preferences)}
+
+    return await _async_with_activity(
+        hass,
+        call,
+        intent_class="update_execution_preferences",
+        request_summary=f"Execution preferences updated: {call.data.get('scope_id', 'scope')}",
+        action_name="update_execution_preferences",
+        channel="service_mutation",
+        external_refs=[{"ref_type": "execution_preferences", "scope_id": call.data.get("scope_id")}],
+        runner=_runner,
     )
-    return {"execution_preference_count": len(state.execution_preferences)}
 
 
 def _validate_same_floor_area_ids(hass: HomeAssistant, area_ids: list[str]) -> None:
@@ -582,10 +2136,29 @@ def _validate_same_floor_area_ids(hass: HomeAssistant, area_ids: list[str]) -> N
         raise vol.Invalid("composite area_ids must all be on the same floor")
 
 
+def _resolve_floor_id_for_area_ids(hass: HomeAssistant, area_ids: list[str]) -> str | None:
+    """Return the shared floor_id for the provided areas, or None when empty."""
+    if not area_ids:
+        return None
+
+    area_registry = ar.async_get(hass)
+    floor_ids: set[str | None] = set()
+    for area_id in area_ids:
+        area = area_registry.async_get_area(area_id)
+        if area is None:
+            raise vol.Invalid(f"area_id does not exist: {area_id}")
+        floor_ids.add(area.floor_id)
+
+    if len(floor_ids) > 1:
+        raise vol.Invalid("composite area_ids must all be on the same floor")
+
+    return next(iter(floor_ids))
+
+
 COMPOSITE_ENTITY_FIELDS: tuple[str, ...] = (
     "media_player_entity_ids",
     "voice_device_entity_ids",
-    "asset_entity_ids",
+    "asset_groups",
     "room_sensor_entity_ids",
     "room_health_entity_ids",
     "human_health_entity_ids",
@@ -649,6 +2222,7 @@ async def _async_handle_update_composite_config(
 
     composite_id = call.data["composite_id"]
     existing = state.composites.get(composite_id)
+    capabilities = _resolve_integration_capabilities(hass)
 
     area_ids = call.data.get("area_ids")
     if area_ids is None and existing is not None:
@@ -658,58 +2232,121 @@ async def _async_handle_update_composite_config(
     else:
         resolved_area_ids = list(dict.fromkeys(area_ids))
 
-    if resolved_area_ids:
-        _validate_same_floor_area_ids(hass, resolved_area_ids)
+    async def _runner() -> dict[str, Any]:
+        composite_floor_id: str | None = existing.floor_id if existing is not None else None
+        if resolved_area_ids:
+            _validate_same_floor_area_ids(hass, resolved_area_ids)
+            composite_floor_id = _resolve_floor_id_for_area_ids(hass, resolved_area_ids)
+        elif area_ids is not None:
+            composite_floor_id = None
 
-    primary_area = call.data.get("primary_area")
-    if primary_area is not None and resolved_area_ids and primary_area not in resolved_area_ids:
-        raise vol.Invalid("primary_area must exist in area_ids")
+        primary_area = call.data.get("primary_area")
+        if primary_area is not None and resolved_area_ids and primary_area not in resolved_area_ids:
+            raise vol.Invalid("primary_area must exist in area_ids")
 
-    # Composite device selections must remain scoped to member areas.
-    allowed_entity_ids = _entity_ids_for_area_ids(hass, resolved_area_ids)
-    sanitized_entities = _sanitize_composite_entity_payload(call.data, allowed_entity_ids=allowed_entity_ids)
+        asset_groups = call.data.get("asset_groups")
+        if asset_groups is not None and not isinstance(asset_groups, list):
+            raise vol.Invalid("asset_groups must be a list")
+        device_groups = call.data.get("device_groups")
+        if device_groups is not None and not isinstance(device_groups, list):
+            raise vol.Invalid("device_groups must be a list")
 
-    if area_ids is not None and existing is not None:
-        for field_name in COMPOSITE_ENTITY_FIELDS:
-            if sanitized_entities[field_name] is not None:
-                continue
-            current = getattr(existing, field_name, [])
-            if not isinstance(current, list):
-                sanitized_entities[field_name] = []
-                continue
-            sanitized_entities[field_name] = [
-                entity_id
-                for entity_id in current
-                if isinstance(entity_id, str) and entity_id in allowed_entity_ids
-            ]
+        ai_knowledge_enabled = call.data.get("ai_knowledge_enabled")
+        environment_information_outputs = call.data.get("environment_information_outputs")
+        tts_voice = call.data.get("tts_voice")
+        tts_language = call.data.get("tts_language")
+        persona = call.data.get("persona")
+        persona_prompt = call.data.get("persona_prompt")
 
-    updated = await storage.async_update_composite_config(
-        composite_id=composite_id,
-        name=call.data.get("name"),
-        area_ids=resolved_area_ids if area_ids is not None else None,
-        primary_area=primary_area,
-        enabled=call.data.get("enabled"),
-        media_player_entity_ids=sanitized_entities["media_player_entity_ids"],
-        voice_device_entity_ids=sanitized_entities["voice_device_entity_ids"],
-        asset_entity_ids=sanitized_entities["asset_entity_ids"],
-        room_sensor_entity_ids=sanitized_entities["room_sensor_entity_ids"],
-        room_health_entity_ids=sanitized_entities["room_health_entity_ids"],
-        human_health_entity_ids=sanitized_entities["human_health_entity_ids"],
-        light_entity_ids=sanitized_entities["light_entity_ids"],
-        shade_entity_ids=sanitized_entities["shade_entity_ids"],
-        speaker_entity_ids=sanitized_entities["speaker_entity_ids"],
-        dashboard_entity_ids=sanitized_entities["dashboard_entity_ids"],
-        other_entity_ids=sanitized_entities["other_entity_ids"],
+        if not capabilities["cap_ai"] and ai_knowledge_enabled is not None:
+            ai_knowledge_enabled = False
+        if not capabilities["cap_assets"]:
+            if asset_groups is not None:
+                asset_groups = []
+            if environment_information_outputs is not None:
+                environment_information_outputs = []
+        if not capabilities["cap_persona"]:
+            if tts_voice is not None:
+                tts_voice = ""
+            if tts_language is not None:
+                tts_language = ""
+            if persona is not None:
+                persona = ""
+            if persona_prompt is not None:
+                persona_prompt = ""
+        elif not capabilities["cap_tts"]:
+            if tts_voice is not None:
+                tts_voice = ""
+            if tts_language is not None:
+                tts_language = ""
+
+        allowed_entity_ids = _entity_ids_for_area_ids(hass, resolved_area_ids)
+        sanitized_entities = _sanitize_composite_entity_payload(call.data, allowed_entity_ids=allowed_entity_ids)
+
+        if area_ids is not None and existing is not None:
+            for field_name in COMPOSITE_ENTITY_FIELDS:
+                if sanitized_entities[field_name] is not None:
+                    continue
+                current = getattr(existing, field_name, [])
+                if not isinstance(current, list):
+                    sanitized_entities[field_name] = []
+                    continue
+                sanitized_entities[field_name] = [
+                    entity_id
+                    for entity_id in current
+                    if isinstance(entity_id, str) and entity_id in allowed_entity_ids
+                ]
+
+        updated = await storage.async_update_composite_config(
+            composite_id=composite_id,
+            name=call.data.get("name"),
+            floor_id=composite_floor_id,
+            area_ids=resolved_area_ids if area_ids is not None else None,
+            primary_area=primary_area,
+            enabled=call.data.get("enabled"),
+            posture=call.data.get("posture"),
+            media_player_entity_ids=sanitized_entities["media_player_entity_ids"],
+            voice_device_entity_ids=sanitized_entities["voice_device_entity_ids"],
+            tts_voice=tts_voice,
+            tts_language=tts_language,
+            device_groups=device_groups if device_groups is not None else (list(existing.device_groups) if existing is not None else None),
+            persona=persona,
+            persona_prompt=persona_prompt,
+            ai_knowledge_enabled=ai_knowledge_enabled,
+            environment_information_outputs=environment_information_outputs,
+            asset_groups=asset_groups if asset_groups is not None else (list(existing.asset_groups) if existing is not None else None),
+            room_sensor_entity_ids=sanitized_entities["room_sensor_entity_ids"],
+            room_health_entity_ids=sanitized_entities["room_health_entity_ids"],
+            human_health_entity_ids=sanitized_entities["human_health_entity_ids"],
+            light_entity_ids=sanitized_entities["light_entity_ids"],
+            shade_entity_ids=sanitized_entities["shade_entity_ids"],
+            speaker_entity_ids=sanitized_entities["speaker_entity_ids"],
+            dashboard_entity_ids=sanitized_entities["dashboard_entity_ids"],
+            other_entity_ids=sanitized_entities["other_entity_ids"],
+            weather_source_entity_ids=call.data.get("weather_source_entity_ids"),
+            news_source_entity_ids=call.data.get("news_source_entity_ids"),
+        )
+
+        composite = updated.composites.get(composite_id)
+        return {
+            "updated": True,
+            "composite_id": composite_id,
+            "dismantled": composite is None,
+            "composite_count": len(updated.composites),
+            "area_count": len(composite.area_ids) if composite else 0,
+        }
+
+    return await _async_with_activity(
+        hass,
+        call,
+        intent_class="update_composite_config",
+        request_summary=f"Merged room updated: {call.data.get('name', composite_id)}",
+        action_name="update_composite_config",
+        resolved_area_id=resolved_area_ids[0] if resolved_area_ids else None,
+        channel="service_mutation",
+        external_refs=[{"ref_type": "composite", "composite_id": composite_id, "area_ids": resolved_area_ids}],
+        runner=_runner,
     )
-
-    composite = updated.composites.get(composite_id)
-    return {
-        "updated": True,
-        "composite_id": composite_id,
-        "dismantled": composite is None,
-        "composite_count": len(updated.composites),
-        "area_count": len(composite.area_ids) if composite else 0,
-    }
 
 
 async def _async_handle_sync_composites(
@@ -722,49 +2359,66 @@ async def _async_handle_sync_composites(
     valid_area_ids = {area.id for area in area_registry.async_list_areas()}
     remove_invalid = bool(call.data.get("remove_invalid", True))
 
-    storage = ConciergeStorage(hass)
-    state, validation_errors = await storage.async_sync_composites(
-        valid_area_ids=valid_area_ids,
-        remove_invalid=remove_invalid,
-    )
+    async def _runner() -> dict[str, Any]:
+        storage = ConciergeStorage(hass)
+        state, validation_errors = await storage.async_sync_composites(
+            valid_area_ids=valid_area_ids,
+            remove_invalid=remove_invalid,
+        )
 
-    # Validate same-floor membership for all remaining composites.
-    for composite_id, composite in state.composites.items():
-        try:
-            _validate_same_floor_area_ids(hass, composite.area_ids)
-        except vol.Invalid as err:
-            validation_errors.append(f"{composite_id}: {err}")
-
-    # Also prune stale selected entity IDs when member areas changed.
-    if remove_invalid:
         for composite_id, composite in state.composites.items():
-            allowed_entity_ids = _entity_ids_for_area_ids(hass, composite.area_ids)
-            update_payload: dict[str, list[str]] = {}
+            try:
+                _validate_same_floor_area_ids(hass, composite.area_ids)
+            except vol.Invalid as err:
+                validation_errors.append(f"{composite_id}: {err}")
 
-            for field_name in COMPOSITE_ENTITY_FIELDS:
-                current = getattr(composite, field_name, [])
-                if not isinstance(current, list):
-                    continue
-                filtered = [
-                    entity_id
-                    for entity_id in current
-                    if isinstance(entity_id, str) and entity_id in allowed_entity_ids
-                ]
-                if filtered != current:
-                    update_payload[field_name] = filtered
+        if remove_invalid:
+            for composite_id, composite in state.composites.items():
+                allowed_entity_ids = _entity_ids_for_area_ids(hass, composite.area_ids)
+                update_payload: dict[str, list[str]] = {}
+                floor_id = _resolve_floor_id_for_area_ids(hass, composite.area_ids) if composite.area_ids else None
 
-            if update_payload:
-                await storage.async_update_composite_config(
-                    composite_id=composite_id,
-                    **update_payload,
-                )
+                for field_name in COMPOSITE_ENTITY_FIELDS:
+                    current = getattr(composite, field_name, [])
+                    if not isinstance(current, list):
+                        continue
+                    filtered = [
+                        entity_id
+                        for entity_id in current
+                        if isinstance(entity_id, str) and entity_id in allowed_entity_ids
+                    ]
+                    if filtered != current:
+                        update_payload[field_name] = filtered
 
-    return {
-        "synced": True,
-        "remove_invalid": remove_invalid,
-        "composite_count": len(state.composites),
-        "validation_errors": validation_errors,
-    }
+                if update_payload:
+                    await storage.async_update_composite_config(
+                        composite_id=composite_id,
+                        floor_id=floor_id,
+                        **update_payload,
+                    )
+                elif composite.floor_id != floor_id:
+                    await storage.async_update_composite_config(
+                        composite_id=composite_id,
+                        floor_id=floor_id,
+                    )
+
+        return {
+            "synced": True,
+            "remove_invalid": remove_invalid,
+            "composite_count": len(state.composites),
+            "validation_errors": validation_errors,
+        }
+
+    return await _async_with_activity(
+        hass,
+        call,
+        intent_class="sync_composites",
+        request_summary="Merged rooms synchronized",
+        action_name="sync_composites",
+        channel="service_mutation",
+        external_refs=[{"ref_type": "sync_composites", "remove_invalid": remove_invalid}],
+        runner=_runner,
+    )
 
 
 async def _async_handle_get_context(hass: HomeAssistant, call: ServiceCall) -> dict[str, Any]:
@@ -819,32 +2473,67 @@ async def _async_handle_preview_tts_voice(
 ) -> dict[str, Any]:
     """Preview a TTS voice on a selected media player."""
     provider = call.data["provider"]
-    engine_entity_id = TTS_PROVIDER_ENTITY_IDS.get(provider)
-    if engine_entity_id is None:
-        raise vol.Invalid(f"unsupported provider: {provider}")
 
-    options: dict[str, Any] = {}
-    if call.data.get("voice"):
-        options["voice"] = call.data["voice"]
+    async def _runner() -> dict[str, Any]:
+        engine_entity_id = TTS_PROVIDER_ENTITY_IDS.get(provider)
+        if engine_entity_id is None:
+            raise vol.Invalid(f"unsupported provider: {provider}")
 
-    await hass.services.async_call(
-        "tts",
-        "speak",
-        {
+        options: dict[str, Any] = {}
+        if call.data.get("voice"):
+            options["voice"] = call.data["voice"]
+
+        payload: dict[str, Any] = {
             "entity_id": engine_entity_id,
             "media_player_entity_id": call.data["media_player_entity_id"],
             "message": call.data["message"],
             "cache": False,
-            "options": options,
-        },
-        blocking=True,
-    )
+        }
+        if call.data.get("language"):
+            payload["language"] = call.data["language"]
+        if options:
+            payload["options"] = options
 
-    return {
-        "previewed": True,
-        "provider": provider,
-        "engine_entity_id": engine_entity_id,
-    }
+        used_language_fallback = False
+        try:
+            await hass.services.async_call(
+                "tts",
+                "speak",
+                payload,
+                blocking=True,
+            )
+        except Exception as err:
+            error_text = str(err)
+            invalid_language = "language" in error_text.lower()
+            if not (invalid_language and "language" in payload):
+                raise
+
+            payload.pop("language", None)
+            await hass.services.async_call(
+                "tts",
+                "speak",
+                payload,
+                blocking=True,
+            )
+            used_language_fallback = True
+
+        return {
+            "previewed": True,
+            "provider": provider,
+            "engine_entity_id": engine_entity_id,
+            "used_language_fallback": used_language_fallback,
+        }
+
+    return await _async_with_activity(
+        hass,
+        call,
+        intent_class="preview_tts_voice",
+        request_summary="Voice preview requested",
+        action_name="preview_tts_voice",
+        channel="service_operational",
+        external_refs=[{"ref_type": "tts_preview", "provider": provider}],
+        runner=_runner,
+    )
 
 
 async def _async_handle_sync_rooms(
@@ -855,35 +2544,47 @@ async def _async_handle_sync_rooms(
     area_registry = ar.async_get(hass)
     current_area_ids = {area.id for area in area_registry.async_list_areas()}
 
-    storage = ConciergeStorage(hass)
-    state = await storage.async_load_state()
-    existing_area_ids = set(state.rooms)
-
     add_missing = bool(call.data.get("add_missing", True))
     remove_missing = bool(call.data.get("remove_missing", True))
 
-    added = sorted(current_area_ids - existing_area_ids)
-    removed = sorted(existing_area_ids - current_area_ids)
-
-    if add_missing:
-        for area_id in added:
-            await storage.async_update_room_config(area_id=area_id)
-
-    if remove_missing and removed:
+    async def _runner() -> dict[str, Any]:
+        storage = ConciergeStorage(hass)
         state = await storage.async_load_state()
-        for area_id in removed:
-            state.rooms.pop(area_id, None)
-        await storage.async_save_state(state)
+        existing_area_ids = set(state.rooms)
 
-    final_state = await storage.async_load_state()
-    return {
-        "synced": True,
-        "add_missing": add_missing,
-        "remove_missing": remove_missing,
-        "added_room_ids": added if add_missing else [],
-        "removed_room_ids": removed if remove_missing else [],
-        "room_count": len(final_state.rooms),
-    }
+        added = sorted(current_area_ids - existing_area_ids)
+        removed = sorted(existing_area_ids - current_area_ids)
+
+        if add_missing:
+            for area_id in added:
+                await storage.async_update_room_config(area_id=area_id)
+
+        if remove_missing and removed:
+            state = await storage.async_load_state()
+            for area_id in removed:
+                state.rooms.pop(area_id, None)
+            await storage.async_save_state(state)
+
+        final_state = await storage.async_load_state()
+        return {
+            "synced": True,
+            "add_missing": add_missing,
+            "remove_missing": remove_missing,
+            "added_room_ids": added if add_missing else [],
+            "removed_room_ids": removed if remove_missing else [],
+            "room_count": len(final_state.rooms),
+        }
+
+    return await _async_with_activity(
+        hass,
+        call,
+        intent_class="sync_rooms",
+        request_summary="Rooms synchronized to Home Assistant area registry",
+        action_name="sync_rooms",
+        channel="service_mutation",
+        external_refs=[{"ref_type": "sync_rooms", "add_missing": add_missing, "remove_missing": remove_missing}],
+        runner=_runner,
+    )
 
 
 async def _async_handle_refresh_entity_structure(
@@ -894,41 +2595,326 @@ async def _async_handle_refresh_entity_structure(
     sync_rooms = bool(call.data.get("sync_rooms", True))
     sync_result: dict[str, Any] | None = None
 
-    if sync_rooms:
-        sync_result = await _async_handle_sync_rooms(
-            hass,
-            ServiceCall(
-                context=call.context,
-                data={
-                    "add_missing": bool(call.data.get("add_missing", True)),
-                    "remove_missing": bool(call.data.get("remove_missing", True)),
-                },
-                domain=DOMAIN,
-                service=SERVICE_SYNC_ROOMS,
-                return_response=True,
-                service_data={
-                    "add_missing": bool(call.data.get("add_missing", True)),
-                    "remove_missing": bool(call.data.get("remove_missing", True)),
-                },
-                service_data_unmodified={
-                    "add_missing": bool(call.data.get("add_missing", True)),
-                    "remove_missing": bool(call.data.get("remove_missing", True)),
-                },
-            ),
-        )
+    async def _runner() -> dict[str, Any]:
+        if sync_rooms:
+            sync_result = await _async_handle_sync_rooms(
+                hass,
+                ServiceCall(
+                    context=call.context,
+                    data={
+                        "add_missing": bool(call.data.get("add_missing", True)),
+                        "remove_missing": bool(call.data.get("remove_missing", True)),
+                    },
+                    domain=DOMAIN,
+                    service=SERVICE_SYNC_ROOMS,
+                    return_response=True,
+                    service_data={
+                        "add_missing": bool(call.data.get("add_missing", True)),
+                        "remove_missing": bool(call.data.get("remove_missing", True)),
+                    },
+                    service_data_unmodified={
+                        "add_missing": bool(call.data.get("add_missing", True)),
+                        "remove_missing": bool(call.data.get("remove_missing", True)),
+                    },
+                ),
+            )
+        else:
+            sync_result = None
 
+        entries = hass.config_entries.async_entries(DOMAIN)
+        if not entries:
+            raise vol.Invalid("concierge config entry not found")
+
+        entry = entries[0]
+        refreshed = await hass.config_entries.async_reload(entry.entry_id)
+        return {
+            "refreshed": refreshed,
+            "entry_id": entry.entry_id,
+            "sync_rooms": sync_rooms,
+            "sync_result": sync_result,
+        }
+
+    return await _async_with_activity(
+        hass,
+        call,
+        intent_class="refresh_entity_structure",
+        request_summary="Entity structure refresh requested",
+        action_name="refresh_entity_structure",
+        channel="service_operational",
+        external_refs=[{"ref_type": "entity_refresh", "sync_rooms": sync_rooms}],
+        runner=_runner,
+    )
+
+
+def _archive_options(hass: HomeAssistant) -> tuple[str | None, bool]:
+    """Read archive destination and reference-excerpt defaults from entry options."""
     entries = hass.config_entries.async_entries(DOMAIN)
     if not entries:
-        raise vol.Invalid("concierge config entry not found")
-
+        return None, False
     entry = entries[0]
-    refreshed = await hass.config_entries.async_reload(entry.entry_id)
-    return {
-        "refreshed": refreshed,
-        "entry_id": entry.entry_id,
-        "sync_rooms": sync_rooms,
-        "sync_result": sync_result,
+    destination = entry.options.get("audit_archive_destination_uri")
+    include_refs = bool(entry.options.get("audit_archive_include_reference_excerpts", False))
+    return destination, include_refs
+
+
+def _write_archive_package(
+    *,
+    destination_path: Path,
+    activities: list[dict[str, Any]],
+    start: str | None,
+    end: str | None,
+) -> tuple[str, int, str]:
+    """Write immutable self-contained archive package to destination path."""
+    generated_at = datetime.now(timezone.utc).isoformat()
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    archive_dir = destination_path / f"concierge_activity_archive_{stamp}"
+    archive_dir.mkdir(parents=True, exist_ok=False)
+
+    manifest = {
+        "generated_at": generated_at,
+        "window": {"start": start, "end": end},
+        "item_count": len(activities),
+        "activities": activities,
     }
+    (archive_dir / "activity_timeline.json").write_text(
+        json.dumps(manifest, indent=2),
+        encoding="utf-8",
+    )
+
+    lines = [
+        "Concierge Activity Archive",
+        "",
+        f"Generated: {generated_at}",
+        f"Start: {start or 'unbounded'}",
+        f"End: {end or 'unbounded'}",
+        f"Items: {len(activities)}",
+        "",
+        "Timeline:",
+    ]
+    for activity in activities:
+        lines.append(
+            "- "
+            f"{activity.get('started_at', '')} "
+            f"[{activity.get('actor_class', 'unknown')}] "
+            f"{activity.get('intent_class', 'unknown')} "
+            f"=> {activity.get('outcome') or 'open'}"
+        )
+    (archive_dir / "README.txt").write_text("\n".join(lines), encoding="utf-8")
+
+    return str(archive_dir), len(activities), generated_at
+
+
+async def _async_handle_record_activity_event(
+    hass: HomeAssistant,
+    call: ServiceCall,
+) -> dict[str, Any]:
+    """Record stitched orchestration metadata for one activity."""
+    actor_class = call.data["actor_class"]
+    request_summary = _sanitize_request_summary(actor_class, call.data.get("request_summary", ""))
+
+    storage = ConciergeStorage(hass)
+    activity = ActivityEvent(
+        activity_id=call.data["activity_id"],
+        correlation_id=call.data["correlation_id"],
+        started_at=call.data["started_at"],
+        channel=call.data["channel"],
+        actor_class=actor_class,
+        intent_class=call.data["intent_class"],
+        request_summary=request_summary,
+        resolved_person_id=call.data.get("resolved_person_id"),
+        resolved_area_id=call.data.get("resolved_area_id"),
+        confidence=call.data.get("confidence"),
+        external_refs=list(call.data.get("external_refs", [])),
+    )
+    state = await storage.async_record_activity_event(activity)
+    return {"recorded": True, "activity_count": len(state.activities)}
+
+
+async def _async_handle_close_activity_outcome(
+    hass: HomeAssistant,
+    call: ServiceCall,
+) -> dict[str, Any]:
+    """Close a stitched activity with deterministic outcome metadata."""
+    storage = ConciergeStorage(hass)
+    try:
+        await storage.async_close_activity_event(
+            activity_id=call.data["activity_id"],
+            ended_at=call.data["ended_at"],
+            outcome=call.data["outcome"],
+            outcome_reason=call.data.get("outcome_reason", ""),
+            actions_taken=list(call.data.get("actions_taken", [])),
+            policy_gates=list(call.data.get("policy_gates", [])),
+        )
+    except KeyError as err:
+        raise vol.Invalid(f"activity_id not found: {err.args[0]}") from err
+
+    return {"closed": True, "activity_id": call.data["activity_id"]}
+
+
+async def _async_handle_get_activity_timeline(
+    hass: HomeAssistant,
+    call: ServiceCall,
+) -> dict[str, Any]:
+    """Return chronological activity timeline with stitched references."""
+    storage = ConciergeStorage(hass)
+    state = await storage.async_load_state()
+
+    filtered = [
+        event
+        for event in state.activities.values()
+        if _event_matches_filters(event, call)
+    ]
+    filtered.sort(key=lambda item: item.started_at)
+    return {
+        "activities": [
+            _serialize_activity(event, include_reference_excerpts=True)
+            for event in filtered
+        ]
+    }
+
+
+async def _async_handle_export_activity_archive(
+    hass: HomeAssistant,
+    call: ServiceCall,
+) -> dict[str, Any]:
+    """Export a self-contained offline activity archive package."""
+    capabilities = _resolve_integration_capabilities(hass)
+    if not capabilities["cap_extended_history"]:
+        raise vol.Invalid(
+            "activity archive export is unavailable until attached storage and archive export are enabled in Concierge options"
+        )
+    configured_destination, default_include_refs = _archive_options(hass)
+    destination = call.data.get("destination") or configured_destination
+    if not destination:
+        raise vol.Invalid("archive destination is not configured in integration options")
+
+    include_reference_excerpts = bool(
+        call.data.get("include_reference_excerpts", default_include_refs)
+    )
+    destination_path = _archive_destination_path(destination)
+
+    storage = ConciergeStorage(hass)
+    state = await storage.async_load_state()
+
+    start = call.data.get("start")
+    end = call.data.get("end")
+    range_call = ServiceCall(
+        context=call.context,
+        data={"start": start, "end": end},
+        domain=DOMAIN,
+        service=SERVICE_EXPORT_ACTIVITY_ARCHIVE,
+        return_response=True,
+        service_data={"start": start, "end": end},
+        service_data_unmodified={"start": start, "end": end},
+    )
+    selected = [
+        event
+        for event in state.activities.values()
+        if _event_matches_filters(event, range_call)
+    ]
+    selected.sort(key=lambda item: item.started_at)
+    serialized = [
+        _serialize_activity(event, include_reference_excerpts=include_reference_excerpts)
+        for event in selected
+    ]
+
+    archive_uri, item_count, generated_at = await hass.async_add_executor_job(
+        lambda: _write_archive_package(
+            destination_path=destination_path,
+            activities=serialized,
+            start=start,
+            end=end,
+        )
+    )
+    return {
+        "archive_uri": archive_uri,
+        "item_count": item_count,
+        "generated_at": generated_at,
+    }
+
+
+async def _async_handle_resolve_mobile_context(
+    hass: HomeAssistant,
+    call: ServiceCall,
+) -> dict[str, Any]:
+    """Resolve person and room context for mobile voice and typed requests."""
+    storage = ConciergeStorage(hass)
+    state = await storage.async_load_state()
+
+    resolved_person: PersonProfile | None = None
+    person_confidence = 0.0
+    person_id = call.data.get("person_id")
+    mobile_target_id = call.data.get("mobile_target_id")
+
+    if person_id:
+        resolved_person = state.person_profiles.get(person_id)
+        if resolved_person is not None:
+            person_confidence = 1.0
+    elif mobile_target_id:
+        for profile in state.person_profiles.values():
+            if mobile_target_id in _active_mobile_targets(profile):
+                resolved_person = profile
+                person_confidence = 0.9
+                break
+
+    resolved_area_id = resolved_person.linked_area_id if resolved_person is not None else None
+    room_confidence = 0.8 if resolved_area_id else 0.0
+
+    return {
+        "resolved_person_id": resolved_person.person_id if resolved_person else None,
+        "person_confidence": person_confidence,
+        "resolved_area_id": resolved_area_id,
+        "room_confidence": room_confidence,
+        "attribution_factors": (
+            ["explicit_person_id"]
+            if person_id and resolved_person
+            else (["mobile_target_match"] if resolved_person else [])
+        ),
+        "clarification_required": room_confidence < 0.5,
+    }
+
+
+async def _async_handle_push_person_message(
+    hass: HomeAssistant,
+    call: ServiceCall,
+) -> dict[str, Any]:
+    """Send person-scoped mobile push after deterministic target filtering."""
+    storage = ConciergeStorage(hass)
+    state = await storage.async_load_state()
+    profile = state.person_profiles.get(call.data["person_id"])
+    if profile is None:
+        raise vol.Invalid("person_id is not configured")
+
+    target_id = _select_mobile_target(profile, call.data.get("target_id"))
+    notify_service = f"notify.{target_id}"
+
+    async def _runner() -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "title": call.data.get("title", "Concierge"),
+            "message": call.data["message"],
+            "data": dict(call.data.get("data", {})),
+        }
+        await hass.services.async_call("notify", target_id, payload, blocking=True)
+
+        return {
+            "sent": True,
+            "person_id": profile.person_id,
+            "target_id": target_id,
+            "service": notify_service,
+        }
+
+    return await _async_with_activity(
+        hass,
+        call,
+        intent_class="push_person_message",
+        request_summary=f"Mobile push sent to {profile.name or profile.person_id}",
+        action_name="push_person_message",
+        resolved_person_id=profile.person_id,
+        resolved_area_id=profile.linked_area_id,
+        channel="service_operational",
+        external_refs=[{"ref_type": "mobile_notify", "target_id": target_id}],
+        runner=_runner,
+    )
 
 
 async def async_register_services(hass: HomeAssistant) -> None:
@@ -1021,6 +3007,48 @@ async def async_register_services(hass: HomeAssistant) -> None:
     )
     hass.services.async_register(
         DOMAIN,
+        SERVICE_START_VOICE_ENROLLMENT,
+        _bind(_async_handle_start_voice_enrollment),
+        schema=SERVICE_START_VOICE_ENROLLMENT_SCHEMA,
+        supports_response=SupportsResponse.ONLY,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_CAPTURE_VOICE_ENROLLMENT_SAMPLE,
+        _bind(_async_handle_capture_voice_enrollment_sample),
+        schema=SERVICE_CAPTURE_VOICE_ENROLLMENT_SAMPLE_SCHEMA,
+        supports_response=SupportsResponse.ONLY,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_REMOVE_VOICE_ENROLLMENT_SAMPLE,
+        _bind(_async_handle_remove_voice_enrollment_sample),
+        schema=SERVICE_REMOVE_VOICE_ENROLLMENT_SAMPLE_SCHEMA,
+        supports_response=SupportsResponse.ONLY,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_BUILD_VOICE_PROFILE,
+        _bind(_async_handle_build_voice_profile),
+        schema=SERVICE_BUILD_VOICE_PROFILE_SCHEMA,
+        supports_response=SupportsResponse.ONLY,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_RESET_VOICE_PROFILE,
+        _bind(_async_handle_reset_voice_profile),
+        schema=SERVICE_RESET_VOICE_PROFILE_SCHEMA,
+        supports_response=SupportsResponse.ONLY,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_DELETE_VOICE_PROFILE,
+        _bind(_async_handle_delete_voice_profile),
+        schema=SERVICE_DELETE_VOICE_PROFILE_SCHEMA,
+        supports_response=SupportsResponse.ONLY,
+    )
+    hass.services.async_register(
+        DOMAIN,
         SERVICE_UPDATE_GLOBAL_CONTEXT,
         _bind(_async_handle_update_global_context),
         schema=SERVICE_UPDATE_GLOBAL_CONTEXT_SCHEMA,
@@ -1082,6 +3110,48 @@ async def async_register_services(hass: HomeAssistant) -> None:
         schema=SERVICE_REFRESH_ENTITY_STRUCTURE_SCHEMA,
         supports_response=SupportsResponse.ONLY,
     )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_RECORD_ACTIVITY_EVENT,
+        _bind(_async_handle_record_activity_event),
+        schema=SERVICE_RECORD_ACTIVITY_EVENT_SCHEMA,
+        supports_response=SupportsResponse.ONLY,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_CLOSE_ACTIVITY_OUTCOME,
+        _bind(_async_handle_close_activity_outcome),
+        schema=SERVICE_CLOSE_ACTIVITY_OUTCOME_SCHEMA,
+        supports_response=SupportsResponse.ONLY,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_GET_ACTIVITY_TIMELINE,
+        _bind(_async_handle_get_activity_timeline),
+        schema=SERVICE_GET_ACTIVITY_TIMELINE_SCHEMA,
+        supports_response=SupportsResponse.ONLY,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_EXPORT_ACTIVITY_ARCHIVE,
+        _bind(_async_handle_export_activity_archive),
+        schema=SERVICE_EXPORT_ACTIVITY_ARCHIVE_SCHEMA,
+        supports_response=SupportsResponse.ONLY,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_RESOLVE_MOBILE_CONTEXT,
+        _bind(_async_handle_resolve_mobile_context),
+        schema=SERVICE_RESOLVE_MOBILE_CONTEXT_SCHEMA,
+        supports_response=SupportsResponse.ONLY,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_PUSH_PERSON_MESSAGE,
+        _bind(_async_handle_push_person_message),
+        schema=SERVICE_PUSH_PERSON_MESSAGE_SCHEMA,
+        supports_response=SupportsResponse.ONLY,
+    )
 async def async_unregister_services(hass: HomeAssistant) -> None:
     """Unregister Concierge services."""
     for service_name in (
@@ -1096,6 +3166,12 @@ async def async_unregister_services(hass: HomeAssistant) -> None:
         SERVICE_UPDATE_IDENTITY_PROFILE,
         SERVICE_UPDATE_PERSON_PROFILE,
         SERVICE_UPDATE_VOICE_PROFILE,
+        SERVICE_START_VOICE_ENROLLMENT,
+        SERVICE_CAPTURE_VOICE_ENROLLMENT_SAMPLE,
+        SERVICE_REMOVE_VOICE_ENROLLMENT_SAMPLE,
+        SERVICE_BUILD_VOICE_PROFILE,
+        SERVICE_RESET_VOICE_PROFILE,
+        SERVICE_DELETE_VOICE_PROFILE,
         SERVICE_UPDATE_GLOBAL_CONTEXT,
         SERVICE_UPDATE_EXECUTION_PREFERENCES,
         SERVICE_UPDATE_COMPOSITE_CONFIG,
@@ -1105,6 +3181,12 @@ async def async_unregister_services(hass: HomeAssistant) -> None:
         SERVICE_PREVIEW_TTS_VOICE,
         SERVICE_SYNC_ROOMS,
         SERVICE_REFRESH_ENTITY_STRUCTURE,
+        SERVICE_RECORD_ACTIVITY_EVENT,
+        SERVICE_CLOSE_ACTIVITY_OUTCOME,
+        SERVICE_GET_ACTIVITY_TIMELINE,
+        SERVICE_EXPORT_ACTIVITY_ARCHIVE,
+        SERVICE_RESOLVE_MOBILE_CONTEXT,
+        SERVICE_PUSH_PERSON_MESSAGE,
     ):
         if hass.services.has_service(DOMAIN, service_name):
             hass.services.async_remove(DOMAIN, service_name)
