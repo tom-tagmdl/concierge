@@ -139,6 +139,27 @@ class VoiceProfile:
 
 
 @dataclass(slots=True)
+class EnrollmentSession:
+    """Enrollment session scaffolding state for deterministic lifecycle ownership."""
+
+    session_id: str
+    person_id: str
+    voice_profile_id: str
+    state: str
+    created_at: str
+    updated_at: str
+    sample_count: int = 0
+    sample_items: list[dict[str, Any]] = field(default_factory=list)
+    enrollment_started_at: str = ""
+    last_sample_at: str = ""
+    last_built_at: str = ""
+    cleanup_status: str = "not_started"
+    capture_provider: str = "browser_microphone"
+    last_error: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
 class Interaction:
     """Runtime interaction surfaced to UI/voice channels."""
 
@@ -244,6 +265,7 @@ class ConciergeState:
     person_profiles: dict[str, PersonProfile] = field(default_factory=dict)
     default_voice_profile: VoiceProfile | None = None
     voice_profiles: dict[str, VoiceProfile] = field(default_factory=dict)
+    enrollment_sessions: dict[str, EnrollmentSession] = field(default_factory=dict)
     default_identity_profile: IdentityProfile | None = None
     identity_profiles: dict[str, IdentityProfile] = field(default_factory=dict)
     global_features: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -451,6 +473,26 @@ class ConciergeState:
                 }
                 for voice_profile_id, profile in self.voice_profiles.items()
             },
+            "enrollment_sessions": {
+                session_id: {
+                    "session_id": session.session_id,
+                    "person_id": session.person_id,
+                    "voice_profile_id": session.voice_profile_id,
+                    "state": session.state,
+                    "created_at": session.created_at,
+                    "updated_at": session.updated_at,
+                    "sample_count": session.sample_count,
+                    "sample_items": session.sample_items,
+                    "enrollment_started_at": session.enrollment_started_at,
+                    "last_sample_at": session.last_sample_at,
+                    "last_built_at": session.last_built_at,
+                    "cleanup_status": session.cleanup_status,
+                    "capture_provider": session.capture_provider,
+                    "last_error": session.last_error,
+                    "metadata": session.metadata,
+                }
+                for session_id, session in self.enrollment_sessions.items()
+            },
             "default_identity_profile": (
                 {
                     "profile_id": self.default_identity_profile.profile_id,
@@ -494,6 +536,7 @@ class ConciergeState:
         person_profiles_data = data.get("person_profiles", {})
         default_voice_data = data.get("default_voice_profile")
         voice_profiles_data = data.get("voice_profiles", {})
+        enrollment_sessions_data = data.get("enrollment_sessions", {})
         default_identity_data = data.get("default_identity_profile")
         identity_profiles_data = data.get("identity_profiles", {})
 
@@ -726,6 +769,27 @@ class ConciergeState:
                     consent=dict(payload.get("consent", {})),
                 )
                 for voice_profile_id, payload in voice_profiles_data.items()
+                if isinstance(payload, dict)
+            },
+            enrollment_sessions={
+                session_id: EnrollmentSession(
+                    session_id=payload.get("session_id", session_id),
+                    person_id=payload.get("person_id", ""),
+                    voice_profile_id=payload.get("voice_profile_id", ""),
+                    state=payload.get("state", "idle"),
+                    created_at=payload.get("created_at", ""),
+                    updated_at=payload.get("updated_at", ""),
+                    sample_count=int(payload.get("sample_count", 0)),
+                    sample_items=list(payload.get("sample_items", [])),
+                    enrollment_started_at=payload.get("enrollment_started_at", ""),
+                    last_sample_at=payload.get("last_sample_at", ""),
+                    last_built_at=payload.get("last_built_at", ""),
+                    cleanup_status=payload.get("cleanup_status", "not_started"),
+                    capture_provider=payload.get("capture_provider", "browser_microphone"),
+                    last_error=payload.get("last_error", ""),
+                    metadata=dict(payload.get("metadata", {})),
+                )
+                for session_id, payload in enrollment_sessions_data.items()
                 if isinstance(payload, dict)
             },
             default_identity_profile=(

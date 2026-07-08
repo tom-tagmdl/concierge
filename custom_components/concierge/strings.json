@@ -40,5 +40,51 @@
         }
       }
     }
+  },
+  "issues": {
+    "voice_enrollment_storage_missing": {
+      "title": "Voice enrollment storage is not configured",
+      "description": "Concierge could not use external storage for voice enrollment. Failure code: {failure_code}. Provider: {provider_type}. Last occurrence: {last_occurrence}."
+    },
+    "voice_enrollment_storage_unavailable": {
+      "title": "Voice enrollment storage is not available",
+      "description": "Concierge could not reach the external voice enrollment storage. Failure code: {failure_code}. Provider: {provider_type}. Last occurrence: {last_occurrence}."
+    },
+    "voice_enrollment_storage_not_writable": {
+      "title": "Voice enrollment storage is not writable",
+      "description": "Concierge could not write to the external voice enrollment storage. Failure code: {failure_code}. Provider: {provider_type}. Last occurrence: {last_occurrence}."
+    },
+    "voice_enrollment_storage_misconfigured": {
+      "title": "Voice enrollment storage is not policy compliant",
+      "description": "Concierge rejected the configured voice enrollment storage location. Failure code: {failure_code}. Provider: {provider_type}. Last occurrence: {last_occurrence}."
+    },
+    "voice_enrollment_storage_recorder_conflict": {
+      "title": "Voice enrollment storage conflicts with recorder storage",
+      "description": "Concierge detected that the configured voice enrollment storage conflicts with recorder or database storage. Failure code: {failure_code}. Provider: {provider_type}. Last occurrence: {last_occurrence}."
+    },
+    "voice_enrollment_storage_probe_failed": {
+      "title": "Voice enrollment storage readiness probe failed",
+      "description": "Concierge could not complete a safe readiness probe for external voice enrollment storage. Failure code: {failure_code}. Provider: {provider_type}. Last occurrence: {last_occurrence}."
+    },
+    "voice_enrollment_cleanup_failed": {
+      "title": "Voice enrollment cleanup could not complete",
+      "description": "Concierge could not complete voice enrollment cleanup. Cleanup reason: {cleanup_reason}. Result: {cleanup_result_code}. Last occurrence: {last_occurrence}."
+    },
+    "voice_enrollment_orphan_cleanup_failed": {
+      "title": "Voice enrollment found abandoned session artifacts",
+      "description": "Concierge found abandoned voice enrollment artifacts during startup reconciliation and could not fully clean them up. Failed cleanup count: {cleanup_failed_count}. Orphan count: {orphan_count}. Last occurrence: {last_occurrence}."
+    },
+    "voice_enrollment_invalid_manifest": {
+      "title": "Voice enrollment session metadata is invalid",
+      "description": "Concierge found invalid or unreadable voice enrollment session metadata during startup reconciliation. Invalid manifest count: {invalid_manifest_count}. Last occurrence: {last_occurrence}."
+    },
+    "voice_enrollment_capture_provider_unavailable": {
+      "title": "Voice enrollment provider is unavailable",
+      "description": "Concierge could not reach the configured voice enrollment provider. Last occurrence: {last_occurrence}."
+    },
+    "voice_enrollment_capture_provider_unsupported": {
+      "title": "Voice enrollment provider is unsupported",
+      "description": "Concierge detected an unsupported voice enrollment provider configuration. Last occurrence: {last_occurrence}."
+    }
   }
 }

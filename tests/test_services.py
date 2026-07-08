@@ -383,6 +383,56 @@ async def test_voice_enrollment_lifecycle_services_round_trip(
     assert final_state.person_profiles["tom"].voice_profile_id is None
 
 
+async def test_start_voice_enrollment_fails_closed_when_storage_unavailable(
+    hass: HomeAssistant,
+    setup_integration,
+    monkeypatch,
+) -> None:
+    """Preflight failure should block session creation before enrollment starts."""
+    from types import SimpleNamespace
+
+    from custom_components.concierge import services as services_module
+    from custom_components.concierge.storage import ConciergeStorage
+
+    await hass.services.async_call(
+        DOMAIN,
+        "update_person_profile",
+        {
+            "person_id": "tom",
+            "name": "Tom Grounds",
+        },
+        blocking=True,
+    )
+
+    fake_provider = SimpleNamespace(
+        validate_ready=lambda: SimpleNamespace(
+            ready=False,
+            failure_code="storage_unavailable",
+            failure_message_safe="external enrollment storage is unavailable",
+            provider_type="mounted_path",
+        )
+    )
+    monkeypatch.setattr(services_module, "_voice_storage_provider_from_hass", lambda hass: fake_provider)
+
+    with pytest.raises(Exception, match="storage_unavailable"):
+        await hass.services.async_call(
+            DOMAIN,
+            "start_voice_enrollment",
+            {
+                "person_id": "tom",
+                "voice_profile_id": "tom_voice",
+                "voice_name": "Tom Voice",
+                "consent_acknowledged": True,
+                "local_only": True,
+            },
+            blocking=True,
+            return_response=True,
+        )
+
+    state = await ConciergeStorage(hass).async_load_state()
+    assert state.enrollment_sessions == {}
+
+
 async def test_sync_rooms_service_reports_success(
     hass: HomeAssistant,
     setup_integration,

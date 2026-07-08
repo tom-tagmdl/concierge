@@ -14,6 +14,7 @@ from .models import (
     CompositeConfig,
     ConciergeState,
     ContextState,
+    EnrollmentSession,
     IdentityProfile,
     Interaction,
     PersonProfile,
@@ -47,6 +48,126 @@ class ConciergeStorage:
     async def async_save_state(self, state: ConciergeState) -> None:
         """Persist the full Concierge state."""
         await self._store.async_save(state.as_dict())
+
+    async def async_get_enrollment_session(self, session_id: str) -> EnrollmentSession | None:
+        """Return one enrollment session by identifier if it exists."""
+        state = await self.async_load_state()
+        return state.enrollment_sessions.get(session_id)
+
+    async def async_get_latest_enrollment_session_for_voice_profile(
+        self,
+        voice_profile_id: str,
+    ) -> EnrollmentSession | None:
+        """Return the most recently updated enrollment session for a voice profile."""
+        state = await self.async_load_state()
+        matches = [
+            session
+            for session in state.enrollment_sessions.values()
+            if session.voice_profile_id == voice_profile_id
+        ]
+        if not matches:
+            return None
+        matches.sort(key=lambda item: item.updated_at)
+        return matches[-1]
+
+    async def async_upsert_enrollment_session(self, session: EnrollmentSession) -> ConciergeState:
+        """Insert or update one enrollment session record."""
+        state = await self.async_load_state()
+        state.enrollment_sessions[session.session_id] = session
+        await self.async_save_state(state)
+        return state
+
+    async def async_delete_enrollment_sessions_for_voice_profile(self, voice_profile_id: str) -> ConciergeState:
+        """Delete all enrollment sessions linked to one voice profile."""
+        state = await self.async_load_state()
+        remove_ids = [
+            session_id
+            for session_id, session in state.enrollment_sessions.items()
+            if session.voice_profile_id == voice_profile_id
+        ]
+        for session_id in remove_ids:
+            state.enrollment_sessions.pop(session_id, None)
+        await self.async_save_state(state)
+        return state
+
+    async def async_create_enrollment_session(
+        self,
+        *,
+        session_id: str,
+        person_id: str,
+        voice_profile_id: str,
+        state_name: str,
+        sample_count: int = 0,
+        sample_items: list[dict[str, Any]] | None = None,
+        enrollment_started_at: str = "",
+        last_sample_at: str = "",
+        last_built_at: str = "",
+        cleanup_status: str = "not_started",
+        capture_provider: str = "browser_microphone",
+    ) -> EnrollmentSession:
+        """Create a new enrollment session record and persist it."""
+        now_iso = _utcnow_iso()
+        session = EnrollmentSession(
+            session_id=session_id,
+            person_id=person_id,
+            voice_profile_id=voice_profile_id,
+            state=state_name,
+            created_at=now_iso,
+            updated_at=now_iso,
+            sample_count=int(sample_count),
+            sample_items=list(sample_items or []),
+            enrollment_started_at=enrollment_started_at,
+            last_sample_at=last_sample_at,
+            last_built_at=last_built_at,
+            cleanup_status=cleanup_status,
+            capture_provider=capture_provider,
+        )
+        await self.async_upsert_enrollment_session(session)
+        return session
+
+    async def async_update_enrollment_session(
+        self,
+        *,
+        session_id: str,
+        state_name: str | None = None,
+        sample_count: int | None = None,
+        sample_items: list[dict[str, Any]] | None = None,
+        enrollment_started_at: str | None = None,
+        last_sample_at: str | None = None,
+        last_built_at: str | None = None,
+        cleanup_status: str | None = None,
+        last_error: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> EnrollmentSession:
+        """Update mutable fields on an existing enrollment session record."""
+        state = await self.async_load_state()
+        current = state.enrollment_sessions.get(session_id)
+        if current is None:
+            raise KeyError(session_id)
+
+        updated = EnrollmentSession(
+            session_id=current.session_id,
+            person_id=current.person_id,
+            voice_profile_id=current.voice_profile_id,
+            state=current.state if state_name is None else state_name,
+            created_at=current.created_at,
+            updated_at=_utcnow_iso(),
+            sample_count=current.sample_count if sample_count is None else int(sample_count),
+            sample_items=list(current.sample_items) if sample_items is None else list(sample_items),
+            enrollment_started_at=(
+                current.enrollment_started_at if enrollment_started_at is None else str(enrollment_started_at)
+            ),
+            last_sample_at=current.last_sample_at if last_sample_at is None else str(last_sample_at),
+            last_built_at=current.last_built_at if last_built_at is None else str(last_built_at),
+            cleanup_status=current.cleanup_status if cleanup_status is None else str(cleanup_status),
+            capture_provider=current.capture_provider,
+            last_error=current.last_error if last_error is None else str(last_error),
+            metadata=(dict(current.metadata) if metadata is None else dict(metadata)),
+        )
+
+        state.enrollment_sessions[session_id] = updated
+        await self.async_save_state(state)
+        return updated
 
     async def async_update_room_config(
         self,

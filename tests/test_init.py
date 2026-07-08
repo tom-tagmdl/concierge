@@ -12,6 +12,7 @@ async def test_setup_and_unload_entry(hass: HomeAssistant, setup_integration) ->
     entry = setup_integration
     assert DOMAIN in hass.data
     assert entry.entry_id in hass.data[DOMAIN]
+    assert f"{entry.entry_id}_startup_reconciliation" in hass.data[DOMAIN]
 
     assert await hass.config_entries.async_unload(entry.entry_id)
     await hass.async_block_till_done()

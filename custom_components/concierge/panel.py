@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import logging
 import os
 from pathlib import Path
@@ -21,12 +20,17 @@ from homeassistant.helpers import (
 
 from .const import DOMAIN
 from .const import TTS_PROVIDER_ENTITY_IDS
+from .const import (
+    VOICE_ENROLLMENT_PREFLIGHT_STORAGE_NOT_CONFIGURED,
+    VOICE_ENROLLMENT_PREFLIGHT_STORAGE_UNKNOWN_FAILURE,
+)
 from .archive_runtime import (
     archive_options_from_entry,
     archive_trigger_age_days,
     get_ha_purge_keep_days,
     resolve_voice_enrollment_root,
 )
+from .enrollment_storage import MountedPathEnrollmentStorageProvider
 from .storage import ConciergeStorage
 
 _LOGGER = logging.getLogger(__name__)
@@ -838,45 +842,13 @@ def _voice_storage_root_from_hass(hass) -> Path:
     return resolve_voice_enrollment_root(destination_uri)
 
 
-def _safe_voice_slug(value: str) -> str:
-    """Normalize ids into safe folder-name slugs."""
-    normalized = str(value or "").strip().lower().replace(".", "_").replace(" ", "_")
-    normalized = "".join(ch for ch in normalized if ch.isalnum() or ch in {"_", "-"})
-    return normalized or "unknown"
-
-
-def _voice_suffix_for_content_type(content_type: str) -> str:
-    """Map upload content types to file suffixes."""
-    lowered = str(content_type or "").lower()
-    if "ogg" in lowered:
-        return ".ogg"
-    if "wav" in lowered or "wave" in lowered:
-        return ".wav"
-    if "mpeg" in lowered or "mp3" in lowered:
-        return ".mp3"
-    if "webm" in lowered:
-        return ".webm"
-    return ".bin"
-
-
-def _write_voice_sample_bytes(
-    *,
-    root_path: Path,
-    person_id: str,
-    voice_profile_id: str,
-    phrase_index: int,
-    content_type: str,
-    payload: bytes,
-) -> Path:
-    """Persist uploaded voice sample bytes beneath the configured attached-storage root."""
-    sample_dir = root_path / _safe_voice_slug(person_id) / _safe_voice_slug(voice_profile_id)
-    sample_dir.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-    suffix = _voice_suffix_for_content_type(content_type)
-    file_name = f"phrase_{int(phrase_index) + 1:02d}_{stamp}{suffix}"
-    destination = sample_dir / file_name
-    destination.write_bytes(payload)
-    return destination
+def _voice_storage_provider_from_hass(hass) -> MountedPathEnrollmentStorageProvider:
+    """Return mounted-path enrollment storage provider from Concierge options."""
+    root_path = _voice_storage_root_from_hass(hass)
+    return MountedPathEnrollmentStorageProvider(
+        root_path=root_path,
+        hass_config_path=Path(hass.config.path()),
+    )
 
 
 class ConciergeStorageSnapshotView(HomeAssistantView):
@@ -1187,25 +1159,33 @@ class ConciergeVoiceEnrollmentUploadView(HomeAssistantView):
             raise web.HTTPBadRequest(text="phrase_index must be an integer") from err
 
         try:
-            root_path = _voice_storage_root_from_hass(hass)
+            provider = _voice_storage_provider_from_hass(hass)
         except ValueError as err:
-            raise web.HTTPPreconditionFailed(text=str(err)) from err
+            raise web.HTTPPreconditionFailed(
+                text=f"external enrollment storage preflight failed: {VOICE_ENROLLMENT_PREFLIGHT_STORAGE_NOT_CONFIGURED}"
+            ) from err
 
-        destination = await hass.async_add_executor_job(
-            lambda: _write_voice_sample_bytes(
-                root_path=root_path,
-                person_id=person_id,
-                voice_profile_id=voice_profile_id,
-                phrase_index=phrase_index,
+        readiness = await hass.async_add_executor_job(provider.validate_ready)
+        if not readiness.ready:
+            failure_message = str(readiness.failure_message_safe or "enrollment storage is not ready")
+            failure_code = str(readiness.failure_code or VOICE_ENROLLMENT_PREFLIGHT_STORAGE_UNKNOWN_FAILURE)
+            raise web.HTTPPreconditionFailed(text=f"{failure_message}: {failure_code}")
+
+        session_id = f"{person_id}__{voice_profile_id}"
+
+        write_result = await hass.async_add_executor_job(
+            lambda: provider.write_sample(
+                session_id=session_id,
+                sample_index=phrase_index,
                 content_type=audio_content_type,
-                payload=audio_bytes,
+                data_bytes=audio_bytes,
             )
         )
 
         response = web.json_response(
             {
                 "saved": True,
-                "recording_path": str(destination).replace("\\", "/"),
+                "recording_path": write_result.sample_path,
                 "recording_mime_type": audio_content_type,
                 "recording_size_bytes": len(audio_bytes),
                 "phrase_index": phrase_index,

@@ -17,7 +17,7 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import floor_registry as fr
 from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
 
-from .archive_runtime import archive_options_from_entry
+from .archive_runtime import archive_options_from_entry, resolve_voice_enrollment_root
 from .const import (
     SERVICE_BUILD_VOICE_PROFILE,
     SERVICE_CAPTURE_VOICE_ENROLLMENT_SAMPLE,
@@ -54,20 +54,53 @@ from .const import (
     SERVICE_UPDATE_ROOM_CONFIG,
     SERVICE_UPDATE_VOICE_PROFILE,
     TTS_PROVIDER_ENTITY_IDS,
+    VOICE_ENROLLMENT_CLEANUP_REASON_CANCELLED,
+    VOICE_ENROLLMENT_CLEANUP_REASON_COMPLETED,
+    VOICE_ENROLLMENT_CLEANUP_REASON_FAILED,
+    VOICE_ENROLLMENT_CLEANUP_REASON_MANUAL,
+    VOICE_ENROLLMENT_CLEANUP_REASON_TIMEOUT,
+    VOICE_ENROLLMENT_CLEANUP_REASON_UNKNOWN,
+    VOICE_ENROLLMENT_CLEANUP_RESULT_FAILED,
+    VOICE_ENROLLMENT_PREFLIGHT_STORAGE_NOT_CONFIGURED,
+    VOICE_ENROLLMENT_PREFLIGHT_STORAGE_UNKNOWN_FAILURE,
 )
+from .enrollment_cleanup import EnrollmentCleanupManager, EnrollmentCleanupRequest
+from .enrollment_session import (
+    build_enrollment_session_manifest_payload,
+    enrollment_session_for_start,
+    enrollment_session_mark_cleanup_complete,
+    enrollment_session_mark_cleanup_failed,
+    enrollment_session_mark_cleanup_pending,
+    enrollment_session_mark_cleanup_running,
+    enrollment_session_mark_profile_built,
+    enrollment_session_record_sample,
+    enrollment_session_remove_sample,
+    enrollment_session_reset,
+    legacy_voice_profile_enrollment_state,
+    resolve_manifest_target_sample_count,
+)
+from .enrollment_storage import MountedPathEnrollmentStorageProvider
 from .models import (
     ActivityEvent,
     ContextState,
+    EnrollmentSession,
     IdentityProfile,
     Interaction,
     PersonProfile,
     SignalState,
     VoiceProfile,
 )
+from .repairs import (
+    async_clear_cleanup_issue,
+    async_clear_storage_issue,
+    async_create_or_update_cleanup_issue,
+    async_create_or_update_storage_issue,
+)
 from .storage import ConciergeStorage
 
 _PROVIDER_NONE = "none"
 _PROVIDER_ASSET_INTELLIGENCE = "asset_intelligence"
+_DEFAULT_TARGET_SAMPLE_COUNT = 3
 
 TTS_PROVIDER_ENTITY_IDS = {
     "openai_conversation": "tts.openai_tts",
@@ -769,48 +802,310 @@ def _voice_profile_id_for_person(person_id: str) -> str:
     return f"{normalized or 'person'}_voice"
 
 
+def _session_state_from_legacy_enrollment_state(enrollment_state: str, sample_count: int) -> str:
+    """Map legacy voice profile enrollment state strings onto session lifecycle states."""
+    value = str(enrollment_state or "").strip().lower()
+    if value == "trained":
+        return "completed_pending_cleanup"
+    if value == "untrained":
+        return "idle"
+    if sample_count > 0:
+        return "sample_received"
+    return "ready"
+
+
+def _project_voice_profile_from_session(
+    *,
+    existing_voice: VoiceProfile | None,
+    voice_profile_id: str,
+    name: str,
+    session,
+    enrollment_source: str,
+    speaker_embedding_id: str,
+    attribution_confidence: float | None,
+    disabled: bool,
+    consent: dict[str, Any],
+    tts_voice: str,
+) -> VoiceProfile:
+    """Project VoiceProfile lifecycle fields from authoritative EnrollmentSession state."""
+    return VoiceProfile(
+        voice_profile_id=voice_profile_id,
+        name=name,
+        tts_voice=tts_voice,
+        enrollment_state=legacy_voice_profile_enrollment_state(session),
+        enrollment_source=enrollment_source,
+        speaker_embedding_id=speaker_embedding_id,
+        sample_count=session.sample_count,
+        sample_items=list(session.sample_items),
+        attribution_confidence=attribution_confidence,
+        enrollment_started_at=session.enrollment_started_at,
+        last_sample_at=session.last_sample_at,
+        last_built_at=session.last_built_at,
+        disabled=disabled,
+        consent=dict(consent),
+    )
+
+
 def _voice_confidence_for_sample_count(sample_count: int) -> float:
     """Return deterministic confidence estimate based on captured sample count."""
     bounded = max(0, int(sample_count))
     return min(0.95, 0.55 + (0.05 * bounded))
 
 
-def _voice_sample_recording_paths(sample_items: list[dict[str, Any]]) -> list[Path]:
-    """Return safe attached-storage recording paths referenced by voice sample metadata."""
-    paths: list[Path] = []
+def _sample_recording_paths(sample_items: list[dict[str, Any]]) -> list[str]:
+    """Return recording_path values from sample metadata for provider-owned resolution."""
+    paths: list[str] = []
     for sample in sample_items:
         raw_path = str(sample.get("recording_path", "") or "").strip()
-        if not raw_path:
-            continue
-        try:
-            path = Path(raw_path)
-        except (TypeError, ValueError):
-            continue
-        normalized = str(path).replace("\\", "/")
-        if not (normalized.startswith("/media/") or normalized.startswith("/share/")):
-            continue
-        paths.append(path)
+        if raw_path:
+            paths.append(raw_path)
     return paths
 
 
-def _delete_voice_recordings(paths: list[Path]) -> None:
-    """Delete captured raw-audio files and prune empty parent folders when possible."""
-    for path in paths:
-        try:
-            if path.exists() and path.is_file():
-                path.unlink()
-        except OSError:
-            continue
+def _voice_storage_provider_from_hass(hass: HomeAssistant) -> MountedPathEnrollmentStorageProvider | None:
+    """Return mounted-path provider when Concierge attached storage is configured."""
+    entries = hass.config_entries.async_entries(DOMAIN)
+    if not entries:
+        return None
 
-        parent = path.parent
-        for _ in range(3):
-            try:
-                if not parent.exists():
-                    break
-                parent.rmdir()
-            except OSError:
-                break
-            parent = parent.parent
+    archive_options = archive_options_from_entry(entries[0])
+    destination_uri = str(archive_options.get("destination_uri", "") or "").strip()
+    destination_configured = bool(archive_options.get("destination_configured", False))
+    if not destination_configured or not destination_uri:
+        return None
+
+    try:
+        root_path = resolve_voice_enrollment_root(destination_uri)
+    except ValueError:
+        return None
+
+    return MountedPathEnrollmentStorageProvider(
+        root_path=root_path,
+        hass_config_path=Path(hass.config.path()),
+    )
+
+
+async def _async_sync_session_manifest(
+    hass: HomeAssistant,
+    session: EnrollmentSession,
+    *,
+    target_sample_count: int | None = None,
+) -> None:
+    """Persist atomic provider-owned session manifest from authoritative session state."""
+    provider = _voice_storage_provider_from_hass(hass)
+    if provider is None:
+        return
+
+    readiness = await hass.async_add_executor_job(provider.validate_ready)
+    if not readiness.ready:
+        return
+
+    existing_manifest = await hass.async_add_executor_job(
+        lambda: provider.read_session_manifest(session.session_id)
+    )
+    effective_target = resolve_manifest_target_sample_count(
+        session,
+        requested_target_sample_count=target_sample_count,
+        existing_target_sample_count=(
+            int(existing_manifest.target_sample_count)
+            if existing_manifest is not None
+            else None
+        ),
+        default_target_sample_count=_DEFAULT_TARGET_SAMPLE_COUNT,
+    )
+    manifest_payload = build_enrollment_session_manifest_payload(
+        session,
+        target_sample_count=effective_target,
+    )
+    await hass.async_add_executor_job(lambda: provider.upsert_session_manifest(manifest_payload))
+
+
+async def _async_require_storage_preflight(
+    hass: HomeAssistant,
+) -> MountedPathEnrollmentStorageProvider:
+    """Fail-closed enrollment storage preflight gate for capture/enrollment paths."""
+    provider = _voice_storage_provider_from_hass(hass)
+    if provider is None:
+        await async_create_or_update_storage_issue(
+            hass,
+            failure_code=VOICE_ENROLLMENT_PREFLIGHT_STORAGE_NOT_CONFIGURED,
+        )
+        raise vol.Invalid(
+            f"external enrollment storage preflight failed: {VOICE_ENROLLMENT_PREFLIGHT_STORAGE_NOT_CONFIGURED}"
+        )
+
+    readiness = await hass.async_add_executor_job(provider.validate_ready)
+    if readiness.ready:
+        await async_clear_storage_issue(hass)
+        return provider
+
+    failure_code = str(readiness.failure_code or VOICE_ENROLLMENT_PREFLIGHT_STORAGE_UNKNOWN_FAILURE)
+    failure_message = str(readiness.failure_message_safe or "external enrollment storage preflight failed")
+    await async_create_or_update_storage_issue(
+        hass,
+        failure_code=failure_code,
+        provider_type=str(readiness.provider_type or "mounted_path"),
+    )
+    raise vol.Invalid(f"{failure_message}: {failure_code}")
+
+
+async def _async_execute_enrollment_cleanup(
+    hass: HomeAssistant,
+    storage: ConciergeStorage,
+    session: EnrollmentSession,
+    *,
+    cleanup_reason: str,
+) -> tuple[EnrollmentSession, dict[str, Any]]:
+    """Execute provider-backed cleanup while keeping session + manifest synchronized."""
+    reason_value = str(cleanup_reason or VOICE_ENROLLMENT_CLEANUP_REASON_UNKNOWN).strip().lower()
+    if reason_value not in {
+        VOICE_ENROLLMENT_CLEANUP_REASON_COMPLETED,
+        VOICE_ENROLLMENT_CLEANUP_REASON_CANCELLED,
+        VOICE_ENROLLMENT_CLEANUP_REASON_FAILED,
+        VOICE_ENROLLMENT_CLEANUP_REASON_TIMEOUT,
+        VOICE_ENROLLMENT_CLEANUP_REASON_MANUAL,
+        VOICE_ENROLLMENT_CLEANUP_REASON_UNKNOWN,
+    }:
+        reason_value = VOICE_ENROLLMENT_CLEANUP_REASON_UNKNOWN
+
+    pending = enrollment_session_mark_cleanup_pending(session, cleanup_reason=reason_value)
+    pending = await storage.async_update_enrollment_session(
+        session_id=pending.session_id,
+        state_name=pending.state,
+        sample_count=pending.sample_count,
+        sample_items=list(pending.sample_items),
+        enrollment_started_at=pending.enrollment_started_at,
+        last_sample_at=pending.last_sample_at,
+        last_built_at=pending.last_built_at,
+        cleanup_status=pending.cleanup_status,
+        metadata=dict(pending.metadata),
+    )
+    await _async_sync_session_manifest(hass, pending)
+
+    running_started_at = datetime.now(timezone.utc).isoformat()
+    running = enrollment_session_mark_cleanup_running(
+        pending,
+        cleanup_reason=reason_value,
+        cleanup_started_at=running_started_at,
+    )
+    running = await storage.async_update_enrollment_session(
+        session_id=running.session_id,
+        state_name=running.state,
+        sample_count=running.sample_count,
+        sample_items=list(running.sample_items),
+        enrollment_started_at=running.enrollment_started_at,
+        last_sample_at=running.last_sample_at,
+        last_built_at=running.last_built_at,
+        cleanup_status=running.cleanup_status,
+        metadata=dict(running.metadata),
+    )
+    await _async_sync_session_manifest(hass, running)
+
+    provider = _voice_storage_provider_from_hass(hass)
+    if provider is None:
+        completed_at = datetime.now(timezone.utc).isoformat()
+        await async_create_or_update_cleanup_issue(
+            hass,
+            cleanup_result_code=VOICE_ENROLLMENT_CLEANUP_RESULT_FAILED,
+            cleanup_reason=reason_value,
+        )
+        failed = enrollment_session_mark_cleanup_failed(
+            running,
+            cleanup_reason=reason_value,
+            cleanup_result_code=VOICE_ENROLLMENT_CLEANUP_RESULT_FAILED,
+            cleanup_started_at=running_started_at,
+            cleanup_completed_at=completed_at,
+            artifacts_seen_count=0,
+            artifacts_deleted_count=0,
+            artifacts_missing_count=0,
+            error_count=1,
+        )
+        failed = await storage.async_update_enrollment_session(
+            session_id=failed.session_id,
+            state_name=failed.state,
+            sample_count=failed.sample_count,
+            sample_items=list(failed.sample_items),
+            enrollment_started_at=failed.enrollment_started_at,
+            last_sample_at=failed.last_sample_at,
+            last_built_at=failed.last_built_at,
+            cleanup_status=failed.cleanup_status,
+            metadata=dict(failed.metadata),
+        )
+        await _async_sync_session_manifest(hass, failed)
+        return failed, {
+            "cleanup_reason": reason_value,
+            "cleanup_result_code": VOICE_ENROLLMENT_CLEANUP_RESULT_FAILED,
+            "artifacts_seen_count": 0,
+            "artifacts_deleted_count": 0,
+            "artifacts_missing_count": 0,
+            "errors_redacted_or_sanitized": ["provider_unavailable"],
+            "cleanup_started_at": running_started_at,
+            "cleanup_completed_at": completed_at,
+        }
+
+    manager = EnrollmentCleanupManager(provider)
+    cleanup_result = await hass.async_add_executor_job(
+        lambda: manager.cleanup(
+            EnrollmentCleanupRequest(
+                session=running,
+                cleanup_reason=reason_value,
+            )
+        )
+    )
+
+    if cleanup_result.cleanup_result_code in {"failed", "partial"}:
+        await async_create_or_update_cleanup_issue(
+            hass,
+            cleanup_result_code=cleanup_result.cleanup_result_code,
+            cleanup_reason=cleanup_result.cleanup_reason,
+        )
+        finalized = enrollment_session_mark_cleanup_failed(
+            running,
+            cleanup_reason=cleanup_result.cleanup_reason,
+            cleanup_result_code=cleanup_result.cleanup_result_code,
+            cleanup_started_at=cleanup_result.cleanup_started_at,
+            cleanup_completed_at=cleanup_result.cleanup_completed_at,
+            artifacts_seen_count=cleanup_result.artifacts_seen_count,
+            artifacts_deleted_count=cleanup_result.artifacts_deleted_count,
+            artifacts_missing_count=cleanup_result.artifacts_missing_count,
+            error_count=len(cleanup_result.errors_redacted_or_sanitized),
+        )
+    else:
+        await async_clear_cleanup_issue(hass)
+        finalized = enrollment_session_mark_cleanup_complete(
+            running,
+            cleanup_reason=cleanup_result.cleanup_reason,
+            cleanup_result_code=cleanup_result.cleanup_result_code,
+            cleanup_started_at=cleanup_result.cleanup_started_at,
+            cleanup_completed_at=cleanup_result.cleanup_completed_at,
+            artifacts_seen_count=cleanup_result.artifacts_seen_count,
+            artifacts_deleted_count=cleanup_result.artifacts_deleted_count,
+            artifacts_missing_count=cleanup_result.artifacts_missing_count,
+        )
+
+    finalized = await storage.async_update_enrollment_session(
+        session_id=finalized.session_id,
+        state_name=finalized.state,
+        sample_count=finalized.sample_count,
+        sample_items=list(finalized.sample_items),
+        enrollment_started_at=finalized.enrollment_started_at,
+        last_sample_at=finalized.last_sample_at,
+        last_built_at=finalized.last_built_at,
+        cleanup_status=finalized.cleanup_status,
+        metadata=dict(finalized.metadata),
+    )
+    await _async_sync_session_manifest(hass, finalized)
+
+    return finalized, {
+        "cleanup_reason": cleanup_result.cleanup_reason,
+        "cleanup_result_code": cleanup_result.cleanup_result_code,
+        "artifacts_seen_count": cleanup_result.artifacts_seen_count,
+        "artifacts_deleted_count": cleanup_result.artifacts_deleted_count,
+        "artifacts_missing_count": cleanup_result.artifacts_missing_count,
+        "errors_redacted_or_sanitized": list(cleanup_result.errors_redacted_or_sanitized),
+        "cleanup_started_at": cleanup_result.cleanup_started_at,
+        "cleanup_completed_at": cleanup_result.cleanup_completed_at,
+    }
 
 
 def _event_matches_filters(event: ActivityEvent, call: ServiceCall) -> bool:
@@ -1538,26 +1833,74 @@ async def _async_handle_update_voice_profile(
 ) -> dict[str, Any]:
     """Insert or update voice enrollment and attribution state."""
     async def _runner() -> dict[str, Any]:
+        await _async_require_storage_preflight(hass)
+
         storage = ConciergeStorage(hass)
-        profile = VoiceProfile(
-            voice_profile_id=call.data["voice_profile_id"],
+        state = await storage.async_load_state()
+        voice_profile_id = call.data["voice_profile_id"]
+        existing_voice = state.voice_profiles.get(voice_profile_id)
+
+        requested_sample_items = list(call.data.get("sample_items", []))
+        requested_sample_count = int(call.data.get("sample_count", len(requested_sample_items)))
+        if requested_sample_count != len(requested_sample_items) and requested_sample_items:
+            requested_sample_count = len(requested_sample_items)
+
+        session = await storage.async_get_latest_enrollment_session_for_voice_profile(voice_profile_id)
+        if session is None:
+            now_iso = datetime.now(timezone.utc).isoformat()
+            session = await storage.async_create_enrollment_session(
+                session_id=f"session_{int(datetime.now(timezone.utc).timestamp() * 1000)}_{uuid4().hex[:8]}",
+                person_id="",
+                voice_profile_id=voice_profile_id,
+                state_name=_session_state_from_legacy_enrollment_state(
+                    call.data.get("enrollment_state", "untrained"),
+                    requested_sample_count,
+                ),
+                sample_count=requested_sample_count,
+                sample_items=requested_sample_items,
+                enrollment_started_at=call.data.get("enrollment_started_at", now_iso),
+                last_sample_at=call.data.get("last_sample_at", ""),
+                last_built_at=call.data.get("last_built_at", ""),
+            )
+        else:
+            session = await storage.async_update_enrollment_session(
+                session_id=session.session_id,
+                state_name=_session_state_from_legacy_enrollment_state(
+                    call.data.get("enrollment_state", legacy_voice_profile_enrollment_state(session)),
+                    requested_sample_count,
+                ),
+                sample_count=requested_sample_count,
+                sample_items=requested_sample_items,
+                enrollment_started_at=(
+                    call.data.get("enrollment_started_at", session.enrollment_started_at)
+                ),
+                last_sample_at=call.data.get("last_sample_at", session.last_sample_at),
+                last_built_at=call.data.get("last_built_at", session.last_built_at),
+            )
+
+        # Legacy compatibility path: keep session+manifest in lockstep even when
+        # voice profile mutation is requested outside guided enrollment flows.
+        await _async_sync_session_manifest(
+            hass,
+            session,
+            target_sample_count=max(1, requested_sample_count or _DEFAULT_TARGET_SAMPLE_COUNT),
+        )
+
+        profile = _project_voice_profile_from_session(
+            existing_voice=existing_voice,
+            voice_profile_id=voice_profile_id,
             name=call.data["name"],
-            tts_voice=call.data.get("tts_voice", ""),
-            enrollment_state=call.data.get("enrollment_state", "untrained"),
+            session=session,
             enrollment_source=call.data.get("enrollment_source", ""),
             speaker_embedding_id=call.data.get("speaker_embedding_id", ""),
-            sample_count=int(call.data.get("sample_count", 0)),
-            sample_items=list(call.data.get("sample_items", [])),
             attribution_confidence=(
                 float(call.data["attribution_confidence"])
                 if call.data.get("attribution_confidence") is not None
                 else None
             ),
-            enrollment_started_at=call.data.get("enrollment_started_at", ""),
-            last_sample_at=call.data.get("last_sample_at", ""),
-            last_built_at=call.data.get("last_built_at", ""),
             disabled=bool(call.data.get("disabled", False)),
             consent=dict(call.data.get("consent", {})),
+            tts_voice=call.data.get("tts_voice", ""),
         )
         state = await storage.async_update_voice_profile(
             profile,
@@ -1597,6 +1940,8 @@ async def _async_handle_start_voice_enrollment(
         raise vol.Invalid("voice enrollment requires explicit consent_acknowledged=true")
 
     async def _runner() -> dict[str, Any]:
+        provider = await _async_require_storage_preflight(hass)
+
         storage = ConciergeStorage(hass)
         state = await storage.async_load_state()
         existing_person = state.person_profiles.get(person_id)
@@ -1632,29 +1977,34 @@ async def _async_handle_start_voice_enrollment(
             "voice_enrollment": voice_consent,
         }
 
-        profile = VoiceProfile(
+        session = enrollment_session_for_start(
+            person_id=person_id,
             voice_profile_id=voice_profile_id,
-            name=str(call.data.get("voice_name") or person_name),
-            tts_voice=existing_voice.tts_voice if existing_voice is not None else "",
-            enrollment_state=(
-                "capturing"
-                if existing_voice is not None and int(existing_voice.sample_count) > 0
-                else "enrollment_in_progress"
-            ),
-            enrollment_source=(existing_voice.enrollment_source if existing_voice is not None else "people_setup") or "people_setup",
-            speaker_embedding_id=existing_voice.speaker_embedding_id if existing_voice is not None else "",
-            sample_count=int(existing_voice.sample_count) if existing_voice is not None else 0,
-            sample_items=list(existing_voice.sample_items) if existing_voice is not None else [],
-            attribution_confidence=existing_voice.attribution_confidence if existing_voice is not None else None,
+            existing_sample_items=list(existing_voice.sample_items) if existing_voice is not None else [],
             enrollment_started_at=(
                 existing_voice.enrollment_started_at if existing_voice and existing_voice.enrollment_started_at else now_iso
             ),
-            last_sample_at=existing_voice.last_sample_at if existing_voice is not None else "",
-            last_built_at=existing_voice.last_built_at if existing_voice is not None else "",
-            disabled=False,
-            consent=merged_consent,
+        )
+        await storage.async_upsert_enrollment_session(session)
+        await _async_sync_session_manifest(
+            hass,
+            session,
+            target_sample_count=_DEFAULT_TARGET_SAMPLE_COUNT,
         )
 
+        profile = _project_voice_profile_from_session(
+            existing_voice=existing_voice,
+            voice_profile_id=voice_profile_id,
+            name=str(call.data.get("voice_name") or person_name),
+            session=session,
+            enrollment_source=(existing_voice.enrollment_source if existing_voice is not None else "people_setup")
+            or "people_setup",
+            speaker_embedding_id=existing_voice.speaker_embedding_id if existing_voice is not None else "",
+            attribution_confidence=existing_voice.attribution_confidence if existing_voice is not None else None,
+            disabled=False,
+            consent=merged_consent,
+            tts_voice=existing_voice.tts_voice if existing_voice is not None else "",
+        )
         await storage.async_update_voice_profile(profile)
 
         if existing_person is not None:
@@ -1688,6 +2038,7 @@ async def _async_handle_start_voice_enrollment(
             "started": True,
             "person_id": person_id,
             "voice_profile_id": voice_profile_id,
+            "enrollment_session_id": session.session_id,
             "enrollment_state": profile.enrollment_state,
             "sample_count": profile.sample_count,
             "local_only": local_only,
@@ -1732,7 +2083,6 @@ async def _async_handle_capture_voice_enrollment_sample(
             raise vol.Invalid("voice profile is disabled")
 
         now_iso = datetime.now(timezone.utc).isoformat()
-        sample_items = list(existing_voice.sample_items)
         sample_id = f"sample_{int(datetime.now(timezone.utc).timestamp() * 1000)}_{uuid4().hex[:8]}"
         sample_payload: dict[str, Any] = {
             "sample_id": sample_id,
@@ -1742,35 +2092,89 @@ async def _async_handle_capture_voice_enrollment_sample(
         }
         if call.data.get("quality_score") is not None:
             sample_payload["quality_score"] = float(call.data["quality_score"])
-        if call.data.get("recording_path"):
-            sample_payload["recording_path"] = str(call.data["recording_path"])
-        if call.data.get("recording_mime_type"):
-            sample_payload["recording_mime_type"] = str(call.data["recording_mime_type"])
-        if call.data.get("recording_size_bytes") is not None:
-            sample_payload["recording_size_bytes"] = int(call.data["recording_size_bytes"])
         if call.data.get("recording_duration_ms") is not None:
             sample_payload["recording_duration_ms"] = int(call.data["recording_duration_ms"])
         if call.data.get("phrase_index") is not None:
             sample_payload["phrase_index"] = int(call.data["phrase_index"])
-        sample_items.append(sample_payload)
 
-        updated = VoiceProfile(
+        enrollment_session = await storage.async_get_latest_enrollment_session_for_voice_profile(voice_profile_id)
+        if enrollment_session is None:
+            matched_person_id = ""
+            for profile in state.person_profiles.values():
+                if profile.voice_profile_id == voice_profile_id:
+                    matched_person_id = profile.person_id
+                    break
+            enrollment_session = enrollment_session_for_start(
+                person_id=matched_person_id,
+                voice_profile_id=voice_profile_id,
+                existing_sample_items=list(existing_voice.sample_items),
+                enrollment_started_at=existing_voice.enrollment_started_at or now_iso,
+            )
+
+        phrase_index = call.data.get("phrase_index")
+        try:
+            phrase_index_value = int(phrase_index) if phrase_index is not None else None
+        except (TypeError, ValueError):
+            phrase_index_value = None
+
+        preferred_path = str(call.data.get("recording_path", "") or "").strip() or None
+        resolved_path = await hass.async_add_executor_job(
+            lambda: provider.resolve_recording_path(
+                session_id=enrollment_session.session_id,
+                preferred_path=preferred_path,
+                phrase_index=phrase_index_value,
+            )
+        )
+
+        if resolved_path:
+            sample_payload["recording_path"] = resolved_path
+            artifacts = await hass.async_add_executor_job(
+                lambda: provider.list_session_artifacts(enrollment_session.session_id)
+            )
+            matching = next(
+                (artifact for artifact in artifacts if artifact.artifact_path == resolved_path),
+                None,
+            )
+            if matching is not None:
+                sample_payload["recording_size_bytes"] = int(matching.bytes_size)
+            if call.data.get("recording_mime_type"):
+                sample_payload["recording_mime_type"] = str(call.data["recording_mime_type"])
+
+        enrollment_session = enrollment_session_record_sample(
+            enrollment_session,
+            sample_payload=sample_payload,
+            captured_at=now_iso,
+        )
+        enrollment_session = await storage.async_update_enrollment_session(
+            session_id=enrollment_session.session_id,
+            state_name=enrollment_session.state,
+            sample_count=enrollment_session.sample_count,
+            sample_items=list(enrollment_session.sample_items),
+            enrollment_started_at=enrollment_session.enrollment_started_at,
+            last_sample_at=enrollment_session.last_sample_at,
+            last_built_at=enrollment_session.last_built_at,
+            metadata={
+                **dict(enrollment_session.metadata),
+                "last_sample_id": sample_id,
+                "last_sample_at": now_iso,
+            },
+        )
+        await _async_sync_session_manifest(hass, enrollment_session)
+
+        updated = _project_voice_profile_from_session(
+            existing_voice=existing_voice,
             voice_profile_id=existing_voice.voice_profile_id,
             name=existing_voice.name,
-            tts_voice=existing_voice.tts_voice,
-            enrollment_state="capturing",
+            session=enrollment_session,
             enrollment_source=existing_voice.enrollment_source,
             speaker_embedding_id=existing_voice.speaker_embedding_id,
-            sample_count=len(sample_items),
-            sample_items=sample_items,
             attribution_confidence=existing_voice.attribution_confidence,
-            enrollment_started_at=existing_voice.enrollment_started_at or now_iso,
-            last_sample_at=now_iso,
-            last_built_at=existing_voice.last_built_at,
             disabled=existing_voice.disabled,
             consent=dict(existing_voice.consent),
+            tts_voice=existing_voice.tts_voice,
         )
         await storage.async_update_voice_profile(updated)
+
         return {
             "captured": True,
             "voice_profile_id": voice_profile_id,
@@ -1810,44 +2214,67 @@ async def _async_handle_remove_voice_enrollment_sample(
         existing_voice = state.voice_profiles.get(voice_profile_id)
         if existing_voice is None:
             raise vol.Invalid("voice_profile_id is not configured")
+        now_iso = datetime.now(timezone.utc).isoformat()
+        enrollment_session = await storage.async_get_latest_enrollment_session_for_voice_profile(voice_profile_id)
+        if enrollment_session is None:
+            matched_person_id = ""
+            for profile in state.person_profiles.values():
+                if profile.voice_profile_id == voice_profile_id:
+                    matched_person_id = profile.person_id
+                    break
+            enrollment_session = enrollment_session_for_start(
+                person_id=matched_person_id,
+                voice_profile_id=voice_profile_id,
+                existing_sample_items=list(existing_voice.sample_items),
+                enrollment_started_at=existing_voice.enrollment_started_at or now_iso,
+            )
 
-        sample_items = [
-            sample
-            for sample in list(existing_voice.sample_items)
-            if str(sample.get("sample_id", "")) != sample_id
-        ]
-        if len(sample_items) == len(existing_voice.sample_items):
+        enrollment_session, removed_items = enrollment_session_remove_sample(
+            enrollment_session,
+            sample_id=sample_id,
+            now_iso=now_iso,
+        )
+        if not removed_items:
             raise vol.Invalid("sample_id not found")
 
-        removed_items = [
-            sample
-            for sample in list(existing_voice.sample_items)
-            if str(sample.get("sample_id", "")) == sample_id
-        ]
-        recording_paths = _voice_sample_recording_paths(removed_items)
+        provider = _voice_storage_provider_from_hass(hass)
+        enrollment_session = await storage.async_update_enrollment_session(
+            session_id=enrollment_session.session_id,
+            state_name=enrollment_session.state,
+            sample_count=enrollment_session.sample_count,
+            sample_items=list(enrollment_session.sample_items),
+            enrollment_started_at=enrollment_session.enrollment_started_at,
+            last_sample_at=enrollment_session.last_sample_at,
+            last_built_at=enrollment_session.last_built_at,
+        )
+        await _async_sync_session_manifest(hass, enrollment_session)
 
-        now_iso = datetime.now(timezone.utc).isoformat()
-        updated = VoiceProfile(
+        updated = _project_voice_profile_from_session(
+            existing_voice=existing_voice,
             voice_profile_id=existing_voice.voice_profile_id,
             name=existing_voice.name,
-            tts_voice=existing_voice.tts_voice,
-            enrollment_state="capturing" if sample_items else "enrollment_in_progress",
+            session=enrollment_session,
             enrollment_source=existing_voice.enrollment_source,
-            speaker_embedding_id="" if not sample_items else existing_voice.speaker_embedding_id,
-            sample_count=len(sample_items),
-            sample_items=sample_items,
-            attribution_confidence=(
-                existing_voice.attribution_confidence if sample_items else None
+            speaker_embedding_id=(
+                existing_voice.speaker_embedding_id if enrollment_session.sample_count > 0 else ""
             ),
-            enrollment_started_at=existing_voice.enrollment_started_at,
-            last_sample_at=now_iso if sample_items else "",
-            last_built_at=(existing_voice.last_built_at if sample_items else ""),
+            attribution_confidence=(
+                existing_voice.attribution_confidence if enrollment_session.sample_count > 0 else None
+            ),
             disabled=existing_voice.disabled,
             consent=dict(existing_voice.consent),
+            tts_voice=existing_voice.tts_voice,
         )
         await storage.async_update_voice_profile(updated)
-        if recording_paths:
-            await hass.async_add_executor_job(_delete_voice_recordings, recording_paths)
+        if provider is not None:
+            recording_paths = _sample_recording_paths(removed_items)
+            if recording_paths:
+                await hass.async_add_executor_job(
+                    lambda: provider.delete_recording_artifacts(
+                        session_id=enrollment_session.session_id,
+                        artifact_paths=recording_paths,
+                    )
+                )
         return {
             "removed": True,
             "voice_profile_id": voice_profile_id,
@@ -1888,42 +2315,77 @@ async def _async_handle_build_voice_profile(
         if existing_voice.disabled:
             raise vol.Invalid("voice profile is disabled")
 
-        sample_count = len(existing_voice.sample_items)
+        enrollment_session = await storage.async_get_latest_enrollment_session_for_voice_profile(voice_profile_id)
+        if enrollment_session is None:
+            matched_person_id = ""
+            for profile in state.person_profiles.values():
+                if profile.voice_profile_id == voice_profile_id:
+                    matched_person_id = profile.person_id
+                    break
+            enrollment_session = enrollment_session_for_start(
+                person_id=matched_person_id,
+                voice_profile_id=voice_profile_id,
+                existing_sample_items=list(existing_voice.sample_items),
+                enrollment_started_at=existing_voice.enrollment_started_at or datetime.now(timezone.utc).isoformat(),
+            )
+
+        sample_count = len(enrollment_session.sample_items)
         if sample_count < min_samples:
             raise vol.Invalid(f"voice profile requires at least {min_samples} samples")
 
-        recording_paths = _voice_sample_recording_paths(list(existing_voice.sample_items))
         retained_sample_items = [
             {
                 key: value
                 for key, value in sample.items()
                 if key not in {"recording_path", "recording_mime_type", "recording_size_bytes", "recording_duration_ms"}
             }
-            for sample in list(existing_voice.sample_items)
+            for sample in list(enrollment_session.sample_items)
         ]
 
         now_iso = datetime.now(timezone.utc).isoformat()
         embedding_id = f"spk_{uuid4().hex}"
         confidence = _voice_confidence_for_sample_count(sample_count)
-        updated = VoiceProfile(
-            voice_profile_id=existing_voice.voice_profile_id,
-            name=existing_voice.name,
-            tts_voice=existing_voice.tts_voice,
-            enrollment_state="trained",
-            enrollment_source=existing_voice.enrollment_source,
-            speaker_embedding_id=embedding_id,
+
+        enrollment_session = await storage.async_update_enrollment_session(
+            session_id=enrollment_session.session_id,
             sample_count=sample_count,
             sample_items=retained_sample_items,
+        )
+        enrollment_session = enrollment_session_mark_profile_built(enrollment_session, built_at=now_iso)
+        enrollment_session = await storage.async_update_enrollment_session(
+            session_id=enrollment_session.session_id,
+            state_name=enrollment_session.state,
+            sample_count=enrollment_session.sample_count,
+            sample_items=list(enrollment_session.sample_items),
+            enrollment_started_at=enrollment_session.enrollment_started_at,
+            last_sample_at=enrollment_session.last_sample_at,
+            last_built_at=enrollment_session.last_built_at,
+        )
+        await _async_sync_session_manifest(
+            hass,
+            enrollment_session,
+            target_sample_count=min_samples,
+        )
+
+        updated = _project_voice_profile_from_session(
+            existing_voice=existing_voice,
+            voice_profile_id=existing_voice.voice_profile_id,
+            name=existing_voice.name,
+            session=enrollment_session,
+            enrollment_source=existing_voice.enrollment_source,
+            speaker_embedding_id=embedding_id,
             attribution_confidence=confidence,
-            enrollment_started_at=existing_voice.enrollment_started_at,
-            last_sample_at=existing_voice.last_sample_at,
-            last_built_at=now_iso,
             disabled=False,
             consent=dict(existing_voice.consent),
+            tts_voice=existing_voice.tts_voice,
         )
         await storage.async_update_voice_profile(updated)
-        if recording_paths:
-            await hass.async_add_executor_job(_delete_voice_recordings, recording_paths)
+        enrollment_session, cleanup_summary = await _async_execute_enrollment_cleanup(
+            hass,
+            storage,
+            enrollment_session,
+            cleanup_reason=VOICE_ENROLLMENT_CLEANUP_REASON_COMPLETED,
+        )
 
         person_id = str(call.data.get("person_id") or "").strip()
         if person_id:
@@ -1946,6 +2408,7 @@ async def _async_handle_build_voice_profile(
             "speaker_embedding_id": embedding_id,
             "attribution_confidence": confidence,
             "person_id": person_id or None,
+            "cleanup_result_code": cleanup_summary["cleanup_result_code"],
         }
 
     return await _async_with_activity(
@@ -1976,31 +2439,56 @@ async def _async_handle_reset_voice_profile(
         if existing_voice is None:
             raise vol.Invalid("voice_profile_id is not configured")
 
-        recording_paths = _voice_sample_recording_paths(list(existing_voice.sample_items))
+        enrollment_session = await storage.async_get_latest_enrollment_session_for_voice_profile(voice_profile_id)
+        if enrollment_session is None:
+            matched_person_id = ""
+            for profile in state.person_profiles.values():
+                if profile.voice_profile_id == voice_profile_id:
+                    matched_person_id = profile.person_id
+                    break
+            enrollment_session = enrollment_session_for_start(
+                person_id=matched_person_id,
+                voice_profile_id=voice_profile_id,
+                existing_sample_items=list(existing_voice.sample_items),
+                enrollment_started_at=existing_voice.enrollment_started_at or datetime.now(timezone.utc).isoformat(),
+            )
 
-        updated = VoiceProfile(
+        enrollment_session = enrollment_session_reset(enrollment_session)
+        enrollment_session = await storage.async_update_enrollment_session(
+            session_id=enrollment_session.session_id,
+            state_name=enrollment_session.state,
+            sample_count=enrollment_session.sample_count,
+            sample_items=list(enrollment_session.sample_items),
+            enrollment_started_at=enrollment_session.enrollment_started_at,
+            last_sample_at=enrollment_session.last_sample_at,
+            last_built_at=enrollment_session.last_built_at,
+        )
+        await _async_sync_session_manifest(hass, enrollment_session)
+
+        updated = _project_voice_profile_from_session(
+            existing_voice=existing_voice,
             voice_profile_id=existing_voice.voice_profile_id,
             name=existing_voice.name,
-            tts_voice=existing_voice.tts_voice,
-            enrollment_state="untrained",
+            session=enrollment_session,
             enrollment_source=existing_voice.enrollment_source,
             speaker_embedding_id="",
-            sample_count=0,
-            sample_items=[],
             attribution_confidence=None,
-            enrollment_started_at=existing_voice.enrollment_started_at,
-            last_sample_at="",
-            last_built_at="",
             disabled=False,
             consent=(dict(existing_voice.consent) if preserve_consent else {}),
+            tts_voice=existing_voice.tts_voice,
         )
         await storage.async_update_voice_profile(updated)
-        if recording_paths:
-            await hass.async_add_executor_job(_delete_voice_recordings, recording_paths)
+        enrollment_session, cleanup_summary = await _async_execute_enrollment_cleanup(
+            hass,
+            storage,
+            enrollment_session,
+            cleanup_reason=VOICE_ENROLLMENT_CLEANUP_REASON_MANUAL,
+        )
         return {
             "reset": True,
             "voice_profile_id": voice_profile_id,
             "preserve_consent": preserve_consent,
+            "cleanup_result_code": cleanup_summary["cleanup_result_code"],
         }
 
     return await _async_with_activity(
@@ -2027,19 +2515,45 @@ async def _async_handle_delete_voice_profile(
         storage = ConciergeStorage(hass)
         current_state = await storage.async_load_state()
         existing_voice = current_state.voice_profiles.get(voice_profile_id)
-        recording_paths = _voice_sample_recording_paths(list(existing_voice.sample_items)) if existing_voice else []
+        enrollment_session = await storage.async_get_latest_enrollment_session_for_voice_profile(voice_profile_id)
+
+        cleanup_summary = {
+            "cleanup_result_code": "not_started",
+            "artifacts_seen_count": 0,
+            "artifacts_deleted_count": 0,
+            "artifacts_missing_count": 0,
+            "errors_redacted_or_sanitized": [],
+        }
+        if enrollment_session is not None:
+            enrollment_session, cleanup_summary = await _async_execute_enrollment_cleanup(
+                hass,
+                storage,
+                enrollment_session,
+                cleanup_reason=VOICE_ENROLLMENT_CLEANUP_REASON_CANCELLED,
+            )
+
         storage = ConciergeStorage(hass)
         state = await storage.async_delete_voice_profile(
             voice_profile_id,
             unlink_from_people=unlink_from_people,
         )
-        if recording_paths:
-            await hass.async_add_executor_job(_delete_voice_recordings, recording_paths)
+
+        # Preserve enrollment session + manifest authority until startup reconciliation exists.
+        if enrollment_session is None and existing_voice is not None:
+            provider = _voice_storage_provider_from_hass(hass)
+            if provider is not None:
+                recording_paths = _sample_recording_paths(list(existing_voice.sample_items))
+                if recording_paths:
+                    await hass.async_add_executor_job(
+                        lambda: provider.delete_owned_artifacts(recording_paths)
+                    )
+
         return {
             "deleted": True,
             "voice_profile_id": voice_profile_id,
             "unlink_from_people": unlink_from_people,
             "voice_profile_count": len(state.voice_profiles),
+            "cleanup_result_code": cleanup_summary["cleanup_result_code"],
         }
 
     return await _async_with_activity(
