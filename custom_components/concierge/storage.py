@@ -29,6 +29,27 @@ def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _session_rank_key(session: EnrollmentSession) -> tuple[int, int, str, str, str]:
+    """Prefer active sessions with captured samples over newer empty cleanup records."""
+    cleanup_status = str(session.cleanup_status or "").strip().lower()
+    state = str(session.state or "").strip().lower()
+    terminal = cleanup_status in {"cleanup_complete", "cleanup_failed"} or state in {
+        "cleanup_complete",
+        "cleanup_failed",
+    }
+    sample_count = max(0, int(session.sample_count or 0))
+    sample_time = str(session.last_sample_at or "").strip()
+    updated_time = str(session.updated_at or "").strip()
+    created_time = str(session.created_at or "").strip()
+    return (
+        0 if terminal else 1,
+        sample_count,
+        sample_time or updated_time or created_time,
+        updated_time,
+        created_time,
+    )
+
+
 class ConciergeStorage:
     """Encapsulate all Concierge persistence operations."""
 
@@ -58,7 +79,7 @@ class ConciergeStorage:
         self,
         voice_profile_id: str,
     ) -> EnrollmentSession | None:
-        """Return the most recently updated enrollment session for a voice profile."""
+        """Return the best current enrollment session for a voice profile."""
         state = await self.async_load_state()
         matches = [
             session
@@ -67,7 +88,7 @@ class ConciergeStorage:
         ]
         if not matches:
             return None
-        matches.sort(key=lambda item: item.updated_at)
+        matches.sort(key=_session_rank_key)
         return matches[-1]
 
     async def async_upsert_enrollment_session(self, session: EnrollmentSession) -> ConciergeState:
@@ -319,7 +340,7 @@ class ConciergeStorage:
         state = await self.async_load_state()
         activity = state.activities.get(activity_id)
         if activity is None:
-            raise KeyError(activity_id)
+            return state
 
         activity.ended_at = ended_at
         activity.outcome = outcome

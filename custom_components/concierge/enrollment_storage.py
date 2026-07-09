@@ -540,9 +540,17 @@ class MountedPathEnrollmentStorageProvider:
                     "schema_version": VOICE_ENROLLMENT_MANIFEST_SCHEMA_VERSION,
                 },
             )
-            probe_manifest.unlink(missing_ok=True)
-            probe_session_dir.rmdir()
             probe_successful = True
+
+            # Cleanup is best-effort only; successful probe writes already prove readiness.
+            try:
+                probe_manifest.unlink(missing_ok=True)
+            except OSError:
+                pass
+            try:
+                probe_session_dir.rmdir()
+            except OSError:
+                pass
         except OSError:
             # Best-effort probe cleanup; failure remains fail-closed.
             try:

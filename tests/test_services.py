@@ -389,10 +389,9 @@ async def test_start_voice_enrollment_fails_closed_when_storage_unavailable(
     monkeypatch,
 ) -> None:
     """Preflight failure should block session creation before enrollment starts."""
-    from types import SimpleNamespace
-
     from custom_components.concierge import services as services_module
     from custom_components.concierge.storage import ConciergeStorage
+    import voluptuous as vol
 
     await hass.services.async_call(
         DOMAIN,
@@ -404,15 +403,10 @@ async def test_start_voice_enrollment_fails_closed_when_storage_unavailable(
         blocking=True,
     )
 
-    fake_provider = SimpleNamespace(
-        validate_ready=lambda: SimpleNamespace(
-            ready=False,
-            failure_code="storage_unavailable",
-            failure_message_safe="external enrollment storage is unavailable",
-            provider_type="mounted_path",
-        )
-    )
-    monkeypatch.setattr(services_module, "_voice_storage_provider_from_hass", lambda hass: fake_provider)
+    async def _fail_preflight(self):
+        raise vol.Invalid("external enrollment storage is unavailable: storage_unavailable")
+
+    monkeypatch.setattr(services_module.EnrollmentOrchestrator, "require_storage_preflight", _fail_preflight)
 
     with pytest.raises(Exception, match="storage_unavailable"):
         await hass.services.async_call(
@@ -431,6 +425,289 @@ async def test_start_voice_enrollment_fails_closed_when_storage_unavailable(
 
     state = await ConciergeStorage(hass).async_load_state()
     assert state.enrollment_sessions == {}
+
+
+async def test_start_voice_enrollment_delegates_to_orchestrator(
+    hass: HomeAssistant,
+    setup_integration,
+    monkeypatch,
+) -> None:
+    """Service layer should delegate enrollment start sequencing to the orchestrator."""
+    from custom_components.concierge import services as services_module
+
+    delegated = {}
+
+    async def _fake_start(self, call_data):
+        delegated.update(call_data)
+        return {
+            "started": True,
+            "person_id": call_data["person_id"],
+            "voice_profile_id": "delegated_voice",
+            "enrollment_session_id": "session_delegated",
+            "enrollment_state": "ready",
+            "sample_count": 0,
+            "local_only": True,
+        }
+
+    monkeypatch.setattr(services_module.EnrollmentOrchestrator, "start_enrollment", _fake_start)
+
+    result = await hass.services.async_call(
+        DOMAIN,
+        "start_voice_enrollment",
+        {
+            "person_id": "tom",
+            "voice_profile_id": "tom_voice",
+            "voice_name": "Tom Voice",
+            "consent_acknowledged": True,
+            "local_only": True,
+        },
+        blocking=True,
+        return_response=True,
+    )
+
+    assert delegated["person_id"] == "tom"
+    assert result["voice_profile_id"] == "delegated_voice"
+
+
+async def test_start_voice_enrollment_satellite_provider_delegates_to_orchestrator(
+    hass: HomeAssistant,
+    setup_integration,
+    monkeypatch,
+) -> None:
+    """Start service should delegate satellite provider selection through shared orchestrator start path."""
+    from custom_components.concierge import services as services_module
+
+    delegated = {}
+
+    async def _fake_start(self, call_data):
+        delegated.update(call_data)
+        return {
+            "started": True,
+            "person_id": call_data["person_id"],
+            "voice_profile_id": "satellite_voice",
+            "enrollment_session_id": "session_satellite",
+            "enrollment_state": "ready",
+            "sample_count": 0,
+            "local_only": True,
+            "capture_provider": "satellite",
+        }
+
+    monkeypatch.setattr(services_module.EnrollmentOrchestrator, "start_enrollment", _fake_start)
+
+    result = await hass.services.async_call(
+        DOMAIN,
+        "start_voice_enrollment",
+        {
+            "person_id": "tom",
+            "voice_profile_id": "tom_voice",
+            "voice_name": "Tom Voice",
+            "capture_provider": "satellite",
+            "consent_acknowledged": True,
+            "local_only": True,
+        },
+        blocking=True,
+        return_response=True,
+    )
+
+    assert delegated["person_id"] == "tom"
+    assert delegated["capture_provider"] == "satellite"
+    assert result["capture_provider"] == "satellite"
+
+
+async def test_capture_voice_enrollment_sample_satellite_provider_delegates_to_orchestrator(
+    hass: HomeAssistant,
+    setup_integration,
+    monkeypatch,
+) -> None:
+    """Capture service should delegate satellite transport through shared orchestrator capture path."""
+    from custom_components.concierge import services as services_module
+
+    delegated = {}
+
+    async def _fake_capture(self, call_data):
+        delegated.update(call_data)
+        return {
+            "provider_type": "satellite",
+            "sample_written": True,
+            "sample_registered": True,
+            "sample_id": "sample_satellite_1",
+            "sample_count": 1,
+            "failure_code": None,
+        }
+
+    monkeypatch.setattr(services_module.EnrollmentOrchestrator, "capture_enrollment_sample", _fake_capture)
+
+    result = await hass.services.async_call(
+        DOMAIN,
+        "capture_voice_enrollment_sample",
+        {
+            "voice_profile_id": "tom_voice",
+            "capture_provider": "satellite",
+            "prompt_text": "Please say phrase one now",
+            "speech_text": "phrase one",
+        },
+        blocking=True,
+        return_response=True,
+    )
+
+    assert delegated["voice_profile_id"] == "tom_voice"
+    assert delegated["prompt_text"] == "Please say phrase one now"
+    assert result["sample_registered"] is True
+
+
+async def test_cancel_voice_enrollment_service_delegates_to_orchestrator(
+    hass: HomeAssistant,
+    setup_integration,
+    monkeypatch,
+) -> None:
+    """Cancel service should delegate sequencing to orchestrator."""
+    from custom_components.concierge import services as services_module
+
+    delegated = {}
+
+    async def _fake_cancel(self, call_data):
+        delegated.update(call_data)
+        return {
+            "canceled": True,
+            "already_terminal": False,
+            "not_found": False,
+            "person_id": call_data.get("person_id"),
+            "voice_profile_id": call_data.get("voice_profile_id"),
+            "cleanup_result_code": "complete",
+            "session_id": "session_1",
+        }
+
+    monkeypatch.setattr(services_module.EnrollmentOrchestrator, "cancel_enrollment", _fake_cancel)
+
+    result = await hass.services.async_call(
+        DOMAIN,
+        "cancel_voice_enrollment",
+        {"person_id": "person.tom", "voice_profile_id": "tom_voice"},
+        blocking=True,
+        return_response=True,
+    )
+
+    assert delegated["person_id"] == "person.tom"
+    assert result["canceled"] is True
+
+
+async def test_recover_voice_enrollment_service_delegates_to_orchestrator(
+    hass: HomeAssistant,
+    setup_integration,
+    monkeypatch,
+) -> None:
+    """Recover service should delegate sequencing to orchestrator."""
+    from custom_components.concierge import services as services_module
+
+    delegated = {}
+
+    async def _fake_recover(self, call_data):
+        delegated.update(call_data)
+        return {
+            "recoverable": True,
+            "recovered": True,
+            "not_found": False,
+            "person_id": call_data.get("person_id"),
+            "voice_profile_id": call_data.get("voice_profile_id"),
+            "recovery_state": "resume_available",
+            "progress": {
+                "sample_count": 1,
+                "target_sample_count": 3,
+                "completion_percentage": 33,
+            },
+        }
+
+    monkeypatch.setattr(services_module.EnrollmentOrchestrator, "recover_enrollment", _fake_recover)
+
+    result = await hass.services.async_call(
+        DOMAIN,
+        "recover_voice_enrollment",
+        {"person_id": "person.tom", "voice_profile_id": "tom_voice"},
+        blocking=True,
+        return_response=True,
+    )
+
+    assert delegated["person_id"] == "person.tom"
+    assert result["recoverable"] is True
+
+
+async def test_complete_voice_enrollment_service_delegates_to_orchestrator(
+    hass: HomeAssistant,
+    setup_integration,
+    monkeypatch,
+) -> None:
+    """Completion service should delegate deterministic completion sequencing to orchestrator."""
+    from custom_components.concierge import services as services_module
+
+    delegated = {}
+
+    async def _fake_complete(self, call_data):
+        delegated.update(call_data)
+        return {
+            "completed": True,
+            "voice_profile_id": call_data.get("voice_profile_id"),
+            "sample_count": 3,
+            "person_id": call_data.get("person_id"),
+            "cleanup_result_code": "complete",
+            "completion_state": "completed_pending_cleanup",
+            "ready_for_recovery": False,
+        }
+
+    monkeypatch.setattr(services_module.EnrollmentOrchestrator, "complete_enrollment", _fake_complete)
+
+    result = await hass.services.async_call(
+        DOMAIN,
+        "complete_voice_enrollment",
+        {
+            "voice_profile_id": "tom_voice",
+            "person_id": "person.tom",
+            "min_samples": 3,
+        },
+        blocking=True,
+        return_response=True,
+    )
+
+    assert delegated["voice_profile_id"] == "tom_voice"
+    assert result["completed"] is True
+
+
+async def test_completion_readiness_service_delegates_to_orchestrator(
+    hass: HomeAssistant,
+    setup_integration,
+    monkeypatch,
+) -> None:
+    """Readiness service should delegate deterministic readiness evaluation to orchestrator."""
+    from custom_components.concierge import services as services_module
+
+    delegated = {}
+
+    async def _fake_readiness(self, call_data):
+        delegated.update(call_data)
+        return {
+            "ready": True,
+            "reason_code": "ready",
+            "voice_profile_id": call_data.get("voice_profile_id"),
+            "sample_count": 3,
+            "min_samples": int(call_data.get("min_samples", 3)),
+            "enrollment_state": "sample_received",
+            "user_safe_status_summary": "Enrollment is ready for profile completion.",
+        }
+
+    monkeypatch.setattr(services_module.EnrollmentOrchestrator, "get_completion_readiness", _fake_readiness)
+
+    result = await hass.services.async_call(
+        DOMAIN,
+        "get_voice_enrollment_completion_readiness",
+        {
+            "voice_profile_id": "tom_voice",
+            "min_samples": 3,
+        },
+        blocking=True,
+        return_response=True,
+    )
+
+    assert delegated["voice_profile_id"] == "tom_voice"
+    assert result["ready"] is True
 
 
 async def test_sync_rooms_service_reports_success(

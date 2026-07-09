@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import logging
 import os
-from pathlib import Path
 from typing import Any
 from aiohttp import web
+import voluptuous as vol
 
 from homeassistant.components.frontend import async_register_built_in_panel
 from homeassistant.components.http import HomeAssistantView, StaticPathConfig
@@ -20,17 +20,12 @@ from homeassistant.helpers import (
 
 from .const import DOMAIN
 from .const import TTS_PROVIDER_ENTITY_IDS
-from .const import (
-    VOICE_ENROLLMENT_PREFLIGHT_STORAGE_NOT_CONFIGURED,
-    VOICE_ENROLLMENT_PREFLIGHT_STORAGE_UNKNOWN_FAILURE,
-)
 from .archive_runtime import (
     archive_options_from_entry,
     archive_trigger_age_days,
     get_ha_purge_keep_days,
-    resolve_voice_enrollment_root,
 )
-from .enrollment_storage import MountedPathEnrollmentStorageProvider
+from .enrollment_orchestrator import EnrollmentOrchestrator
 from .storage import ConciergeStorage
 
 _LOGGER = logging.getLogger(__name__)
@@ -40,6 +35,8 @@ _VERSION_VIEW_REGISTERED_FLAG = "_panel_version_view_registered"
 _SNAPSHOT_VIEW_REGISTERED_FLAG = "_panel_snapshot_view_registered"
 _TTS_CATALOG_VIEW_REGISTERED_FLAG = "_panel_tts_catalog_view_registered"
 _VOICE_UPLOAD_VIEW_REGISTERED_FLAG = "_panel_voice_upload_view_registered"
+_VOICE_PROGRESS_VIEW_REGISTERED_FLAG = "_panel_voice_progress_view_registered"
+_VOICE_RECOVERY_VIEW_REGISTERED_FLAG = "_panel_voice_recovery_view_registered"
 _BUILD_INFO_KEY = "_panel_build_info"
 
 _ASSET_INTELLIGENCE_DOMAIN = "asset_intelligence"
@@ -827,30 +824,6 @@ def _humanize_floor_id(floor_id: str | None) -> str:
     return " ".join(part.capitalize() for part in floor_id.split("_") if part)
 
 
-def _voice_storage_root_from_hass(hass) -> Path:
-    """Return configured attached-storage root for voice enrollment audio."""
-    entries = hass.config_entries.async_entries(DOMAIN)
-    if not entries:
-        raise ValueError("concierge config entry not found")
-
-    archive_options = archive_options_from_entry(entries[0])
-    destination_uri = str(archive_options.get("destination_uri", "") or "").strip()
-    destination_configured = bool(archive_options.get("destination_configured", False))
-    if not destination_configured or not destination_uri:
-        raise ValueError("attached storage destination is not configured in Concierge options")
-
-    return resolve_voice_enrollment_root(destination_uri)
-
-
-def _voice_storage_provider_from_hass(hass) -> MountedPathEnrollmentStorageProvider:
-    """Return mounted-path enrollment storage provider from Concierge options."""
-    root_path = _voice_storage_root_from_hass(hass)
-    return MountedPathEnrollmentStorageProvider(
-        root_path=root_path,
-        hass_config_path=Path(hass.config.path()),
-    )
-
-
 class ConciergeStorageSnapshotView(HomeAssistantView):
     """Expose Concierge + area snapshot for fast frontend bootstrap."""
 
@@ -1158,39 +1131,166 @@ class ConciergeVoiceEnrollmentUploadView(HomeAssistantView):
         except ValueError as err:
             raise web.HTTPBadRequest(text="phrase_index must be an integer") from err
 
+        orchestrator = EnrollmentOrchestrator(hass)
         try:
-            provider = _voice_storage_provider_from_hass(hass)
-        except ValueError as err:
-            raise web.HTTPPreconditionFailed(
-                text=f"external enrollment storage preflight failed: {VOICE_ENROLLMENT_PREFLIGHT_STORAGE_NOT_CONFIGURED}"
-            ) from err
-
-        readiness = await hass.async_add_executor_job(provider.validate_ready)
-        if not readiness.ready:
-            failure_message = str(readiness.failure_message_safe or "enrollment storage is not ready")
-            failure_code = str(readiness.failure_code or VOICE_ENROLLMENT_PREFLIGHT_STORAGE_UNKNOWN_FAILURE)
-            raise web.HTTPPreconditionFailed(text=f"{failure_message}: {failure_code}")
-
-        session_id = f"{person_id}__{voice_profile_id}"
-
-        write_result = await hass.async_add_executor_job(
-            lambda: provider.write_sample(
-                session_id=session_id,
-                sample_index=phrase_index,
-                content_type=audio_content_type,
-                data_bytes=audio_bytes,
+            payload = await orchestrator.upload_browser_sample(
+                person_id=person_id,
+                voice_profile_id=voice_profile_id,
+                phrase_index=phrase_index,
+                audio_content_type=audio_content_type,
+                audio_bytes=audio_bytes,
             )
-        )
+        except vol.Invalid as err:
+            raise web.HTTPPreconditionFailed(text=str(err)) from err
 
-        response = web.json_response(
-            {
-                "saved": True,
-                "recording_path": write_result.sample_path,
-                "recording_mime_type": audio_content_type,
-                "recording_size_bytes": len(audio_bytes),
-                "phrase_index": phrase_index,
-            }
+        response = web.json_response(payload)
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
+
+class ConciergeVoiceEnrollmentCaptureView(HomeAssistantView):
+    """Accept authenticated browser-captured samples and register them via orchestrator."""
+
+    url = "/api/concierge/voice_enrollment_capture"
+    name = "api:concierge:voice_enrollment_capture"
+    requires_auth = True
+
+    async def post(self, request):
+        hass = request.app["hass"]
+
+        try:
+            reader = await request.multipart()
+        except Exception as err:
+            raise web.HTTPBadRequest(text=f"Invalid multipart payload: {err}") from err
+
+        fields: dict[str, str] = {}
+        audio_bytes = b""
+        audio_content_type = "application/octet-stream"
+
+        while True:
+            part = await reader.next()
+            if part is None:
+                break
+            if part.name == "audio":
+                audio_content_type = str(part.headers.get("Content-Type", "application/octet-stream"))
+                audio_bytes = await part.read(decode=False)
+            else:
+                fields[part.name] = await part.text()
+
+        person_id = str(fields.get("person_id", "") or "").strip()
+        voice_profile_id = str(fields.get("voice_profile_id", "") or "").strip()
+        phrase_index_raw = str(fields.get("phrase_index", "0") or "0").strip()
+        speech_text = str(fields.get("speech_text", "") or "").strip()
+        source = str(fields.get("source", "guided_enrollment_dialog") or "guided_enrollment_dialog").strip()
+        duration_raw = str(fields.get("recording_duration_ms", "") or "").strip()
+
+        if not person_id:
+            raise web.HTTPBadRequest(text="person_id is required")
+        if not voice_profile_id:
+            raise web.HTTPBadRequest(text="voice_profile_id is required")
+        if not speech_text:
+            raise web.HTTPBadRequest(text="speech_text is required")
+        if not audio_bytes:
+            raise web.HTTPBadRequest(text="audio file is required")
+
+        try:
+            phrase_index = max(0, int(phrase_index_raw))
+        except ValueError as err:
+            raise web.HTTPBadRequest(text="phrase_index must be an integer") from err
+
+        recording_duration_ms: int | None
+        if duration_raw:
+            try:
+                recording_duration_ms = max(0, int(duration_raw))
+            except ValueError as err:
+                raise web.HTTPBadRequest(text="recording_duration_ms must be an integer") from err
+        else:
+            recording_duration_ms = None
+
+        orchestrator = EnrollmentOrchestrator(hass)
+        try:
+            payload = await orchestrator.capture_browser_sample(
+                person_id=person_id,
+                voice_profile_id=voice_profile_id,
+                phrase_index=phrase_index,
+                speech_text=speech_text,
+                audio_content_type=audio_content_type,
+                audio_bytes=audio_bytes,
+                source=source,
+                recording_duration_ms=recording_duration_ms,
+            )
+        except vol.Invalid as err:
+            raise web.HTTPPreconditionFailed(text=str(err)) from err
+
+        response = web.json_response(payload)
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
+
+class ConciergeVoiceEnrollmentProgressView(HomeAssistantView):
+    """Return orchestrator-backed browser enrollment progress projection."""
+
+    url = "/api/concierge/voice_enrollment_progress"
+    name = "api:concierge:voice_enrollment_progress"
+    requires_auth = True
+
+    async def get(self, request):
+        hass = request.app["hass"]
+        person_id = str(request.query.get("person_id", "") or "").strip()
+        voice_profile_id = str(request.query.get("voice_profile_id", "") or "").strip()
+
+        if not person_id:
+            raise web.HTTPBadRequest(text="person_id is required")
+
+        orchestrator = EnrollmentOrchestrator(hass)
+        payload = await orchestrator.get_browser_enrollment_progress(
+            person_id=person_id,
+            voice_profile_id=voice_profile_id or None,
         )
+        response = web.json_response(payload)
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
+
+class ConciergeVoiceEnrollmentRecoveryView(HomeAssistantView):
+    """Expose orchestrator-backed cancellation and recovery operations for browser workflow."""
+
+    url = "/api/concierge/voice_enrollment_recovery"
+    name = "api:concierge:voice_enrollment_recovery"
+    requires_auth = True
+
+    async def post(self, request):
+        hass = request.app["hass"]
+        try:
+            payload = await request.json()
+        except Exception as err:
+            raise web.HTTPBadRequest(text=f"Invalid JSON payload: {err}") from err
+
+        action = str(payload.get("action", "") or "").strip().lower()
+        person_id = str(payload.get("person_id", "") or "").strip()
+        voice_profile_id = str(payload.get("voice_profile_id", "") or "").strip()
+
+        if not person_id:
+            raise web.HTTPBadRequest(text="person_id is required")
+        if action not in {"recover", "resume", "cancel", "abandon"}:
+            raise web.HTTPBadRequest(text="action must be one of recover, resume, cancel, abandon")
+
+        orchestrator = EnrollmentOrchestrator(hass)
+        call_data = {
+            "person_id": person_id,
+            "voice_profile_id": voice_profile_id,
+        }
+
+        if action == "recover":
+            result = await orchestrator.recover_enrollment(call_data)
+        elif action == "resume":
+            result = await orchestrator.resume_enrollment(call_data)
+        elif action == "cancel":
+            result = await orchestrator.cancel_enrollment(call_data)
+        else:
+            result = await orchestrator.abandon_enrollment(call_data)
+
+        response = web.json_response(result)
         response.headers["Cache-Control"] = "no-store"
         return response
 
@@ -1273,6 +1373,30 @@ async def async_setup_panel(hass):
             domain_data[_VOICE_UPLOAD_VIEW_REGISTERED_FLAG] = True
         except Exception:
             _LOGGER.exception("Concierge: failed registering panel voice upload view")
+            return
+
+    if not domain_data.get("_panel_voice_capture_view_registered"):
+        try:
+            hass.http.register_view(ConciergeVoiceEnrollmentCaptureView())
+            domain_data["_panel_voice_capture_view_registered"] = True
+        except Exception:
+            _LOGGER.exception("Concierge: failed registering panel voice capture view")
+            return
+
+    if not domain_data.get(_VOICE_PROGRESS_VIEW_REGISTERED_FLAG):
+        try:
+            hass.http.register_view(ConciergeVoiceEnrollmentProgressView())
+            domain_data[_VOICE_PROGRESS_VIEW_REGISTERED_FLAG] = True
+        except Exception:
+            _LOGGER.exception("Concierge: failed registering panel voice progress view")
+            return
+
+    if not domain_data.get(_VOICE_RECOVERY_VIEW_REGISTERED_FLAG):
+        try:
+            hass.http.register_view(ConciergeVoiceEnrollmentRecoveryView())
+            domain_data[_VOICE_RECOVERY_VIEW_REGISTERED_FLAG] = True
+        except Exception:
+            _LOGGER.exception("Concierge: failed registering panel voice recovery view")
             return
 
     if not domain_data.get(_VERSION_VIEW_REGISTERED_FLAG):

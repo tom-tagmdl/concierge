@@ -462,7 +462,7 @@ update_voice_profile:
 
 start_voice_enrollment:
   name: Start Voice Enrollment
-  description: Begin explicit voice enrollment for a person with consent and local-first defaults.
+  description: Begin explicit voice enrollment for a person with consent and local-first defaults. Set capture_provider to satellite to use satellite transport.
   fields:
     person_id:
       name: Person ID
@@ -479,6 +479,15 @@ start_voice_enrollment:
       required: false
       selector:
         text:
+    capture_provider:
+      name: Capture Provider
+      required: false
+      selector:
+        select:
+          options:
+            - auto
+            - browser
+            - satellite
     consent_acknowledged:
       name: Consent Acknowledged
       required: true
@@ -492,7 +501,7 @@ start_voice_enrollment:
 
 capture_voice_enrollment_sample:
   name: Capture Voice Enrollment Sample
-  description: Capture one enrollment speech item for a voice profile.
+  description: Capture one enrollment speech item for a voice profile. Set capture_provider to satellite to prompt/capture through Assist Satellite transport.
   fields:
     voice_profile_id:
       name: Voice Profile ID
@@ -502,6 +511,19 @@ capture_voice_enrollment_sample:
     speech_text:
       name: Speech Text
       required: true
+      selector:
+        text:
+    capture_provider:
+      name: Capture Provider
+      required: false
+      selector:
+        select:
+          options:
+            - browser
+            - satellite
+    prompt_text:
+      name: Prompt Text
+      required: false
       selector:
         text:
     source:
@@ -517,6 +539,42 @@ capture_voice_enrollment_sample:
           min: 0
           max: 1
           step: 0.01
+    phrase_index:
+      name: Phrase Index
+      required: false
+      selector:
+        number:
+          min: 0
+          max: 200
+    person_id:
+      name: Person ID
+      required: false
+      selector:
+        text:
+    satellite_entity_id:
+      name: Satellite Entity ID
+      required: false
+      selector:
+        entity:
+          domain: assist_satellite
+    device_id:
+      name: Device ID
+      required: false
+      selector:
+        text:
+    preannounce:
+      name: Preannounce Prompt
+      required: false
+      selector:
+        boolean:
+    timeout_seconds:
+      name: Timeout Seconds
+      required: false
+      selector:
+        number:
+          min: 0.5
+          max: 60
+          step: 0.5
 
 remove_voice_enrollment_sample:
   name: Remove Voice Enrollment Sample

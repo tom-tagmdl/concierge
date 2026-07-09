@@ -8,6 +8,7 @@ from homeassistant.core import HomeAssistant
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.concierge import diagnostics as diagnostics_module
+from custom_components.concierge import enrollment_orchestrator as orchestrator_module
 from custom_components.concierge import enrollment_reconciliation as reconciliation_module
 from custom_components.concierge import panel as panel_module
 from custom_components.concierge import services as services_module
@@ -53,6 +54,7 @@ async def setup_integration(hass: HomeAssistant, mock_config_entry: MockConfigEn
     panel_module.resolve_voice_enrollment_root = lambda destination_uri: storage_root
     reconciliation_module.resolve_voice_enrollment_root = lambda destination_uri: storage_root
     diagnostics_module.resolve_voice_enrollment_root = lambda destination_uri: storage_root
+    orchestrator_module.resolve_voice_enrollment_root = lambda destination_uri: storage_root
 
     mock_config_entry.add_to_hass(hass)
     assert await hass.config_entries.async_setup(mock_config_entry.entry_id)

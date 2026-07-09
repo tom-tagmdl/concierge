@@ -20,7 +20,9 @@ from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
 from .archive_runtime import archive_options_from_entry, resolve_voice_enrollment_root
 from .const import (
     SERVICE_BUILD_VOICE_PROFILE,
+    SERVICE_COMPLETE_VOICE_ENROLLMENT,
     SERVICE_CAPTURE_VOICE_ENROLLMENT_SAMPLE,
+    SERVICE_RUN_SATELLITE_CAPTURE_POC,
     SERVICE_DELETE_VOICE_PROFILE,
     DOMAIN,
     EVENT_EXECUTION,
@@ -38,6 +40,7 @@ from .const import (
     SERVICE_GET_SIGNAL,
     SERVICE_GET_SIGNALS,
     SERVICE_GET_SUMMARY,
+    SERVICE_GET_VOICE_ENROLLMENT_COMPLETION_READINESS,
     SERVICE_PREVIEW_TTS_VOICE,
     SERVICE_PUSH_PERSON_MESSAGE,
     SERVICE_REFRESH_ENTITY_STRUCTURE,
@@ -54,47 +57,19 @@ from .const import (
     SERVICE_UPDATE_ROOM_CONFIG,
     SERVICE_UPDATE_VOICE_PROFILE,
     TTS_PROVIDER_ENTITY_IDS,
-    VOICE_ENROLLMENT_CLEANUP_REASON_CANCELLED,
-    VOICE_ENROLLMENT_CLEANUP_REASON_COMPLETED,
-    VOICE_ENROLLMENT_CLEANUP_REASON_FAILED,
-    VOICE_ENROLLMENT_CLEANUP_REASON_MANUAL,
-    VOICE_ENROLLMENT_CLEANUP_REASON_TIMEOUT,
-    VOICE_ENROLLMENT_CLEANUP_REASON_UNKNOWN,
-    VOICE_ENROLLMENT_CLEANUP_RESULT_FAILED,
-    VOICE_ENROLLMENT_PREFLIGHT_STORAGE_NOT_CONFIGURED,
-    VOICE_ENROLLMENT_PREFLIGHT_STORAGE_UNKNOWN_FAILURE,
+    SERVICE_ABANDON_VOICE_ENROLLMENT,
+    SERVICE_CANCEL_VOICE_ENROLLMENT,
+    SERVICE_RECOVER_VOICE_ENROLLMENT,
+    SERVICE_RESUME_VOICE_ENROLLMENT,
 )
-from .enrollment_cleanup import EnrollmentCleanupManager, EnrollmentCleanupRequest
-from .enrollment_session import (
-    build_enrollment_session_manifest_payload,
-    enrollment_session_for_start,
-    enrollment_session_mark_cleanup_complete,
-    enrollment_session_mark_cleanup_failed,
-    enrollment_session_mark_cleanup_pending,
-    enrollment_session_mark_cleanup_running,
-    enrollment_session_mark_profile_built,
-    enrollment_session_record_sample,
-    enrollment_session_remove_sample,
-    enrollment_session_reset,
-    legacy_voice_profile_enrollment_state,
-    resolve_manifest_target_sample_count,
-)
-from .enrollment_storage import MountedPathEnrollmentStorageProvider
+from .enrollment_orchestrator import EnrollmentOrchestrator
 from .models import (
     ActivityEvent,
     ContextState,
-    EnrollmentSession,
     IdentityProfile,
     Interaction,
     PersonProfile,
     SignalState,
-    VoiceProfile,
-)
-from .repairs import (
-    async_clear_cleanup_issue,
-    async_clear_storage_issue,
-    async_create_or_update_cleanup_issue,
-    async_create_or_update_storage_issue,
 )
 from .storage import ConciergeStorage
 
@@ -312,6 +287,7 @@ SERVICE_START_VOICE_ENROLLMENT_SCHEMA = vol.Schema(
         vol.Required("person_id"): str,
         vol.Optional("voice_profile_id"): str,
         vol.Optional("voice_name"): str,
+        vol.Optional("capture_provider", default="auto"): str,
         vol.Optional("consent_acknowledged", default=False): bool,
         vol.Optional("local_only", default=True): bool,
     }
@@ -320,6 +296,8 @@ SERVICE_CAPTURE_VOICE_ENROLLMENT_SAMPLE_SCHEMA = vol.Schema(
     {
         vol.Required("voice_profile_id"): str,
         vol.Required("speech_text"): str,
+        vol.Optional("capture_provider", default="browser"): str,
+        vol.Optional("prompt_text"): str,
         vol.Optional("source", default="guided_phrase"): str,
         vol.Optional("quality_score"): vol.Coerce(float),
         vol.Optional("recording_path"): str,
@@ -327,6 +305,26 @@ SERVICE_CAPTURE_VOICE_ENROLLMENT_SAMPLE_SCHEMA = vol.Schema(
         vol.Optional("recording_size_bytes"): int,
         vol.Optional("recording_duration_ms"): int,
         vol.Optional("phrase_index"): int,
+        vol.Optional("person_id"): str,
+        vol.Optional("satellite_entity_id"): str,
+        vol.Optional("device_id"): str,
+        vol.Optional("preannounce", default=False): bool,
+        vol.Optional("timeout_seconds", default=8.0): vol.All(
+            vol.Coerce(float),
+            vol.Range(min=0, min_included=False, max=60),
+        ),
+    }
+)
+SERVICE_RUN_SATELLITE_CAPTURE_POC_SCHEMA = vol.Schema(
+    {
+        vol.Required("voice_profile_id"): str,
+        vol.Optional("person_id"): str,
+        vol.Optional("satellite_entity_id"): str,
+        vol.Optional("device_id"): str,
+        vol.Optional("timeout_seconds", default=8.0): vol.All(
+            vol.Coerce(float),
+            vol.Range(min=0, min_included=False, max=60),
+        ),
     }
 )
 SERVICE_REMOVE_VOICE_ENROLLMENT_SAMPLE_SCHEMA = vol.Schema(
@@ -340,6 +338,43 @@ SERVICE_BUILD_VOICE_PROFILE_SCHEMA = vol.Schema(
         vol.Required("voice_profile_id"): str,
         vol.Optional("person_id"): str,
         vol.Optional("min_samples", default=3): vol.All(int, vol.Range(min=1, max=50)),
+    }
+)
+SERVICE_COMPLETE_VOICE_ENROLLMENT_SCHEMA = vol.Schema(
+    {
+        vol.Required("voice_profile_id"): str,
+        vol.Optional("person_id"): str,
+        vol.Optional("min_samples", default=3): vol.All(int, vol.Range(min=1, max=50)),
+    }
+)
+SERVICE_GET_VOICE_ENROLLMENT_COMPLETION_READINESS_SCHEMA = vol.Schema(
+    {
+        vol.Required("voice_profile_id"): str,
+        vol.Optional("min_samples", default=3): vol.All(int, vol.Range(min=1, max=50)),
+    }
+)
+SERVICE_CANCEL_VOICE_ENROLLMENT_SCHEMA = vol.Schema(
+    {
+        vol.Optional("person_id"): str,
+        vol.Optional("voice_profile_id"): str,
+    }
+)
+SERVICE_RECOVER_VOICE_ENROLLMENT_SCHEMA = vol.Schema(
+    {
+        vol.Optional("person_id"): str,
+        vol.Optional("voice_profile_id"): str,
+    }
+)
+SERVICE_RESUME_VOICE_ENROLLMENT_SCHEMA = vol.Schema(
+    {
+        vol.Optional("person_id"): str,
+        vol.Optional("voice_profile_id"): str,
+    }
+)
+SERVICE_ABANDON_VOICE_ENROLLMENT_SCHEMA = vol.Schema(
+    {
+        vol.Optional("person_id"): str,
+        vol.Optional("voice_profile_id"): str,
     }
 )
 SERVICE_RESET_VOICE_PROFILE_SCHEMA = vol.Schema(
@@ -793,319 +828,6 @@ def _parse_iso_datetime(value: str | None) -> datetime | None:
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=timezone.utc)
     return parsed
-
-
-def _voice_profile_id_for_person(person_id: str) -> str:
-    """Build a stable voice profile identifier from a person entity id."""
-    normalized = str(person_id or "").strip().lower().replace(".", "_").replace(" ", "_")
-    normalized = "".join(ch for ch in normalized if ch.isalnum() or ch in {"_", "-"})
-    return f"{normalized or 'person'}_voice"
-
-
-def _session_state_from_legacy_enrollment_state(enrollment_state: str, sample_count: int) -> str:
-    """Map legacy voice profile enrollment state strings onto session lifecycle states."""
-    value = str(enrollment_state or "").strip().lower()
-    if value == "trained":
-        return "completed_pending_cleanup"
-    if value == "untrained":
-        return "idle"
-    if sample_count > 0:
-        return "sample_received"
-    return "ready"
-
-
-def _project_voice_profile_from_session(
-    *,
-    existing_voice: VoiceProfile | None,
-    voice_profile_id: str,
-    name: str,
-    session,
-    enrollment_source: str,
-    speaker_embedding_id: str,
-    attribution_confidence: float | None,
-    disabled: bool,
-    consent: dict[str, Any],
-    tts_voice: str,
-) -> VoiceProfile:
-    """Project VoiceProfile lifecycle fields from authoritative EnrollmentSession state."""
-    return VoiceProfile(
-        voice_profile_id=voice_profile_id,
-        name=name,
-        tts_voice=tts_voice,
-        enrollment_state=legacy_voice_profile_enrollment_state(session),
-        enrollment_source=enrollment_source,
-        speaker_embedding_id=speaker_embedding_id,
-        sample_count=session.sample_count,
-        sample_items=list(session.sample_items),
-        attribution_confidence=attribution_confidence,
-        enrollment_started_at=session.enrollment_started_at,
-        last_sample_at=session.last_sample_at,
-        last_built_at=session.last_built_at,
-        disabled=disabled,
-        consent=dict(consent),
-    )
-
-
-def _voice_confidence_for_sample_count(sample_count: int) -> float:
-    """Return deterministic confidence estimate based on captured sample count."""
-    bounded = max(0, int(sample_count))
-    return min(0.95, 0.55 + (0.05 * bounded))
-
-
-def _sample_recording_paths(sample_items: list[dict[str, Any]]) -> list[str]:
-    """Return recording_path values from sample metadata for provider-owned resolution."""
-    paths: list[str] = []
-    for sample in sample_items:
-        raw_path = str(sample.get("recording_path", "") or "").strip()
-        if raw_path:
-            paths.append(raw_path)
-    return paths
-
-
-def _voice_storage_provider_from_hass(hass: HomeAssistant) -> MountedPathEnrollmentStorageProvider | None:
-    """Return mounted-path provider when Concierge attached storage is configured."""
-    entries = hass.config_entries.async_entries(DOMAIN)
-    if not entries:
-        return None
-
-    archive_options = archive_options_from_entry(entries[0])
-    destination_uri = str(archive_options.get("destination_uri", "") or "").strip()
-    destination_configured = bool(archive_options.get("destination_configured", False))
-    if not destination_configured or not destination_uri:
-        return None
-
-    try:
-        root_path = resolve_voice_enrollment_root(destination_uri)
-    except ValueError:
-        return None
-
-    return MountedPathEnrollmentStorageProvider(
-        root_path=root_path,
-        hass_config_path=Path(hass.config.path()),
-    )
-
-
-async def _async_sync_session_manifest(
-    hass: HomeAssistant,
-    session: EnrollmentSession,
-    *,
-    target_sample_count: int | None = None,
-) -> None:
-    """Persist atomic provider-owned session manifest from authoritative session state."""
-    provider = _voice_storage_provider_from_hass(hass)
-    if provider is None:
-        return
-
-    readiness = await hass.async_add_executor_job(provider.validate_ready)
-    if not readiness.ready:
-        return
-
-    existing_manifest = await hass.async_add_executor_job(
-        lambda: provider.read_session_manifest(session.session_id)
-    )
-    effective_target = resolve_manifest_target_sample_count(
-        session,
-        requested_target_sample_count=target_sample_count,
-        existing_target_sample_count=(
-            int(existing_manifest.target_sample_count)
-            if existing_manifest is not None
-            else None
-        ),
-        default_target_sample_count=_DEFAULT_TARGET_SAMPLE_COUNT,
-    )
-    manifest_payload = build_enrollment_session_manifest_payload(
-        session,
-        target_sample_count=effective_target,
-    )
-    await hass.async_add_executor_job(lambda: provider.upsert_session_manifest(manifest_payload))
-
-
-async def _async_require_storage_preflight(
-    hass: HomeAssistant,
-) -> MountedPathEnrollmentStorageProvider:
-    """Fail-closed enrollment storage preflight gate for capture/enrollment paths."""
-    provider = _voice_storage_provider_from_hass(hass)
-    if provider is None:
-        await async_create_or_update_storage_issue(
-            hass,
-            failure_code=VOICE_ENROLLMENT_PREFLIGHT_STORAGE_NOT_CONFIGURED,
-        )
-        raise vol.Invalid(
-            f"external enrollment storage preflight failed: {VOICE_ENROLLMENT_PREFLIGHT_STORAGE_NOT_CONFIGURED}"
-        )
-
-    readiness = await hass.async_add_executor_job(provider.validate_ready)
-    if readiness.ready:
-        await async_clear_storage_issue(hass)
-        return provider
-
-    failure_code = str(readiness.failure_code or VOICE_ENROLLMENT_PREFLIGHT_STORAGE_UNKNOWN_FAILURE)
-    failure_message = str(readiness.failure_message_safe or "external enrollment storage preflight failed")
-    await async_create_or_update_storage_issue(
-        hass,
-        failure_code=failure_code,
-        provider_type=str(readiness.provider_type or "mounted_path"),
-    )
-    raise vol.Invalid(f"{failure_message}: {failure_code}")
-
-
-async def _async_execute_enrollment_cleanup(
-    hass: HomeAssistant,
-    storage: ConciergeStorage,
-    session: EnrollmentSession,
-    *,
-    cleanup_reason: str,
-) -> tuple[EnrollmentSession, dict[str, Any]]:
-    """Execute provider-backed cleanup while keeping session + manifest synchronized."""
-    reason_value = str(cleanup_reason or VOICE_ENROLLMENT_CLEANUP_REASON_UNKNOWN).strip().lower()
-    if reason_value not in {
-        VOICE_ENROLLMENT_CLEANUP_REASON_COMPLETED,
-        VOICE_ENROLLMENT_CLEANUP_REASON_CANCELLED,
-        VOICE_ENROLLMENT_CLEANUP_REASON_FAILED,
-        VOICE_ENROLLMENT_CLEANUP_REASON_TIMEOUT,
-        VOICE_ENROLLMENT_CLEANUP_REASON_MANUAL,
-        VOICE_ENROLLMENT_CLEANUP_REASON_UNKNOWN,
-    }:
-        reason_value = VOICE_ENROLLMENT_CLEANUP_REASON_UNKNOWN
-
-    pending = enrollment_session_mark_cleanup_pending(session, cleanup_reason=reason_value)
-    pending = await storage.async_update_enrollment_session(
-        session_id=pending.session_id,
-        state_name=pending.state,
-        sample_count=pending.sample_count,
-        sample_items=list(pending.sample_items),
-        enrollment_started_at=pending.enrollment_started_at,
-        last_sample_at=pending.last_sample_at,
-        last_built_at=pending.last_built_at,
-        cleanup_status=pending.cleanup_status,
-        metadata=dict(pending.metadata),
-    )
-    await _async_sync_session_manifest(hass, pending)
-
-    running_started_at = datetime.now(timezone.utc).isoformat()
-    running = enrollment_session_mark_cleanup_running(
-        pending,
-        cleanup_reason=reason_value,
-        cleanup_started_at=running_started_at,
-    )
-    running = await storage.async_update_enrollment_session(
-        session_id=running.session_id,
-        state_name=running.state,
-        sample_count=running.sample_count,
-        sample_items=list(running.sample_items),
-        enrollment_started_at=running.enrollment_started_at,
-        last_sample_at=running.last_sample_at,
-        last_built_at=running.last_built_at,
-        cleanup_status=running.cleanup_status,
-        metadata=dict(running.metadata),
-    )
-    await _async_sync_session_manifest(hass, running)
-
-    provider = _voice_storage_provider_from_hass(hass)
-    if provider is None:
-        completed_at = datetime.now(timezone.utc).isoformat()
-        await async_create_or_update_cleanup_issue(
-            hass,
-            cleanup_result_code=VOICE_ENROLLMENT_CLEANUP_RESULT_FAILED,
-            cleanup_reason=reason_value,
-        )
-        failed = enrollment_session_mark_cleanup_failed(
-            running,
-            cleanup_reason=reason_value,
-            cleanup_result_code=VOICE_ENROLLMENT_CLEANUP_RESULT_FAILED,
-            cleanup_started_at=running_started_at,
-            cleanup_completed_at=completed_at,
-            artifacts_seen_count=0,
-            artifacts_deleted_count=0,
-            artifacts_missing_count=0,
-            error_count=1,
-        )
-        failed = await storage.async_update_enrollment_session(
-            session_id=failed.session_id,
-            state_name=failed.state,
-            sample_count=failed.sample_count,
-            sample_items=list(failed.sample_items),
-            enrollment_started_at=failed.enrollment_started_at,
-            last_sample_at=failed.last_sample_at,
-            last_built_at=failed.last_built_at,
-            cleanup_status=failed.cleanup_status,
-            metadata=dict(failed.metadata),
-        )
-        await _async_sync_session_manifest(hass, failed)
-        return failed, {
-            "cleanup_reason": reason_value,
-            "cleanup_result_code": VOICE_ENROLLMENT_CLEANUP_RESULT_FAILED,
-            "artifacts_seen_count": 0,
-            "artifacts_deleted_count": 0,
-            "artifacts_missing_count": 0,
-            "errors_redacted_or_sanitized": ["provider_unavailable"],
-            "cleanup_started_at": running_started_at,
-            "cleanup_completed_at": completed_at,
-        }
-
-    manager = EnrollmentCleanupManager(provider)
-    cleanup_result = await hass.async_add_executor_job(
-        lambda: manager.cleanup(
-            EnrollmentCleanupRequest(
-                session=running,
-                cleanup_reason=reason_value,
-            )
-        )
-    )
-
-    if cleanup_result.cleanup_result_code in {"failed", "partial"}:
-        await async_create_or_update_cleanup_issue(
-            hass,
-            cleanup_result_code=cleanup_result.cleanup_result_code,
-            cleanup_reason=cleanup_result.cleanup_reason,
-        )
-        finalized = enrollment_session_mark_cleanup_failed(
-            running,
-            cleanup_reason=cleanup_result.cleanup_reason,
-            cleanup_result_code=cleanup_result.cleanup_result_code,
-            cleanup_started_at=cleanup_result.cleanup_started_at,
-            cleanup_completed_at=cleanup_result.cleanup_completed_at,
-            artifacts_seen_count=cleanup_result.artifacts_seen_count,
-            artifacts_deleted_count=cleanup_result.artifacts_deleted_count,
-            artifacts_missing_count=cleanup_result.artifacts_missing_count,
-            error_count=len(cleanup_result.errors_redacted_or_sanitized),
-        )
-    else:
-        await async_clear_cleanup_issue(hass)
-        finalized = enrollment_session_mark_cleanup_complete(
-            running,
-            cleanup_reason=cleanup_result.cleanup_reason,
-            cleanup_result_code=cleanup_result.cleanup_result_code,
-            cleanup_started_at=cleanup_result.cleanup_started_at,
-            cleanup_completed_at=cleanup_result.cleanup_completed_at,
-            artifacts_seen_count=cleanup_result.artifacts_seen_count,
-            artifacts_deleted_count=cleanup_result.artifacts_deleted_count,
-            artifacts_missing_count=cleanup_result.artifacts_missing_count,
-        )
-
-    finalized = await storage.async_update_enrollment_session(
-        session_id=finalized.session_id,
-        state_name=finalized.state,
-        sample_count=finalized.sample_count,
-        sample_items=list(finalized.sample_items),
-        enrollment_started_at=finalized.enrollment_started_at,
-        last_sample_at=finalized.last_sample_at,
-        last_built_at=finalized.last_built_at,
-        cleanup_status=finalized.cleanup_status,
-        metadata=dict(finalized.metadata),
-    )
-    await _async_sync_session_manifest(hass, finalized)
-
-    return finalized, {
-        "cleanup_reason": cleanup_result.cleanup_reason,
-        "cleanup_result_code": cleanup_result.cleanup_result_code,
-        "artifacts_seen_count": cleanup_result.artifacts_seen_count,
-        "artifacts_deleted_count": cleanup_result.artifacts_deleted_count,
-        "artifacts_missing_count": cleanup_result.artifacts_missing_count,
-        "errors_redacted_or_sanitized": list(cleanup_result.errors_redacted_or_sanitized),
-        "cleanup_started_at": cleanup_result.cleanup_started_at,
-        "cleanup_completed_at": cleanup_result.cleanup_completed_at,
-    }
 
 
 def _event_matches_filters(event: ActivityEvent, call: ServiceCall) -> bool:
@@ -1833,85 +1555,7 @@ async def _async_handle_update_voice_profile(
 ) -> dict[str, Any]:
     """Insert or update voice enrollment and attribution state."""
     async def _runner() -> dict[str, Any]:
-        await _async_require_storage_preflight(hass)
-
-        storage = ConciergeStorage(hass)
-        state = await storage.async_load_state()
-        voice_profile_id = call.data["voice_profile_id"]
-        existing_voice = state.voice_profiles.get(voice_profile_id)
-
-        requested_sample_items = list(call.data.get("sample_items", []))
-        requested_sample_count = int(call.data.get("sample_count", len(requested_sample_items)))
-        if requested_sample_count != len(requested_sample_items) and requested_sample_items:
-            requested_sample_count = len(requested_sample_items)
-
-        session = await storage.async_get_latest_enrollment_session_for_voice_profile(voice_profile_id)
-        if session is None:
-            now_iso = datetime.now(timezone.utc).isoformat()
-            session = await storage.async_create_enrollment_session(
-                session_id=f"session_{int(datetime.now(timezone.utc).timestamp() * 1000)}_{uuid4().hex[:8]}",
-                person_id="",
-                voice_profile_id=voice_profile_id,
-                state_name=_session_state_from_legacy_enrollment_state(
-                    call.data.get("enrollment_state", "untrained"),
-                    requested_sample_count,
-                ),
-                sample_count=requested_sample_count,
-                sample_items=requested_sample_items,
-                enrollment_started_at=call.data.get("enrollment_started_at", now_iso),
-                last_sample_at=call.data.get("last_sample_at", ""),
-                last_built_at=call.data.get("last_built_at", ""),
-            )
-        else:
-            session = await storage.async_update_enrollment_session(
-                session_id=session.session_id,
-                state_name=_session_state_from_legacy_enrollment_state(
-                    call.data.get("enrollment_state", legacy_voice_profile_enrollment_state(session)),
-                    requested_sample_count,
-                ),
-                sample_count=requested_sample_count,
-                sample_items=requested_sample_items,
-                enrollment_started_at=(
-                    call.data.get("enrollment_started_at", session.enrollment_started_at)
-                ),
-                last_sample_at=call.data.get("last_sample_at", session.last_sample_at),
-                last_built_at=call.data.get("last_built_at", session.last_built_at),
-            )
-
-        # Legacy compatibility path: keep session+manifest in lockstep even when
-        # voice profile mutation is requested outside guided enrollment flows.
-        await _async_sync_session_manifest(
-            hass,
-            session,
-            target_sample_count=max(1, requested_sample_count or _DEFAULT_TARGET_SAMPLE_COUNT),
-        )
-
-        profile = _project_voice_profile_from_session(
-            existing_voice=existing_voice,
-            voice_profile_id=voice_profile_id,
-            name=call.data["name"],
-            session=session,
-            enrollment_source=call.data.get("enrollment_source", ""),
-            speaker_embedding_id=call.data.get("speaker_embedding_id", ""),
-            attribution_confidence=(
-                float(call.data["attribution_confidence"])
-                if call.data.get("attribution_confidence") is not None
-                else None
-            ),
-            disabled=bool(call.data.get("disabled", False)),
-            consent=dict(call.data.get("consent", {})),
-            tts_voice=call.data.get("tts_voice", ""),
-        )
-        state = await storage.async_update_voice_profile(
-            profile,
-            set_as_default=bool(call.data.get("set_as_default", False)),
-        )
-        return {
-            "voice_profile_count": len(state.voice_profiles),
-            "default_voice_profile_id": (
-                state.default_voice_profile.voice_profile_id if state.default_voice_profile is not None else None
-            ),
-        }
+        return await EnrollmentOrchestrator(hass).update_voice_profile(dict(call.data))
 
     return await _async_with_activity(
         hass,
@@ -1940,109 +1584,7 @@ async def _async_handle_start_voice_enrollment(
         raise vol.Invalid("voice enrollment requires explicit consent_acknowledged=true")
 
     async def _runner() -> dict[str, Any]:
-        provider = await _async_require_storage_preflight(hass)
-
-        storage = ConciergeStorage(hass)
-        state = await storage.async_load_state()
-        existing_person = state.person_profiles.get(person_id)
-        person_name = (
-            existing_person.name
-            if existing_person is not None
-            else str(call.data.get("voice_name") or person_id)
-        )
-        voice_profile_id = (
-            str(call.data.get("voice_profile_id") or "").strip()
-            or str(existing_person.voice_profile_id or "").strip()
-            if existing_person is not None
-            else ""
-        )
-        if not voice_profile_id:
-            voice_profile_id = _voice_profile_id_for_person(person_id)
-
-        existing_voice = state.voice_profiles.get(voice_profile_id)
-        now_iso = datetime.now(timezone.utc).isoformat()
-        existing_consent = dict(existing_voice.consent) if existing_voice is not None else {}
-        voice_consent = dict(existing_consent.get("voice_enrollment", {}))
-        local_only = bool(call.data.get("local_only", True))
-        voice_consent.update(
-            {
-                "enabled": True,
-                "local_only": local_only,
-                "consent_acknowledged": True,
-                "consent_acknowledged_at": now_iso,
-            }
-        )
-        merged_consent = {
-            **existing_consent,
-            "voice_enrollment": voice_consent,
-        }
-
-        session = enrollment_session_for_start(
-            person_id=person_id,
-            voice_profile_id=voice_profile_id,
-            existing_sample_items=list(existing_voice.sample_items) if existing_voice is not None else [],
-            enrollment_started_at=(
-                existing_voice.enrollment_started_at if existing_voice and existing_voice.enrollment_started_at else now_iso
-            ),
-        )
-        await storage.async_upsert_enrollment_session(session)
-        await _async_sync_session_manifest(
-            hass,
-            session,
-            target_sample_count=_DEFAULT_TARGET_SAMPLE_COUNT,
-        )
-
-        profile = _project_voice_profile_from_session(
-            existing_voice=existing_voice,
-            voice_profile_id=voice_profile_id,
-            name=str(call.data.get("voice_name") or person_name),
-            session=session,
-            enrollment_source=(existing_voice.enrollment_source if existing_voice is not None else "people_setup")
-            or "people_setup",
-            speaker_embedding_id=existing_voice.speaker_embedding_id if existing_voice is not None else "",
-            attribution_confidence=existing_voice.attribution_confidence if existing_voice is not None else None,
-            disabled=False,
-            consent=merged_consent,
-            tts_voice=existing_voice.tts_voice if existing_voice is not None else "",
-        )
-        await storage.async_update_voice_profile(profile)
-
-        if existing_person is not None:
-            person_profile = PersonProfile(
-                person_id=existing_person.person_id,
-                name=existing_person.name,
-                linked_area_id=existing_person.linked_area_id,
-                ble_device_ids=list(existing_person.ble_device_ids),
-                aqara_presence_entity_ids=list(existing_person.aqara_presence_entity_ids),
-                voice_profile_id=voice_profile_id,
-                consent=dict(existing_person.consent),
-                mobile_notify_targets=list(existing_person.mobile_notify_targets),
-                preferred_mobile_target=existing_person.preferred_mobile_target,
-                mobile_voice_endpoint_enabled=existing_person.mobile_voice_endpoint_enabled,
-                is_minor=existing_person.is_minor,
-                guardian_controls_required=existing_person.guardian_controls_required,
-                minor_allow_general_qna=existing_person.minor_allow_general_qna,
-                minor_allowed_intent_classes=list(existing_person.minor_allowed_intent_classes),
-                minor_content_filter_level=existing_person.minor_content_filter_level,
-                notes=existing_person.notes,
-            )
-            await storage.async_update_person_profile(
-                person_profile,
-                set_as_default=(
-                    state.default_person_profile is not None
-                    and state.default_person_profile.person_id == person_profile.person_id
-                ),
-            )
-
-        return {
-            "started": True,
-            "person_id": person_id,
-            "voice_profile_id": voice_profile_id,
-            "enrollment_session_id": session.session_id,
-            "enrollment_state": profile.enrollment_state,
-            "sample_count": profile.sample_count,
-            "local_only": local_only,
-        }
+        return await EnrollmentOrchestrator(hass).start_enrollment(dict(call.data))
 
     return await _async_with_activity(
         hass,
@@ -2073,114 +1615,13 @@ async def _async_handle_capture_voice_enrollment_sample(
     if not speech_text:
         raise vol.Invalid("speech_text is required")
 
+    if str(call.data.get("capture_provider", "browser")).strip().lower() == "satellite":
+        prompt_text = str(call.data.get("prompt_text", "")).strip()
+        if not prompt_text:
+            raise vol.Invalid("prompt_text is required when capture_provider=satellite")
+
     async def _runner() -> dict[str, Any]:
-        storage = ConciergeStorage(hass)
-        state = await storage.async_load_state()
-        existing_voice = state.voice_profiles.get(voice_profile_id)
-        if existing_voice is None:
-            raise vol.Invalid("voice_profile_id is not configured")
-        if existing_voice.disabled:
-            raise vol.Invalid("voice profile is disabled")
-
-        now_iso = datetime.now(timezone.utc).isoformat()
-        sample_id = f"sample_{int(datetime.now(timezone.utc).timestamp() * 1000)}_{uuid4().hex[:8]}"
-        sample_payload: dict[str, Any] = {
-            "sample_id": sample_id,
-            "speech_text": speech_text,
-            "captured_at": now_iso,
-            "source": str(call.data.get("source", "guided_phrase") or "guided_phrase"),
-        }
-        if call.data.get("quality_score") is not None:
-            sample_payload["quality_score"] = float(call.data["quality_score"])
-        if call.data.get("recording_duration_ms") is not None:
-            sample_payload["recording_duration_ms"] = int(call.data["recording_duration_ms"])
-        if call.data.get("phrase_index") is not None:
-            sample_payload["phrase_index"] = int(call.data["phrase_index"])
-
-        enrollment_session = await storage.async_get_latest_enrollment_session_for_voice_profile(voice_profile_id)
-        if enrollment_session is None:
-            matched_person_id = ""
-            for profile in state.person_profiles.values():
-                if profile.voice_profile_id == voice_profile_id:
-                    matched_person_id = profile.person_id
-                    break
-            enrollment_session = enrollment_session_for_start(
-                person_id=matched_person_id,
-                voice_profile_id=voice_profile_id,
-                existing_sample_items=list(existing_voice.sample_items),
-                enrollment_started_at=existing_voice.enrollment_started_at or now_iso,
-            )
-
-        phrase_index = call.data.get("phrase_index")
-        try:
-            phrase_index_value = int(phrase_index) if phrase_index is not None else None
-        except (TypeError, ValueError):
-            phrase_index_value = None
-
-        preferred_path = str(call.data.get("recording_path", "") or "").strip() or None
-        resolved_path = await hass.async_add_executor_job(
-            lambda: provider.resolve_recording_path(
-                session_id=enrollment_session.session_id,
-                preferred_path=preferred_path,
-                phrase_index=phrase_index_value,
-            )
-        )
-
-        if resolved_path:
-            sample_payload["recording_path"] = resolved_path
-            artifacts = await hass.async_add_executor_job(
-                lambda: provider.list_session_artifacts(enrollment_session.session_id)
-            )
-            matching = next(
-                (artifact for artifact in artifacts if artifact.artifact_path == resolved_path),
-                None,
-            )
-            if matching is not None:
-                sample_payload["recording_size_bytes"] = int(matching.bytes_size)
-            if call.data.get("recording_mime_type"):
-                sample_payload["recording_mime_type"] = str(call.data["recording_mime_type"])
-
-        enrollment_session = enrollment_session_record_sample(
-            enrollment_session,
-            sample_payload=sample_payload,
-            captured_at=now_iso,
-        )
-        enrollment_session = await storage.async_update_enrollment_session(
-            session_id=enrollment_session.session_id,
-            state_name=enrollment_session.state,
-            sample_count=enrollment_session.sample_count,
-            sample_items=list(enrollment_session.sample_items),
-            enrollment_started_at=enrollment_session.enrollment_started_at,
-            last_sample_at=enrollment_session.last_sample_at,
-            last_built_at=enrollment_session.last_built_at,
-            metadata={
-                **dict(enrollment_session.metadata),
-                "last_sample_id": sample_id,
-                "last_sample_at": now_iso,
-            },
-        )
-        await _async_sync_session_manifest(hass, enrollment_session)
-
-        updated = _project_voice_profile_from_session(
-            existing_voice=existing_voice,
-            voice_profile_id=existing_voice.voice_profile_id,
-            name=existing_voice.name,
-            session=enrollment_session,
-            enrollment_source=existing_voice.enrollment_source,
-            speaker_embedding_id=existing_voice.speaker_embedding_id,
-            attribution_confidence=existing_voice.attribution_confidence,
-            disabled=existing_voice.disabled,
-            consent=dict(existing_voice.consent),
-            tts_voice=existing_voice.tts_voice,
-        )
-        await storage.async_update_voice_profile(updated)
-
-        return {
-            "captured": True,
-            "voice_profile_id": voice_profile_id,
-            "sample_id": sample_id,
-            "sample_count": updated.sample_count,
-        }
+        return await EnrollmentOrchestrator(hass).capture_enrollment_sample(dict(call.data))
 
     return await _async_with_activity(
         hass,
@@ -2190,6 +1631,34 @@ async def _async_handle_capture_voice_enrollment_sample(
         action_name="capture_voice_enrollment_sample",
         channel="service_mutation",
         external_refs=[{"ref_type": "voice_sample", "voice_profile_id": voice_profile_id}],
+        policy_gates=["local_first_default"],
+        runner=_runner,
+    )
+
+
+async def _async_handle_run_satellite_capture_poc(
+    hass: HomeAssistant,
+    call: ServiceCall,
+) -> dict[str, Any]:
+    """Run the bounded satellite capture proof of concept (internal/dev-only)."""
+    capabilities = _resolve_integration_capabilities(hass)
+    if not capabilities["cap_voice_enrollment"]:
+        raise vol.Invalid(
+            "satellite capture POC is unavailable until attached storage and archive export are enabled in Concierge options"
+        )
+
+    async def _runner() -> dict[str, Any]:
+        return await EnrollmentOrchestrator(hass).run_satellite_capture_poc(dict(call.data))
+
+    return await _async_with_activity(
+        hass,
+        call,
+        intent_class="run_satellite_capture_poc_internal_dev_only",
+        request_summary="Internal/dev-only satellite capture POC executed",
+        action_name="run_satellite_capture_poc_internal_dev_only",
+        resolved_person_id=call.data.get("person_id"),
+        channel="service_operational",
+        external_refs=[{"ref_type": "satellite_capture_poc", "voice_profile_id": call.data.get("voice_profile_id")}],
         policy_gates=["local_first_default"],
         runner=_runner,
     )
@@ -2209,77 +1678,7 @@ async def _async_handle_remove_voice_enrollment_sample(
     sample_id = call.data["sample_id"]
 
     async def _runner() -> dict[str, Any]:
-        storage = ConciergeStorage(hass)
-        state = await storage.async_load_state()
-        existing_voice = state.voice_profiles.get(voice_profile_id)
-        if existing_voice is None:
-            raise vol.Invalid("voice_profile_id is not configured")
-        now_iso = datetime.now(timezone.utc).isoformat()
-        enrollment_session = await storage.async_get_latest_enrollment_session_for_voice_profile(voice_profile_id)
-        if enrollment_session is None:
-            matched_person_id = ""
-            for profile in state.person_profiles.values():
-                if profile.voice_profile_id == voice_profile_id:
-                    matched_person_id = profile.person_id
-                    break
-            enrollment_session = enrollment_session_for_start(
-                person_id=matched_person_id,
-                voice_profile_id=voice_profile_id,
-                existing_sample_items=list(existing_voice.sample_items),
-                enrollment_started_at=existing_voice.enrollment_started_at or now_iso,
-            )
-
-        enrollment_session, removed_items = enrollment_session_remove_sample(
-            enrollment_session,
-            sample_id=sample_id,
-            now_iso=now_iso,
-        )
-        if not removed_items:
-            raise vol.Invalid("sample_id not found")
-
-        provider = _voice_storage_provider_from_hass(hass)
-        enrollment_session = await storage.async_update_enrollment_session(
-            session_id=enrollment_session.session_id,
-            state_name=enrollment_session.state,
-            sample_count=enrollment_session.sample_count,
-            sample_items=list(enrollment_session.sample_items),
-            enrollment_started_at=enrollment_session.enrollment_started_at,
-            last_sample_at=enrollment_session.last_sample_at,
-            last_built_at=enrollment_session.last_built_at,
-        )
-        await _async_sync_session_manifest(hass, enrollment_session)
-
-        updated = _project_voice_profile_from_session(
-            existing_voice=existing_voice,
-            voice_profile_id=existing_voice.voice_profile_id,
-            name=existing_voice.name,
-            session=enrollment_session,
-            enrollment_source=existing_voice.enrollment_source,
-            speaker_embedding_id=(
-                existing_voice.speaker_embedding_id if enrollment_session.sample_count > 0 else ""
-            ),
-            attribution_confidence=(
-                existing_voice.attribution_confidence if enrollment_session.sample_count > 0 else None
-            ),
-            disabled=existing_voice.disabled,
-            consent=dict(existing_voice.consent),
-            tts_voice=existing_voice.tts_voice,
-        )
-        await storage.async_update_voice_profile(updated)
-        if provider is not None:
-            recording_paths = _sample_recording_paths(removed_items)
-            if recording_paths:
-                await hass.async_add_executor_job(
-                    lambda: provider.delete_recording_artifacts(
-                        session_id=enrollment_session.session_id,
-                        artifact_paths=recording_paths,
-                    )
-                )
-        return {
-            "removed": True,
-            "voice_profile_id": voice_profile_id,
-            "sample_count": updated.sample_count,
-        }
+        return await EnrollmentOrchestrator(hass).remove_sample(dict(call.data))
 
     return await _async_with_activity(
         hass,
@@ -2307,109 +1706,7 @@ async def _async_handle_build_voice_profile(
     min_samples = int(call.data.get("min_samples", 3))
 
     async def _runner() -> dict[str, Any]:
-        storage = ConciergeStorage(hass)
-        state = await storage.async_load_state()
-        existing_voice = state.voice_profiles.get(voice_profile_id)
-        if existing_voice is None:
-            raise vol.Invalid("voice_profile_id is not configured")
-        if existing_voice.disabled:
-            raise vol.Invalid("voice profile is disabled")
-
-        enrollment_session = await storage.async_get_latest_enrollment_session_for_voice_profile(voice_profile_id)
-        if enrollment_session is None:
-            matched_person_id = ""
-            for profile in state.person_profiles.values():
-                if profile.voice_profile_id == voice_profile_id:
-                    matched_person_id = profile.person_id
-                    break
-            enrollment_session = enrollment_session_for_start(
-                person_id=matched_person_id,
-                voice_profile_id=voice_profile_id,
-                existing_sample_items=list(existing_voice.sample_items),
-                enrollment_started_at=existing_voice.enrollment_started_at or datetime.now(timezone.utc).isoformat(),
-            )
-
-        sample_count = len(enrollment_session.sample_items)
-        if sample_count < min_samples:
-            raise vol.Invalid(f"voice profile requires at least {min_samples} samples")
-
-        retained_sample_items = [
-            {
-                key: value
-                for key, value in sample.items()
-                if key not in {"recording_path", "recording_mime_type", "recording_size_bytes", "recording_duration_ms"}
-            }
-            for sample in list(enrollment_session.sample_items)
-        ]
-
-        now_iso = datetime.now(timezone.utc).isoformat()
-        embedding_id = f"spk_{uuid4().hex}"
-        confidence = _voice_confidence_for_sample_count(sample_count)
-
-        enrollment_session = await storage.async_update_enrollment_session(
-            session_id=enrollment_session.session_id,
-            sample_count=sample_count,
-            sample_items=retained_sample_items,
-        )
-        enrollment_session = enrollment_session_mark_profile_built(enrollment_session, built_at=now_iso)
-        enrollment_session = await storage.async_update_enrollment_session(
-            session_id=enrollment_session.session_id,
-            state_name=enrollment_session.state,
-            sample_count=enrollment_session.sample_count,
-            sample_items=list(enrollment_session.sample_items),
-            enrollment_started_at=enrollment_session.enrollment_started_at,
-            last_sample_at=enrollment_session.last_sample_at,
-            last_built_at=enrollment_session.last_built_at,
-        )
-        await _async_sync_session_manifest(
-            hass,
-            enrollment_session,
-            target_sample_count=min_samples,
-        )
-
-        updated = _project_voice_profile_from_session(
-            existing_voice=existing_voice,
-            voice_profile_id=existing_voice.voice_profile_id,
-            name=existing_voice.name,
-            session=enrollment_session,
-            enrollment_source=existing_voice.enrollment_source,
-            speaker_embedding_id=embedding_id,
-            attribution_confidence=confidence,
-            disabled=False,
-            consent=dict(existing_voice.consent),
-            tts_voice=existing_voice.tts_voice,
-        )
-        await storage.async_update_voice_profile(updated)
-        enrollment_session, cleanup_summary = await _async_execute_enrollment_cleanup(
-            hass,
-            storage,
-            enrollment_session,
-            cleanup_reason=VOICE_ENROLLMENT_CLEANUP_REASON_COMPLETED,
-        )
-
-        person_id = str(call.data.get("person_id") or "").strip()
-        if person_id:
-            person_profile = state.person_profiles.get(person_id)
-            if person_profile is None:
-                raise vol.Invalid("person_id is not configured")
-            person_profile.voice_profile_id = voice_profile_id
-            await storage.async_update_person_profile(
-                person_profile,
-                set_as_default=(
-                    state.default_person_profile is not None
-                    and state.default_person_profile.person_id == person_id
-                ),
-            )
-
-        return {
-            "built": True,
-            "voice_profile_id": voice_profile_id,
-            "sample_count": sample_count,
-            "speaker_embedding_id": embedding_id,
-            "attribution_confidence": confidence,
-            "person_id": person_id or None,
-            "cleanup_result_code": cleanup_summary["cleanup_result_code"],
-        }
+        return await EnrollmentOrchestrator(hass).build_voice_profile(dict(call.data))
 
     return await _async_with_activity(
         hass,
@@ -2424,6 +1721,121 @@ async def _async_handle_build_voice_profile(
     )
 
 
+async def _async_handle_complete_voice_enrollment(
+    hass: HomeAssistant,
+    call: ServiceCall,
+) -> dict[str, Any]:
+    """Run deterministic enrollment completion workflow through orchestrator."""
+    voice_profile_id = call.data["voice_profile_id"]
+
+    async def _runner() -> dict[str, Any]:
+        return await EnrollmentOrchestrator(hass).complete_enrollment(dict(call.data))
+
+    return await _async_with_activity(
+        hass,
+        call,
+        intent_class="complete_voice_enrollment",
+        request_summary=f"Voice enrollment completion requested: {voice_profile_id}",
+        action_name="complete_voice_enrollment",
+        resolved_person_id=call.data.get("person_id"),
+        channel="service_mutation",
+        external_refs=[{"ref_type": "voice_enrollment_complete", "voice_profile_id": voice_profile_id}],
+        runner=_runner,
+    )
+
+
+async def _async_handle_get_voice_enrollment_completion_readiness(
+    hass: HomeAssistant,
+    call: ServiceCall,
+) -> dict[str, Any]:
+    """Return deterministic completion readiness derived from authoritative session state."""
+    return await EnrollmentOrchestrator(hass).get_completion_readiness(dict(call.data))
+
+
+async def _async_handle_cancel_voice_enrollment(
+    hass: HomeAssistant,
+    call: ServiceCall,
+) -> dict[str, Any]:
+    """Cancel active voice enrollment and invoke cleanup deterministically."""
+    async def _runner() -> dict[str, Any]:
+        return await EnrollmentOrchestrator(hass).cancel_enrollment(dict(call.data))
+
+    return await _async_with_activity(
+        hass,
+        call,
+        intent_class="cancel_voice_enrollment",
+        request_summary="Voice enrollment cancellation requested",
+        action_name="cancel_voice_enrollment",
+        resolved_person_id=call.data.get("person_id"),
+        channel="service_mutation",
+        external_refs=[{"ref_type": "voice_enrollment_cancel", "voice_profile_id": call.data.get("voice_profile_id")}],
+        runner=_runner,
+    )
+
+
+async def _async_handle_recover_voice_enrollment(
+    hass: HomeAssistant,
+    call: ServiceCall,
+) -> dict[str, Any]:
+    """Return authoritative recovery decision for voice enrollment."""
+    async def _runner() -> dict[str, Any]:
+        return await EnrollmentOrchestrator(hass).recover_enrollment(dict(call.data))
+
+    return await _async_with_activity(
+        hass,
+        call,
+        intent_class="recover_voice_enrollment",
+        request_summary="Voice enrollment recovery requested",
+        action_name="recover_voice_enrollment",
+        resolved_person_id=call.data.get("person_id"),
+        channel="service_operational",
+        external_refs=[{"ref_type": "voice_enrollment_recover", "voice_profile_id": call.data.get("voice_profile_id")}],
+        runner=_runner,
+    )
+
+
+async def _async_handle_resume_voice_enrollment(
+    hass: HomeAssistant,
+    call: ServiceCall,
+) -> dict[str, Any]:
+    """Resume recoverable voice enrollment session from authoritative state."""
+    async def _runner() -> dict[str, Any]:
+        return await EnrollmentOrchestrator(hass).resume_enrollment(dict(call.data))
+
+    return await _async_with_activity(
+        hass,
+        call,
+        intent_class="resume_voice_enrollment",
+        request_summary="Voice enrollment resume requested",
+        action_name="resume_voice_enrollment",
+        resolved_person_id=call.data.get("person_id"),
+        channel="service_operational",
+        external_refs=[{"ref_type": "voice_enrollment_resume", "voice_profile_id": call.data.get("voice_profile_id")}],
+        runner=_runner,
+    )
+
+
+async def _async_handle_abandon_voice_enrollment(
+    hass: HomeAssistant,
+    call: ServiceCall,
+) -> dict[str, Any]:
+    """Abandon active voice enrollment and run cleanup through orchestrator."""
+    async def _runner() -> dict[str, Any]:
+        return await EnrollmentOrchestrator(hass).abandon_enrollment(dict(call.data))
+
+    return await _async_with_activity(
+        hass,
+        call,
+        intent_class="abandon_voice_enrollment",
+        request_summary="Voice enrollment abandon requested",
+        action_name="abandon_voice_enrollment",
+        resolved_person_id=call.data.get("person_id"),
+        channel="service_mutation",
+        external_refs=[{"ref_type": "voice_enrollment_abandon", "voice_profile_id": call.data.get("voice_profile_id")}],
+        runner=_runner,
+    )
+
+
 async def _async_handle_reset_voice_profile(
     hass: HomeAssistant,
     call: ServiceCall,
@@ -2433,63 +1845,7 @@ async def _async_handle_reset_voice_profile(
     preserve_consent = bool(call.data.get("preserve_consent", True))
 
     async def _runner() -> dict[str, Any]:
-        storage = ConciergeStorage(hass)
-        state = await storage.async_load_state()
-        existing_voice = state.voice_profiles.get(voice_profile_id)
-        if existing_voice is None:
-            raise vol.Invalid("voice_profile_id is not configured")
-
-        enrollment_session = await storage.async_get_latest_enrollment_session_for_voice_profile(voice_profile_id)
-        if enrollment_session is None:
-            matched_person_id = ""
-            for profile in state.person_profiles.values():
-                if profile.voice_profile_id == voice_profile_id:
-                    matched_person_id = profile.person_id
-                    break
-            enrollment_session = enrollment_session_for_start(
-                person_id=matched_person_id,
-                voice_profile_id=voice_profile_id,
-                existing_sample_items=list(existing_voice.sample_items),
-                enrollment_started_at=existing_voice.enrollment_started_at or datetime.now(timezone.utc).isoformat(),
-            )
-
-        enrollment_session = enrollment_session_reset(enrollment_session)
-        enrollment_session = await storage.async_update_enrollment_session(
-            session_id=enrollment_session.session_id,
-            state_name=enrollment_session.state,
-            sample_count=enrollment_session.sample_count,
-            sample_items=list(enrollment_session.sample_items),
-            enrollment_started_at=enrollment_session.enrollment_started_at,
-            last_sample_at=enrollment_session.last_sample_at,
-            last_built_at=enrollment_session.last_built_at,
-        )
-        await _async_sync_session_manifest(hass, enrollment_session)
-
-        updated = _project_voice_profile_from_session(
-            existing_voice=existing_voice,
-            voice_profile_id=existing_voice.voice_profile_id,
-            name=existing_voice.name,
-            session=enrollment_session,
-            enrollment_source=existing_voice.enrollment_source,
-            speaker_embedding_id="",
-            attribution_confidence=None,
-            disabled=False,
-            consent=(dict(existing_voice.consent) if preserve_consent else {}),
-            tts_voice=existing_voice.tts_voice,
-        )
-        await storage.async_update_voice_profile(updated)
-        enrollment_session, cleanup_summary = await _async_execute_enrollment_cleanup(
-            hass,
-            storage,
-            enrollment_session,
-            cleanup_reason=VOICE_ENROLLMENT_CLEANUP_REASON_MANUAL,
-        )
-        return {
-            "reset": True,
-            "voice_profile_id": voice_profile_id,
-            "preserve_consent": preserve_consent,
-            "cleanup_result_code": cleanup_summary["cleanup_result_code"],
-        }
+        return await EnrollmentOrchestrator(hass).reset_voice_profile(dict(call.data))
 
     return await _async_with_activity(
         hass,
@@ -2512,49 +1868,7 @@ async def _async_handle_delete_voice_profile(
     unlink_from_people = bool(call.data.get("unlink_from_people", True))
 
     async def _runner() -> dict[str, Any]:
-        storage = ConciergeStorage(hass)
-        current_state = await storage.async_load_state()
-        existing_voice = current_state.voice_profiles.get(voice_profile_id)
-        enrollment_session = await storage.async_get_latest_enrollment_session_for_voice_profile(voice_profile_id)
-
-        cleanup_summary = {
-            "cleanup_result_code": "not_started",
-            "artifacts_seen_count": 0,
-            "artifacts_deleted_count": 0,
-            "artifacts_missing_count": 0,
-            "errors_redacted_or_sanitized": [],
-        }
-        if enrollment_session is not None:
-            enrollment_session, cleanup_summary = await _async_execute_enrollment_cleanup(
-                hass,
-                storage,
-                enrollment_session,
-                cleanup_reason=VOICE_ENROLLMENT_CLEANUP_REASON_CANCELLED,
-            )
-
-        storage = ConciergeStorage(hass)
-        state = await storage.async_delete_voice_profile(
-            voice_profile_id,
-            unlink_from_people=unlink_from_people,
-        )
-
-        # Preserve enrollment session + manifest authority until startup reconciliation exists.
-        if enrollment_session is None and existing_voice is not None:
-            provider = _voice_storage_provider_from_hass(hass)
-            if provider is not None:
-                recording_paths = _sample_recording_paths(list(existing_voice.sample_items))
-                if recording_paths:
-                    await hass.async_add_executor_job(
-                        lambda: provider.delete_owned_artifacts(recording_paths)
-                    )
-
-        return {
-            "deleted": True,
-            "voice_profile_id": voice_profile_id,
-            "unlink_from_people": unlink_from_people,
-            "voice_profile_count": len(state.voice_profiles),
-            "cleanup_result_code": cleanup_summary["cleanup_result_code"],
-        }
+        return await EnrollmentOrchestrator(hass).delete_voice_profile(dict(call.data))
 
     return await _async_with_activity(
         hass,
@@ -3535,6 +2849,13 @@ async def async_register_services(hass: HomeAssistant) -> None:
     )
     hass.services.async_register(
         DOMAIN,
+        SERVICE_RUN_SATELLITE_CAPTURE_POC,
+        _bind(_async_handle_run_satellite_capture_poc),
+        schema=SERVICE_RUN_SATELLITE_CAPTURE_POC_SCHEMA,
+        supports_response=SupportsResponse.ONLY,
+    )
+    hass.services.async_register(
+        DOMAIN,
         SERVICE_REMOVE_VOICE_ENROLLMENT_SAMPLE,
         _bind(_async_handle_remove_voice_enrollment_sample),
         schema=SERVICE_REMOVE_VOICE_ENROLLMENT_SAMPLE_SCHEMA,
@@ -3545,6 +2866,48 @@ async def async_register_services(hass: HomeAssistant) -> None:
         SERVICE_BUILD_VOICE_PROFILE,
         _bind(_async_handle_build_voice_profile),
         schema=SERVICE_BUILD_VOICE_PROFILE_SCHEMA,
+        supports_response=SupportsResponse.ONLY,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_COMPLETE_VOICE_ENROLLMENT,
+        _bind(_async_handle_complete_voice_enrollment),
+        schema=SERVICE_COMPLETE_VOICE_ENROLLMENT_SCHEMA,
+        supports_response=SupportsResponse.ONLY,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_GET_VOICE_ENROLLMENT_COMPLETION_READINESS,
+        _bind(_async_handle_get_voice_enrollment_completion_readiness),
+        schema=SERVICE_GET_VOICE_ENROLLMENT_COMPLETION_READINESS_SCHEMA,
+        supports_response=SupportsResponse.ONLY,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_CANCEL_VOICE_ENROLLMENT,
+        _bind(_async_handle_cancel_voice_enrollment),
+        schema=SERVICE_CANCEL_VOICE_ENROLLMENT_SCHEMA,
+        supports_response=SupportsResponse.ONLY,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_RECOVER_VOICE_ENROLLMENT,
+        _bind(_async_handle_recover_voice_enrollment),
+        schema=SERVICE_RECOVER_VOICE_ENROLLMENT_SCHEMA,
+        supports_response=SupportsResponse.ONLY,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_RESUME_VOICE_ENROLLMENT,
+        _bind(_async_handle_resume_voice_enrollment),
+        schema=SERVICE_RESUME_VOICE_ENROLLMENT_SCHEMA,
+        supports_response=SupportsResponse.ONLY,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_ABANDON_VOICE_ENROLLMENT,
+        _bind(_async_handle_abandon_voice_enrollment),
+        schema=SERVICE_ABANDON_VOICE_ENROLLMENT_SCHEMA,
         supports_response=SupportsResponse.ONLY,
     )
     hass.services.async_register(
@@ -3682,8 +3045,15 @@ async def async_unregister_services(hass: HomeAssistant) -> None:
         SERVICE_UPDATE_VOICE_PROFILE,
         SERVICE_START_VOICE_ENROLLMENT,
         SERVICE_CAPTURE_VOICE_ENROLLMENT_SAMPLE,
+        SERVICE_RUN_SATELLITE_CAPTURE_POC,
         SERVICE_REMOVE_VOICE_ENROLLMENT_SAMPLE,
         SERVICE_BUILD_VOICE_PROFILE,
+        SERVICE_COMPLETE_VOICE_ENROLLMENT,
+        SERVICE_GET_VOICE_ENROLLMENT_COMPLETION_READINESS,
+        SERVICE_CANCEL_VOICE_ENROLLMENT,
+        SERVICE_RECOVER_VOICE_ENROLLMENT,
+        SERVICE_RESUME_VOICE_ENROLLMENT,
+        SERVICE_ABANDON_VOICE_ENROLLMENT,
         SERVICE_RESET_VOICE_PROFILE,
         SERVICE_DELETE_VOICE_PROFILE,
         SERVICE_UPDATE_GLOBAL_CONTEXT,

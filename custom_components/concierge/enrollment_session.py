@@ -112,6 +112,48 @@ _ALLOWED_STATE_TRANSITIONS: dict[str, tuple[str, ...]] = {
     VOICE_ENROLLMENT_STATE_PREFLIGHT_FAILED: (),
 }
 
+_ACTIVE_ENROLLMENT_STATES = {
+    VOICE_ENROLLMENT_STATE_PREFLIGHT_VALIDATING,
+    VOICE_ENROLLMENT_STATE_SESSION_CREATED,
+    VOICE_ENROLLMENT_STATE_READY,
+    VOICE_ENROLLMENT_STATE_CAPTURE_PENDING,
+    VOICE_ENROLLMENT_STATE_CAPTURING,
+    VOICE_ENROLLMENT_STATE_SAMPLE_RECEIVED,
+    VOICE_ENROLLMENT_STATE_PROCESSING,
+    VOICE_ENROLLMENT_STATE_PROFILE_BUILDING,
+}
+
+_TERMINAL_ENROLLMENT_STATES = {
+    VOICE_ENROLLMENT_STATE_PREFLIGHT_FAILED,
+    VOICE_ENROLLMENT_STATE_COMPLETED_PENDING_CLEANUP,
+    VOICE_ENROLLMENT_STATE_CANCELLED_PENDING_CLEANUP,
+    VOICE_ENROLLMENT_STATE_FAILED_PENDING_CLEANUP,
+    VOICE_ENROLLMENT_STATE_TIMEOUT_PENDING_CLEANUP,
+    VOICE_ENROLLMENT_STATE_CLEANUP_RUNNING,
+    VOICE_ENROLLMENT_STATE_CLEANUP_COMPLETE,
+    VOICE_ENROLLMENT_STATE_CLEANUP_FAILED,
+}
+
+_STATE_STATUS_SUMMARY = {
+    VOICE_ENROLLMENT_STATE_IDLE: "Enrollment not started",
+    VOICE_ENROLLMENT_STATE_PREFLIGHT_VALIDATING: "Validating enrollment storage",
+    VOICE_ENROLLMENT_STATE_PREFLIGHT_FAILED: "Storage validation failed",
+    VOICE_ENROLLMENT_STATE_SESSION_CREATED: "Enrollment session created",
+    VOICE_ENROLLMENT_STATE_READY: "Ready to record sample",
+    VOICE_ENROLLMENT_STATE_CAPTURE_PENDING: "Preparing to capture sample",
+    VOICE_ENROLLMENT_STATE_CAPTURING: "Capturing sample",
+    VOICE_ENROLLMENT_STATE_SAMPLE_RECEIVED: "Sample captured",
+    VOICE_ENROLLMENT_STATE_PROCESSING: "Processing enrollment samples",
+    VOICE_ENROLLMENT_STATE_PROFILE_BUILDING: "Building voice profile",
+    VOICE_ENROLLMENT_STATE_COMPLETED_PENDING_CLEANUP: "Enrollment complete, cleaning up",
+    VOICE_ENROLLMENT_STATE_CANCELLED_PENDING_CLEANUP: "Enrollment canceled, cleaning up",
+    VOICE_ENROLLMENT_STATE_FAILED_PENDING_CLEANUP: "Enrollment failed, cleaning up",
+    VOICE_ENROLLMENT_STATE_TIMEOUT_PENDING_CLEANUP: "Enrollment timed out, cleaning up",
+    VOICE_ENROLLMENT_STATE_CLEANUP_RUNNING: "Removing temporary enrollment artifacts",
+    VOICE_ENROLLMENT_STATE_CLEANUP_COMPLETE: "Cleanup complete",
+    VOICE_ENROLLMENT_STATE_CLEANUP_FAILED: "Cleanup failed",
+}
+
 
 def can_transition_enrollment_session(*, from_state: str, to_state: str) -> bool:
     """Return whether a requested session state transition is allowed."""
@@ -184,9 +226,9 @@ def enrollment_session_record_sample(
 ) -> EnrollmentSession:
     """Append one sample and advance lifecycle through capture/sample states."""
     current = session
-    if current.state in {VOICE_ENROLLMENT_STATE_READY, VOICE_ENROLLMENT_STATE_SAMPLE_RECEIVED}:
+    if current.state == VOICE_ENROLLMENT_STATE_READY:
         current = transition_enrollment_session(current, to_state=VOICE_ENROLLMENT_STATE_CAPTURE_PENDING)
-    if current.state == VOICE_ENROLLMENT_STATE_CAPTURE_PENDING:
+    if current.state in {VOICE_ENROLLMENT_STATE_CAPTURE_PENDING, VOICE_ENROLLMENT_STATE_SAMPLE_RECEIVED}:
         current = transition_enrollment_session(current, to_state=VOICE_ENROLLMENT_STATE_CAPTURING)
 
     next_items = [*list(current.sample_items), dict(sample_payload)]
@@ -250,13 +292,18 @@ def enrollment_session_remove_sample(
 def enrollment_session_mark_profile_built(session: EnrollmentSession, *, built_at: str) -> EnrollmentSession:
     """Move session through profile_building to completed_pending_cleanup."""
     current = session
-    if current.state in {VOICE_ENROLLMENT_STATE_READY, VOICE_ENROLLMENT_STATE_SAMPLE_RECEIVED}:
+    if current.state == VOICE_ENROLLMENT_STATE_READY:
         current = transition_enrollment_session(current, to_state=VOICE_ENROLLMENT_STATE_CAPTURE_PENDING)
+    if current.state == VOICE_ENROLLMENT_STATE_CAPTURE_PENDING:
         current = transition_enrollment_session(current, to_state=VOICE_ENROLLMENT_STATE_CAPTURING)
+    if current.state == VOICE_ENROLLMENT_STATE_CAPTURING:
         current = transition_enrollment_session(current, to_state=VOICE_ENROLLMENT_STATE_SAMPLE_RECEIVED)
 
-    current = transition_enrollment_session(current, to_state=VOICE_ENROLLMENT_STATE_PROCESSING)
-    current = transition_enrollment_session(current, to_state=VOICE_ENROLLMENT_STATE_PROFILE_BUILDING)
+    if current.state == VOICE_ENROLLMENT_STATE_SAMPLE_RECEIVED:
+        current = transition_enrollment_session(current, to_state=VOICE_ENROLLMENT_STATE_PROCESSING)
+    if current.state == VOICE_ENROLLMENT_STATE_PROCESSING:
+        current = transition_enrollment_session(current, to_state=VOICE_ENROLLMENT_STATE_PROFILE_BUILDING)
+
     current = EnrollmentSession(
         session_id=current.session_id,
         person_id=current.person_id,
@@ -274,6 +321,8 @@ def enrollment_session_mark_profile_built(session: EnrollmentSession, *, built_a
         last_error="",
         metadata=dict(current.metadata),
     )
+    if current.state != VOICE_ENROLLMENT_STATE_PROFILE_BUILDING:
+        raise ValueError(f"invalid enrollment session transition: {current.state} -> {VOICE_ENROLLMENT_STATE_PROFILE_BUILDING}")
     return transition_enrollment_session(current, to_state=VOICE_ENROLLMENT_STATE_COMPLETED_PENDING_CLEANUP)
 
 
@@ -370,13 +419,56 @@ def resolve_manifest_target_sample_count(
     except (TypeError, ValueError):
         session_target = None
 
+    minimum_target = max(1, int(default_target_sample_count))
+
     if requested_target_sample_count is not None:
         return max(1, int(requested_target_sample_count))
     if session_target is not None:
-        return max(1, int(session_target))
+        return max(minimum_target, int(session_target))
     if existing_target_sample_count is not None:
-        return max(1, int(existing_target_sample_count))
-    return max(1, int(default_target_sample_count))
+        return max(minimum_target, int(existing_target_sample_count))
+    return minimum_target
+
+
+def build_enrollment_session_progress_projection(
+    session: EnrollmentSession,
+    *,
+    target_sample_count: int,
+) -> dict[str, Any]:
+    """Project a privacy-safe enrollment progress summary from session authority."""
+    safe_target = max(1, int(target_sample_count))
+    safe_sample_count = max(0, int(session.sample_count))
+    completion_percentage = min(100, max(0, int((safe_sample_count * 100) / safe_target)))
+    is_complete = completion_percentage >= 100
+    enrollment_state = str(session.state or VOICE_ENROLLMENT_STATE_IDLE)
+
+    provider_type = str(session.metadata.get("provider_type", "") or "").strip()
+    if not provider_type:
+        provider_type = str(session.capture_provider or "browser_microphone")
+
+    captured_phrase_indices = sorted(
+        {
+            int(item.get("phrase_index"))
+            for item in list(session.sample_items)
+            if item.get("phrase_index") is not None
+        }
+    )
+
+    return {
+        "session_id": session.session_id,
+        "enrollment_state": enrollment_state,
+        "sample_count": safe_sample_count,
+        "target_sample_count": safe_target,
+        "completion_percentage": completion_percentage,
+        "is_complete": is_complete,
+        "is_active": enrollment_state in _ACTIVE_ENROLLMENT_STATES,
+        "is_terminal": enrollment_state in _TERMINAL_ENROLLMENT_STATES,
+        "cleanup_status": str(session.cleanup_status or "not_started"),
+        "provider_type": provider_type,
+        "captured_phrase_indices": captured_phrase_indices,
+        "last_updated_at": str(session.updated_at or ""),
+        "user_safe_status_summary": _STATE_STATUS_SUMMARY.get(enrollment_state, "Enrollment in progress"),
+    }
 
 
 def _with_cleanup_status(

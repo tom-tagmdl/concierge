@@ -18,6 +18,7 @@ from .const import (
     VOICE_ENROLLMENT_PREFLIGHT_STORAGE_UNKNOWN_FAILURE,
 )
 from .enrollment_cleanup import EnrollmentCleanupManager, EnrollmentCleanupRequest
+from .enrollment_orchestrator import resolve_enrollment_storage_provider_from_entry
 from .enrollment_session import (
     build_enrollment_session_manifest_payload,
     enrollment_session_mark_cleanup_complete,
@@ -78,21 +79,7 @@ def _utcnow_iso() -> str:
 
 
 def _provider_from_entry(hass, entry) -> MountedPathEnrollmentStorageProvider | None:
-    archive_options = archive_options_from_entry(entry)
-    destination_uri = str(archive_options.get("destination_uri", "") or "").strip()
-    destination_configured = bool(archive_options.get("destination_configured", False))
-    if not destination_configured or not destination_uri:
-        return None
-
-    try:
-        root_path = resolve_voice_enrollment_root(destination_uri)
-    except ValueError:
-        return None
-
-    return MountedPathEnrollmentStorageProvider(
-        root_path=root_path,
-        hass_config_path=Path(hass.config.path()),
-    )
+    return resolve_enrollment_storage_provider_from_entry(hass, entry)
 
 
 async def _async_sync_session_manifest(hass, provider: MountedPathEnrollmentStorageProvider, session: EnrollmentSession) -> None:

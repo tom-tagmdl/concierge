@@ -8,31 +8,19 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import issue_registry as ir
 
-from .archive_runtime import archive_options_from_entry, resolve_voice_enrollment_root
 from .const import DOMAIN
 from .const import VOICE_ENROLLMENT_CLEANUP_RESULT_ALREADY_CLEAN
 from .const import VOICE_ENROLLMENT_CLEANUP_RESULT_COMPLETE
 from .const import VOICE_ENROLLMENT_MANIFEST_SCHEMA_VERSION
+from .enrollment_orchestrator import EnrollmentOrchestrator
+from .enrollment_orchestrator import resolve_enrollment_storage_provider_from_entry
 from .enrollment_storage import MountedPathEnrollmentStorageProvider
+from .enrollment_telemetry import build_operational_telemetry
 from .storage import ConciergeStorage
 
 
 def _provider_from_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> MountedPathEnrollmentStorageProvider | None:
-    archive_options = archive_options_from_entry(config_entry)
-    destination_uri = str(archive_options.get("destination_uri", "") or "").strip()
-    destination_configured = bool(archive_options.get("destination_configured", False))
-    if not destination_configured or not destination_uri:
-        return None
-
-    try:
-        root_path = resolve_voice_enrollment_root(destination_uri)
-    except ValueError:
-        return None
-
-    return MountedPathEnrollmentStorageProvider(
-        root_path=root_path,
-        hass_config_path=None,
-    )
+    return resolve_enrollment_storage_provider_from_entry(hass, config_entry)
 
 
 def _active_session_count(state) -> int:
@@ -117,6 +105,12 @@ async def async_get_config_entry_diagnostics(
     provider_type = "not_configured"
     provider_available = False
     provider_status_summary = "not_configured"
+    provider_supported = False
+    capture_supported = False
+    selection_supported = False
+    provider_reason_code = "capability_unknown"
+    satellite_capture_supported = False
+    satellite_status_code = "provider_not_selected"
 
     if provider is not None:
         readiness = await hass.async_add_executor_job(provider.validate_ready)
@@ -138,8 +132,28 @@ async def async_get_config_entry_diagnostics(
                 if inspection.manifest_present and not inspection.manifest_valid:
                     invalid_manifest_count += 1
 
+    capture_capabilities = await EnrollmentOrchestrator(hass).get_capture_provider_capabilities()
+    provider_type = str(capture_capabilities.get("provider_type", provider_type) or provider_type)
+    provider_available = bool(capture_capabilities.get("provider_available", provider_available))
+    provider_supported = bool(capture_capabilities.get("provider_supported", provider_supported))
+    capture_supported = bool(capture_capabilities.get("capture_supported", capture_supported))
+    selection_supported = bool(capture_capabilities.get("selection_supported", selection_supported))
+    provider_reason_code = str(capture_capabilities.get("reason_code", provider_reason_code) or provider_reason_code)
+    satellite_capture_supported = bool(
+        capture_capabilities.get("satellite_capture_supported", satellite_capture_supported)
+    )
+    satellite_status_code = str(capture_capabilities.get("satellite_status_code", satellite_status_code) or satellite_status_code)
+    provider_status_summary = str(
+        capture_capabilities.get("provider_status_summary", provider_status_summary) or provider_status_summary
+    )
+
     attempt_count, success_count, failure_count = _cleanup_counters(state)
     reconciliation_result = hass.data.get(DOMAIN, {}).get(f"{config_entry.entry_id}_startup_reconciliation")
+    telemetry = build_operational_telemetry(
+        state=state,
+        reconciliation_result=reconciliation_result,
+        capture_capabilities=capture_capabilities,
+    )
 
     return {
         "storage_health": {
@@ -179,8 +193,19 @@ async def async_get_config_entry_diagnostics(
         "provider_availability": {
             "provider_type": provider_type,
             "provider_available": provider_available,
+            "provider_supported": provider_supported,
             "provider_status_summary": provider_status_summary,
+            "capture_supported": capture_supported,
+            "selection_supported": selection_supported,
+            "reason_code": provider_reason_code,
+            "satellite_capture_supported": satellite_capture_supported,
+            "satellite_status_code": satellite_status_code,
         },
+        "enrollment_activity_summary": telemetry["enrollment_activity_summary"],
+        "completion_activity_summary": telemetry["completion_activity_summary"],
+        "cleanup_activity_summary": telemetry["cleanup_activity_summary"],
+        "reconciliation_activity_summary": telemetry["reconciliation_activity_summary"],
+        "capture_provider_activity_summary": telemetry["capture_provider_activity_summary"],
         "retention_policy": {
             "retention_mode": "zero_retention_default",
             "cleanup_policy_version": "phase0_cleanup_foundation_v1",

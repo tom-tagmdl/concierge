@@ -125,6 +125,48 @@ async def async_create_or_update_storage_issue(
     return issue_id
 
 
+def _capture_provider_issue_for_status(provider_status: str) -> str:
+    normalized = str(provider_status or "").strip().lower()
+    if normalized in {"unsupported", "future_provider", "no_capture_api"}:
+        return VOICE_ENROLLMENT_REPAIRS_CAPTURE_PROVIDER_UNSUPPORTED
+    return VOICE_ENROLLMENT_REPAIRS_CAPTURE_PROVIDER_UNAVAILABLE
+
+
+async def async_create_or_update_capture_provider_issue(
+    hass,
+    *,
+    provider_type: str,
+    provider_status: str,
+    reason_code: str = "",
+    selected_provider: bool = False,
+) -> str:
+    """Publish sanitized issue for unsupported or unavailable capture provider state."""
+    if provider_type == "satellite" and not selected_provider:
+        return ""
+
+    issue_id = _capture_provider_issue_for_status(provider_status)
+    await _async_create_or_update_issue(
+        hass,
+        issue_id=issue_id,
+        placeholders=_sanitized_placeholders(
+            provider_type=provider_type,
+            provider_status=provider_status,
+            reason_code=reason_code,
+        ),
+    )
+    return issue_id
+
+
+async def async_clear_capture_provider_issue(hass, issue_id: str | None = None) -> None:
+    """Clear capture-provider-specific repairs issues."""
+    if issue_id is not None:
+        await _async_clear_issue(hass, issue_id)
+        return
+
+    await _async_clear_issue(hass, VOICE_ENROLLMENT_REPAIRS_CAPTURE_PROVIDER_UNAVAILABLE)
+    await _async_clear_issue(hass, VOICE_ENROLLMENT_REPAIRS_CAPTURE_PROVIDER_UNSUPPORTED)
+
+
 async def async_clear_storage_issue(hass, issue_id: str | None = None) -> None:
     if issue_id is not None:
         await _async_clear_issue(hass, issue_id)

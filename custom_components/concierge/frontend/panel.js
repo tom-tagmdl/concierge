@@ -45,6 +45,136 @@ var CONCIERGE_TTS_ENGINE_IDS = {
   google_translate: "tts.google_translate_en_com",
 };
 
+function conciergeNormalizeVoiceEnrollmentProvider(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (normalized === "satellite" || normalized === "assist_satellite") return "satellite";
+  if (normalized === "browser" || normalized === "browser_microphone" || normalized === "browser_mic") return "browser";
+  return "";
+}
+
+function conciergeGetBrowserVoiceEnrollmentCapability({ isSecureContext, mediaDevices, MediaRecorderCtor }) {
+  const secureContext = Boolean(isSecureContext);
+  const microphoneSupported = Boolean(mediaDevices?.getUserMedia) && Boolean(MediaRecorderCtor);
+  const available = secureContext && microphoneSupported;
+
+  if (!secureContext) {
+    return {
+      secureContext,
+      microphoneSupported,
+      available,
+      summary: "Microphone recording requires a secure browser context. Open Home Assistant over HTTPS or from localhost, then try again.",
+    };
+  }
+
+  if (!microphoneSupported) {
+    return {
+      secureContext,
+      microphoneSupported,
+      available,
+      summary: "This browser does not support microphone recording for voice enrollment.",
+    };
+  }
+
+  return {
+    secureContext,
+    microphoneSupported,
+    available,
+    summary: "Browser microphone capture is available.",
+  };
+}
+
+function conciergeCollectSatelliteOptions(hassStates) {
+  const states = hassStates && typeof hassStates === "object" ? hassStates : {};
+  return Object.entries(states)
+    .filter(([entityId]) => String(entityId || "").startsWith("assist_satellite."))
+    .map(([entityId, stateObj]) => ({
+      entity_id: String(entityId || "").trim(),
+      label: String(
+        stateObj?.attributes?.friendly_name
+        || stateObj?.attributes?.name
+        || entityId
+      ).trim() || String(entityId || "").trim(),
+    }))
+    .filter((option) => option.entity_id)
+    .sort((left, right) => left.label.localeCompare(right.label));
+}
+
+function conciergeResolveVoiceEnrollmentDefaultProvider({ browserAvailable, satelliteCount }) {
+  if (browserAvailable) return "browser";
+  if (Number(satelliteCount || 0) > 0) return "satellite";
+  return "browser";
+}
+
+function conciergeGetVoiceEnrollmentProviderAvailability({ browserAvailable, satelliteCount }) {
+  return {
+    browserSelectable: Boolean(browserAvailable),
+    satelliteSelectable: Number(satelliteCount || 0) > 0,
+  };
+}
+
+function conciergeIsVoiceEnrollmentAuthorized(dialogState) {
+  const dialog = dialogState && typeof dialogState === "object" ? dialogState : {};
+  return Boolean(dialog.consentAcknowledged) && dialog.localOnly !== false;
+}
+
+function conciergeBuildSatelliteEnrollmentPrompt(phraseIndex, speechText) {
+  const ordinal = Math.max(1, Number(phraseIndex || 0) + 1);
+  return `Please read phrase ${ordinal} now.`;
+}
+
+function conciergeBuildVoiceEnrollmentDialogState(previousState = {}, seedState = {}) {
+  const previous = previousState && typeof previousState === "object" ? previousState : {};
+  const seed = seedState && typeof seedState === "object" ? seedState : {};
+  const satelliteOptions = Array.isArray(seed.satelliteOptions)
+    ? seed.satelliteOptions
+    : (Array.isArray(previous.satelliteOptions) ? previous.satelliteOptions : []);
+  const satelliteIds = satelliteOptions
+    .map((option) => String(option?.entity_id || "").trim())
+    .filter(Boolean);
+  const browserAvailable = seed.browserAvailable !== undefined ? Boolean(seed.browserAvailable) : Boolean(previous.browserAvailable);
+  let captureProvider = conciergeNormalizeVoiceEnrollmentProvider(seed.captureProvider)
+    || conciergeNormalizeVoiceEnrollmentProvider(previous.captureProvider)
+    || conciergeResolveVoiceEnrollmentDefaultProvider({ browserAvailable, satelliteCount: satelliteIds.length });
+  if (captureProvider === "satellite" && !satelliteIds.length) {
+    captureProvider = "browser";
+  }
+
+  let satelliteEntityId = String(
+    seed.satelliteEntityId !== undefined ? seed.satelliteEntityId : (previous.satelliteEntityId || "")
+  ).trim();
+  if (satelliteIds.length === 1 && !satelliteEntityId) {
+    satelliteEntityId = satelliteIds[0];
+  }
+  if (satelliteEntityId && !satelliteIds.includes(satelliteEntityId)) {
+    satelliteEntityId = satelliteIds.length === 1 ? satelliteIds[0] : "";
+  }
+
+  return {
+    open: Boolean(seed.open !== undefined ? seed.open : previous.open),
+    personId: String(seed.personId !== undefined ? seed.personId : (previous.personId || "")).trim(),
+    phraseIndex: Math.max(0, Number(seed.phraseIndex !== undefined ? seed.phraseIndex : (previous.phraseIndex || 0)) || 0),
+    currentCaptured: Boolean(seed.currentCaptured !== undefined ? seed.currentCaptured : previous.currentCaptured),
+    status: String(seed.status !== undefined ? seed.status : (previous.status || "")).trim(),
+    consentAcknowledged: Boolean(seed.consentAcknowledged !== undefined ? seed.consentAcknowledged : previous.consentAcknowledged),
+    localOnly: seed.localOnly !== undefined ? Boolean(seed.localOnly) : (previous.localOnly !== false),
+    captureProvider,
+    satelliteEntityId,
+    satelliteOptions,
+    browserAvailable,
+    browserSecureContext: seed.browserSecureContext !== undefined ? Boolean(seed.browserSecureContext) : Boolean(previous.browserSecureContext),
+    browserMicSupported: seed.browserMicSupported !== undefined ? Boolean(seed.browserMicSupported) : Boolean(previous.browserMicSupported),
+    browserStatusSummary: String(seed.browserStatusSummary !== undefined ? seed.browserStatusSummary : (previous.browserStatusSummary || "")).trim(),
+    progressSummary: String(seed.progressSummary !== undefined ? seed.progressSummary : (previous.progressSummary || "")).trim(),
+    progress: seed.progress !== undefined ? seed.progress : (previous.progress || null),
+    enrollmentSessionId: String(seed.enrollmentSessionId !== undefined ? seed.enrollmentSessionId : (previous.enrollmentSessionId || "")).trim(),
+    completionReadiness: seed.completionReadiness !== undefined ? seed.completionReadiness : (previous.completionReadiness || null),
+    isBusy: Boolean(seed.isBusy !== undefined ? seed.isBusy : previous.isBusy),
+    busyLabel: String(seed.busyLabel !== undefined ? seed.busyLabel : (previous.busyLabel || "")).trim(),
+    showProviderFallback: Boolean(seed.showProviderFallback !== undefined ? seed.showProviderFallback : previous.showProviderFallback),
+    voiceProfileId: String(seed.voiceProfileId !== undefined ? seed.voiceProfileId : (previous.voiceProfileId || "")).trim(),
+  };
+}
+
 var ConciergeApp = globalThis.ConciergeApp || class ConciergeApp extends HTMLElement {
   constructor() {
     super();
@@ -142,7 +272,7 @@ var ConciergeApp = globalThis.ConciergeApp || class ConciergeApp extends HTMLEle
     this._selectedPersonId = null;
     this._roomSectionDraftState = {};
     this._roomPersonaDraftState = {};
-    this._voiceEnrollmentDialog = {
+    this._voiceEnrollmentDialog = conciergeBuildVoiceEnrollmentDialogState({}, {
       open: false,
       personId: "",
       phraseIndex: 0,
@@ -150,7 +280,22 @@ var ConciergeApp = globalThis.ConciergeApp || class ConciergeApp extends HTMLEle
       status: "",
       consentAcknowledged: false,
       localOnly: true,
-    };
+      captureProvider: "browser",
+      satelliteEntityId: "",
+      satelliteOptions: [],
+      browserAvailable: false,
+      browserSecureContext: false,
+      browserMicSupported: false,
+      browserStatusSummary: "",
+      progressSummary: "",
+      progress: null,
+      enrollmentSessionId: "",
+      completionReadiness: null,
+      isBusy: false,
+      busyLabel: "",
+      showProviderFallback: false,
+      voiceProfileId: "",
+    });
     this._voiceEnrollmentRecording = {
       active: false,
       personId: "",
@@ -168,16 +313,10 @@ var ConciergeApp = globalThis.ConciergeApp || class ConciergeApp extends HTMLEle
     };
   }
 
-  disconnectedCallback() {
-    if (!this._lifecycleListenersBound) return;
-    window.removeEventListener("focus", this._onWindowFocus);
-    document.removeEventListener("visibilitychange", this._onVisibilityChange);
-    this._lifecycleListenersBound = false;
-  }
-
   _refreshSnapshotOnResume() {
     if (!this._hass) return;
     if (this._loadingPromise) return;
+    if (this._hasActiveVoiceEnrollmentDialog()) return;
     const now = Date.now();
     if (now - this._lastResumeSnapshotRefreshAt < 1500) return;
     this._lastResumeSnapshotRefreshAt = now;
@@ -187,9 +326,12 @@ var ConciergeApp = globalThis.ConciergeApp || class ConciergeApp extends HTMLEle
   }
 
   connectedCallback() {
-    this._selectedAreaId = null;
-    this._selectedCompositeId = null;
-    this._selectedPersonId = null;
+    // Preserve current navigation context across panel re-attach events.
+    if (this._voiceEnrollmentDialog?.open && this._voiceEnrollmentDialog?.personId) {
+      this._selectedAreaId = null;
+      this._selectedCompositeId = null;
+      this._selectedPersonId = this._voiceEnrollmentDialog.personId;
+    }
     if (!this._editMergeDelegatesBound) {
       this._editMergeDelegatesBound = true;
       this.addEventListener("click", (event) => {
@@ -502,7 +644,18 @@ var ConciergeApp = globalThis.ConciergeApp || class ConciergeApp extends HTMLEle
 
   disconnectedCallback() {
     this._stopRoomVoicePreviewAudio();
-    // no-op
+    if (this._lifecycleListenersBound) {
+      window.removeEventListener("focus", this._onWindowFocus);
+      document.removeEventListener("visibilitychange", this._onVisibilityChange);
+      this._lifecycleListenersBound = false;
+    }
+  }
+
+  _ensureVoiceEnrollmentPersonView(personId) {
+    if (!personId) return;
+    this._selectedAreaId = null;
+    this._selectedCompositeId = null;
+    this._selectedPersonId = personId;
   }
 
   _hasActiveMergeDraft() {
@@ -852,6 +1005,10 @@ var ConciergeApp = globalThis.ConciergeApp || class ConciergeApp extends HTMLEle
       });
     }
 
+    if (this._hasActiveVoiceEnrollmentDialog()) {
+      return;
+    }
+
     // Keep dialog state stable while editing global settings.
     if (this._globalSettingsDialogOpen) {
       return;
@@ -874,7 +1031,12 @@ var ConciergeApp = globalThis.ConciergeApp || class ConciergeApp extends HTMLEle
   }
 
   async _load() {
-    this._renderStartupLoading();
+    const activeVoiceEnrollmentPersonId = this._voiceEnrollmentDialog?.personId || "";
+    if (activeVoiceEnrollmentPersonId) {
+      this._syncVoiceEnrollmentDialogOptionsFromDom(activeVoiceEnrollmentPersonId);
+    } else {
+      this._renderStartupLoading();
+    }
     try {
       const snapshotResponse = await this._authFetch("/api/concierge/storage_snapshot", 12000);
 
@@ -948,7 +1110,11 @@ var ConciergeApp = globalThis.ConciergeApp || class ConciergeApp extends HTMLEle
       if (this._selectedCompositeId && !this._composites[this._selectedCompositeId]) {
         this._goHome();
       }
-      if (this._selectedPersonId && !this._people[this._selectedPersonId]) {
+      const selectedPersonExists = Boolean(
+        this._peopleRegistry?.[this._selectedPersonId]
+        || this._people?.[this._selectedPersonId]
+      );
+      if (this._selectedPersonId && !selectedPersonExists) {
         this._goHome();
       }
     } catch (err) {
@@ -4118,6 +4284,14 @@ var ConciergeApp = globalThis.ConciergeApp || class ConciergeApp extends HTMLEle
     if (status) status.textContent = text || "";
   }
 
+  _setVoiceEnrollmentBusy(personId, isBusy, busyLabel = "") {
+    const dialog = this._voiceEnrollmentDialog;
+    if (!dialog?.open || dialog.personId !== personId) return;
+    dialog.isBusy = Boolean(isBusy);
+    dialog.busyLabel = dialog.isBusy ? String(busyLabel || "Working on your request...").trim() : "";
+    this._render();
+  }
+
   _voiceEnrollmentPhrases() {
     return [
       "Hello Concierge, please turn on the kitchen lights and set them to seventy percent.",
@@ -4131,16 +4305,136 @@ var ConciergeApp = globalThis.ConciergeApp || class ConciergeApp extends HTMLEle
     ];
   }
 
-  async _uploadVoiceEnrollmentRecording(personId, voiceProfileId, phraseIndex, blob) {
+  async _fetchVoiceEnrollmentProgress(personId, voiceProfileId = "") {
+    const query = new URLSearchParams({ person_id: personId });
+    if (voiceProfileId) query.set("voice_profile_id", voiceProfileId);
+    const response = await this._authFetch(`/api/concierge/voice_enrollment_progress?${query.toString()}`, 12000);
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(errorText || `HTTP ${response.status}`);
+    }
+    return response.json();
+  }
+
+  async _refreshVoiceEnrollmentDialogProgress(personId, voiceProfileId = "") {
+    const dialog = this._voiceEnrollmentDialog;
+    if (!dialog?.open || dialog.personId !== personId) return;
+
+    try {
+      const progressResponse = await this._fetchVoiceEnrollmentProgress(personId, voiceProfileId || this._activeVoiceProfileIdForPerson(personId));
+      if (!progressResponse?.found || !progressResponse?.progress) return;
+
+      const progress = progressResponse.progress;
+      const phrases = this._voiceEnrollmentPhrases();
+      const maxPhraseIndex = Math.max(phrases.length - 1, 0);
+      const sampleCount = Math.max(0, Number(progress.sample_count || 0));
+      const targetSampleCount = Math.max(1, Number(progress.target_sample_count || phrases.length || 1));
+      const completionPercentage = Math.max(0, Math.min(100, Number(progress.completion_percentage || 0)));
+      const providerFromProgress = conciergeNormalizeVoiceEnrollmentProvider(progress.provider_type);
+      const previousPhraseIndex = Math.max(0, Number(dialog.phraseIndex || 0));
+      const localCaptureAwaitingAdvance = Boolean(dialog.currentCaptured);
+      const highestCapturedPhraseIndex = Math.max(0, sampleCount - 1);
+      const capturedPhraseIndices = Array.isArray(progress.captured_phrase_indices)
+        ? progress.captured_phrase_indices.map((value) => Number(value)).filter((value) => Number.isFinite(value) && value >= 0)
+        : [];
+      const hasCapturedPhraseIndices = capturedPhraseIndices.length > 0;
+      const capturedPhraseIndexSet = hasCapturedPhraseIndices ? new Set(capturedPhraseIndices.map((value) => Math.floor(value))) : null;
+
+      if (progress.is_complete) {
+        dialog.phraseIndex = Math.min(sampleCount, maxPhraseIndex);
+        dialog.currentCaptured = true;
+      } else if (highestCapturedPhraseIndex > previousPhraseIndex) {
+        dialog.phraseIndex = Math.min(highestCapturedPhraseIndex, maxPhraseIndex);
+        dialog.currentCaptured = true;
+      } else if (localCaptureAwaitingAdvance && sampleCount >= previousPhraseIndex + 1) {
+        dialog.phraseIndex = previousPhraseIndex;
+        dialog.currentCaptured = true;
+      } else if (sampleCount > previousPhraseIndex + 1) {
+        dialog.phraseIndex = Math.min(sampleCount, maxPhraseIndex);
+        dialog.currentCaptured = false;
+      } else if (sampleCount <= previousPhraseIndex) {
+        dialog.phraseIndex = Math.min(previousPhraseIndex, maxPhraseIndex);
+        dialog.currentCaptured = false;
+      } else {
+        dialog.phraseIndex = Math.min(Math.max(sampleCount - 1, 0), maxPhraseIndex);
+        dialog.currentCaptured = true;
+      }
+      if (capturedPhraseIndexSet) {
+        const activePhraseIndex = Math.max(0, Math.min(Number(dialog.phraseIndex || 0), maxPhraseIndex));
+        dialog.currentCaptured = capturedPhraseIndexSet.has(activePhraseIndex);
+      }
+      dialog.progress = progress;
+      dialog.progressSummary = `${sampleCount}/${targetSampleCount} samples, ${completionPercentage}%`;
+      dialog.enrollmentSessionId = String(progress.session_id || progressResponse.enrollment_session_id || dialog.enrollmentSessionId || "").trim();
+      dialog.voiceProfileId = String(progressResponse.voice_profile_id || voiceProfileId || dialog.voiceProfileId || "").trim();
+      if (providerFromProgress) {
+        dialog.captureProvider = providerFromProgress;
+      }
+
+      try {
+        const readinessResponse = await this._hass.callService(
+          "concierge",
+          "get_voice_enrollment_completion_readiness",
+          {
+            voice_profile_id: dialog.voiceProfileId,
+            min_samples: phrases.length,
+          },
+          undefined,
+          true,
+          true
+        );
+        dialog.completionReadiness = this._normalizeVoiceEnrollmentReadiness(readinessResponse);
+      } catch (err) {
+        dialog.completionReadiness = null;
+      }
+
+      const summary = String(progress.user_safe_status_summary || "Enrollment in progress").trim() || "Enrollment in progress";
+      dialog.status = `${summary} (${sampleCount}/${targetSampleCount}, ${completionPercentage}%)`;
+      this._render();
+    } catch (err) {
+      // Keep existing dialog state on progress lookup failures.
+    }
+  }
+
+  async _voiceEnrollmentRecoveryAction(action, personId, voiceProfileId = "") {
+    const token = this._hass?.auth?.data?.access_token || "";
+    const headers = {
+      "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    };
+
+    const response = await fetch("/api/concierge/voice_enrollment_recovery", {
+      method: "POST",
+      credentials: "same-origin",
+      headers,
+      body: JSON.stringify({
+        action,
+        person_id: personId,
+        voice_profile_id: voiceProfileId,
+      }),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(errorText || `HTTP ${response.status}`);
+    }
+
+    return response.json();
+  }
+
+  async _captureVoiceEnrollmentRecording(personId, voiceProfileId, phraseIndex, speechText, recordingDurationMs, blob) {
     const token = this._hass?.auth?.data?.access_token || "";
     const headers = token ? { Authorization: `Bearer ${token}` } : {};
     const formData = new FormData();
     formData.append("person_id", personId);
     formData.append("voice_profile_id", voiceProfileId);
     formData.append("phrase_index", String(phraseIndex));
+    formData.append("speech_text", speechText);
+    formData.append("source", "guided_enrollment_dialog");
+    formData.append("recording_duration_ms", String(Math.max(0, Number(recordingDurationMs) || 0)));
     formData.append("audio", blob, `phrase_${String(phraseIndex + 1).padStart(2, "0")}.webm`);
 
-    const response = await fetch("/api/concierge/voice_enrollment_upload", {
+    const response = await fetch("/api/concierge/voice_enrollment_capture", {
       method: "POST",
       credentials: "same-origin",
       headers,
@@ -4170,31 +4464,186 @@ var ConciergeApp = globalThis.ConciergeApp || class ConciergeApp extends HTMLEle
     recording.stream = null;
   }
 
-  _openVoiceEnrollmentDialog(personId) {
-    if (!personId) return;
-    if (!this._integrationOptions?.capabilities?.cap_voice_enrollment) return;
+  _hasActiveVoiceEnrollmentDialog() {
+    return Boolean(this._voiceEnrollmentDialog?.open && this._voiceEnrollmentDialog?.personId);
+  }
+
+  _voiceEnrollmentBrowserCapability() {
+    return conciergeGetBrowserVoiceEnrollmentCapability({
+      isSecureContext: window?.isSecureContext,
+      mediaDevices: navigator?.mediaDevices,
+      MediaRecorderCtor: typeof MediaRecorder === "undefined" ? null : MediaRecorder,
+    });
+  }
+
+  _voiceEnrollmentSatelliteOptions() {
+    return conciergeCollectSatelliteOptions(this._hass?.states || {});
+  }
+
+  _normalizeVoiceEnrollmentReadiness(rawReadiness) {
+    let readiness = rawReadiness;
+    for (let depth = 0; depth < 3; depth += 1) {
+      if (!readiness || typeof readiness !== "object") break;
+      if (typeof readiness.ready === "boolean") break;
+      if (readiness.response && typeof readiness.response === "object") {
+        readiness = readiness.response;
+        continue;
+      }
+      if (readiness.result && typeof readiness.result === "object") {
+        readiness = readiness.result;
+        continue;
+      }
+      if (readiness.readiness && typeof readiness.readiness === "object") {
+        readiness = readiness.readiness;
+        continue;
+      }
+      break;
+    }
+    return readiness && typeof readiness === "object" ? readiness : null;
+  }
+
+  _voiceEnrollmentCompletionStatus(dialog) {
+    const readiness = dialog?.completionReadiness;
+    if (!readiness) {
+      const progress = dialog?.progress;
+      const sampleCount = Math.max(0, Number(progress?.sample_count || 0));
+      const targetSampleCount = Math.max(1, Number(progress?.target_sample_count || this._voiceEnrollmentPhrases().length || 1));
+      if (sampleCount >= targetSampleCount && dialog?.currentCaptured) {
+        return "Checking completion readiness...";
+      }
+      return "Capture the remaining phrases before building.";
+    }
+    if (readiness.ready) return "Ready to build voice profile.";
+    const summary = String(readiness.user_safe_status_summary || "Not ready for completion.").trim() || "Not ready for completion.";
+    const reasonCode = String(readiness.reason_code || "").trim();
+    return reasonCode ? `${summary} [${reasonCode}]` : summary;
+  }
+
+  _applyVoiceEnrollmentDialogState(personId, seed = {}, render = false) {
+    if (!personId) return this._voiceEnrollmentDialog;
+
     const activeVoiceProfileId = this._activeVoiceProfileIdForPerson(personId);
     const enrollmentProfile = activeVoiceProfileId ? this._voiceProfiles?.[activeVoiceProfileId] : null;
-    const phrases = this._voiceEnrollmentPhrases();
-    const sampleCount = Array.isArray(enrollmentProfile?.sample_items) ? enrollmentProfile.sample_items.length : 0;
-    const phraseIndex = Math.min(sampleCount, Math.max(phrases.length - 1, 0));
-    const currentCaptured = sampleCount > phraseIndex || sampleCount >= phrases.length;
     const enrollmentConsent = enrollmentProfile?.consent?.voice_enrollment && typeof enrollmentProfile.consent.voice_enrollment === "object"
       ? enrollmentProfile.consent.voice_enrollment
       : {};
+    const browserCapability = this._voiceEnrollmentBrowserCapability();
+    const satelliteOptions = this._voiceEnrollmentSatelliteOptions();
+    const previous = this._voiceEnrollmentDialog?.personId === personId ? this._voiceEnrollmentDialog : {};
 
-    this._voiceEnrollmentDialog = {
+    this._voiceEnrollmentDialog = conciergeBuildVoiceEnrollmentDialogState(previous, {
       open: true,
       personId,
-      phraseIndex,
-      currentCaptured,
-      status: currentCaptured
-        ? "This phrase is already captured. Click Next to continue."
-        : "Read the phrase naturally in your normal speaking voice, then click Record Phrase.",
+      status: "Checking saved enrollment progress...",
       consentAcknowledged: Boolean(enrollmentConsent.consent_acknowledged),
       localOnly: enrollmentConsent.local_only !== false,
-    };
+      captureProvider: conciergeResolveVoiceEnrollmentDefaultProvider({
+        browserAvailable: browserCapability.available,
+        satelliteCount: satelliteOptions.length,
+      }),
+      satelliteOptions,
+      browserAvailable: browserCapability.available,
+      browserSecureContext: browserCapability.secureContext,
+      browserMicSupported: browserCapability.microphoneSupported,
+      browserStatusSummary: browserCapability.summary,
+      voiceProfileId: activeVoiceProfileId || this._deriveVoiceProfileId(personId),
+      ...seed,
+    });
+
+    if (render) this._render();
+    return this._voiceEnrollmentDialog;
+  }
+
+  _setVoiceEnrollmentCaptureProvider(personId, provider, { render = true } = {}) {
+    const dialog = this._voiceEnrollmentDialog;
+    if (!dialog?.open || dialog.personId !== personId) return dialog;
+
+    const normalizedProvider = conciergeNormalizeVoiceEnrollmentProvider(provider)
+      || conciergeResolveVoiceEnrollmentDefaultProvider({
+        browserAvailable: dialog.browserAvailable,
+        satelliteCount: Array.isArray(dialog.satelliteOptions) ? dialog.satelliteOptions.length : 0,
+      });
+    const availability = conciergeGetVoiceEnrollmentProviderAvailability({
+      browserAvailable: dialog.browserAvailable,
+      satelliteCount: Array.isArray(dialog.satelliteOptions) ? dialog.satelliteOptions.length : 0,
+    });
+    if (normalizedProvider === "browser" && !availability.browserSelectable) {
+      return dialog;
+    }
+    if (normalizedProvider === "satellite" && !availability.satelliteSelectable) {
+      return dialog;
+    }
+
+    if (
+      normalizedProvider !== "browser"
+      && this._voiceEnrollmentRecording?.active
+      && this._voiceEnrollmentRecording?.personId === personId
+      && this._voiceEnrollmentRecording?.recorder
+      && this._voiceEnrollmentRecording.recorder.state !== "inactive"
+    ) {
+      try {
+        this._voiceEnrollmentRecording.recorder.stop();
+      } catch (err) {
+        // no-op
+      }
+      this._stopVoiceEnrollmentRecordingTracks();
+      this._voiceEnrollmentRecording = {
+        active: false,
+        personId: "",
+        recorder: null,
+        stream: null,
+        startedAt: 0,
+      };
+    }
+
+    dialog.captureProvider = normalizedProvider;
+    dialog.showProviderFallback = false;
+    if (normalizedProvider === "browser") {
+      dialog.status = dialog.browserStatusSummary || dialog.status;
+    } else if (Array.isArray(dialog.satelliteOptions) && dialog.satelliteOptions.length === 1 && !dialog.satelliteEntityId) {
+      dialog.satelliteEntityId = dialog.satelliteOptions[0].entity_id;
+      dialog.status = "Satellite capture selected. Choose the Voice Assistant device and capture the phrase.";
+    } else if (normalizedProvider === "satellite") {
+      dialog.status = dialog.satelliteEntityId
+        ? "Satellite capture selected. Capture the phrase through the selected Voice Assistant device."
+        : "Select a Voice Assistant device before capturing this phrase.";
+    }
+    if (render) this._render();
+    return dialog;
+  }
+
+  _useVoiceEnrollmentSatelliteFallback(personId) {
+    const dialog = this._setVoiceEnrollmentCaptureProvider(personId, "satellite", { render: false });
+    if (!dialog) return;
+    dialog.showProviderFallback = false;
+    if (!dialog.satelliteEntityId && Array.isArray(dialog.satelliteOptions) && dialog.satelliteOptions.length === 1) {
+      dialog.satelliteEntityId = dialog.satelliteOptions[0].entity_id;
+    }
+    dialog.status = dialog.satelliteEntityId
+      ? "Voice Assistant Satellite selected. Capture the phrase through the selected device."
+      : "Voice Assistant Satellite selected. Select a device before capturing this phrase.";
     this._render();
+  }
+
+  _browserVoiceEnrollmentFailureMessage(err) {
+    const errorName = String(err?.name || "").trim();
+    if (errorName === "NotAllowedError" || errorName === "PermissionDeniedError") {
+      return "Microphone access was denied. Allow microphone access in the browser, or use Voice Assistant Satellite instead.";
+    }
+    if (errorName === "NotFoundError" || errorName === "DevicesNotFoundError") {
+      return "No microphone was found for this browser session. Connect a microphone, or use Voice Assistant Satellite instead.";
+    }
+    if (errorName === "NotReadableError" || errorName === "TrackStartError") {
+      return "This browser could not access the microphone. Close other apps using it, or use Voice Assistant Satellite instead.";
+    }
+    return `Capture failed: ${err?.message || err}`;
+  }
+
+  _openVoiceEnrollmentDialog(personId) {
+    if (!personId) return;
+    if (!this._integrationOptions?.capabilities?.cap_voice_enrollment) return;
+    const dialog = this._applyVoiceEnrollmentDialogState(personId, {}, true);
+    this._refreshVoiceEnrollmentDialogProgress(personId, dialog.voiceProfileId);
   }
 
   _closeVoiceEnrollmentDialog() {
@@ -4214,7 +4663,7 @@ var ConciergeApp = globalThis.ConciergeApp || class ConciergeApp extends HTMLEle
       stream: null,
       startedAt: 0,
     };
-    this._voiceEnrollmentDialog = {
+    this._voiceEnrollmentDialog = conciergeBuildVoiceEnrollmentDialogState({}, {
       open: false,
       personId: "",
       phraseIndex: 0,
@@ -4222,8 +4671,47 @@ var ConciergeApp = globalThis.ConciergeApp || class ConciergeApp extends HTMLEle
       status: "",
       consentAcknowledged: false,
       localOnly: true,
-    };
+      captureProvider: "browser",
+      satelliteEntityId: "",
+      satelliteOptions: [],
+      browserAvailable: false,
+      browserSecureContext: false,
+      browserMicSupported: false,
+      browserStatusSummary: "",
+      progressSummary: "",
+      progress: null,
+      enrollmentSessionId: "",
+      completionReadiness: null,
+      showProviderFallback: false,
+      voiceProfileId: "",
+    });
     this._render();
+  }
+
+  async _cancelVoiceEnrollmentDialog(personId) {
+    if (!personId) {
+      this._closeVoiceEnrollmentDialog();
+      return;
+    }
+
+    const voiceProfileId = this._activeVoiceProfileIdForPerson(personId) || "";
+    const recording = this._voiceEnrollmentRecording;
+    if (recording?.active && recording.recorder && recording.recorder.state !== "inactive") {
+      try {
+        recording.recorder.stop();
+      } catch (err) {
+        // no-op
+      }
+    }
+
+    try {
+      await this._voiceEnrollmentRecoveryAction("cancel", personId, voiceProfileId);
+    } catch (err) {
+      this._setVoiceEnrollmentStatus(personId, `Cancel failed: ${err?.message || err}`);
+    }
+
+    this._closeVoiceEnrollmentDialog();
+    await this._load();
   }
 
   _syncVoiceEnrollmentDialogOptionsFromDom(personId) {
@@ -4232,8 +4720,12 @@ var ConciergeApp = globalThis.ConciergeApp || class ConciergeApp extends HTMLEle
 
     const consentField = this.querySelector(`[data-person-id="${CSS.escape(personId)}"][data-voice-field="consent_acknowledged"]`);
     const localOnlyField = this.querySelector(`[data-person-id="${CSS.escape(personId)}"][data-voice-field="local_only"]`);
+    const providerField = this.querySelector(`input[data-person-id="${CSS.escape(personId)}"][data-voice-field="capture_provider"]:checked`);
+    const satelliteField = this.querySelector(`[data-person-id="${CSS.escape(personId)}"][data-voice-field="satellite_entity_id"]`);
     dialog.consentAcknowledged = Boolean(consentField?.checked);
     dialog.localOnly = localOnlyField ? Boolean(localOnlyField.checked) : true;
+    dialog.captureProvider = conciergeNormalizeVoiceEnrollmentProvider(providerField?.value) || dialog.captureProvider || "browser";
+    dialog.satelliteEntityId = String(satelliteField?.value || dialog.satelliteEntityId || "").trim();
     return dialog;
   }
 
@@ -4255,6 +4747,7 @@ var ConciergeApp = globalThis.ConciergeApp || class ConciergeApp extends HTMLEle
         person_id: personId,
         voice_profile_id: voiceProfileId,
         voice_name: `${String(person.name || personId)} Voice`,
+        capture_provider: dialog.captureProvider || "browser",
         consent_acknowledged: true,
         local_only: dialog.localOnly !== false,
       },
@@ -4267,7 +4760,32 @@ var ConciergeApp = globalThis.ConciergeApp || class ConciergeApp extends HTMLEle
 
   async _startVoiceEnrollment(personId) {
     if (!this._integrationOptions?.capabilities?.cap_voice_enrollment) return;
+    this._ensureVoiceEnrollmentPersonView(personId);
     this._openVoiceEnrollmentDialog(personId);
+    const activeVoiceProfileId = this._activeVoiceProfileIdForPerson(personId) || this._voiceEnrollmentDialog?.voiceProfileId || "";
+    this._setVoiceEnrollmentBusy(personId, true, "Verifying enrollment session with backend...");
+    try {
+      const recovered = await this._voiceEnrollmentRecoveryAction("recover", personId, activeVoiceProfileId);
+      if (recovered?.recovered && recovered?.progress) {
+        if (this._voiceEnrollmentDialog?.open && this._voiceEnrollmentDialog.personId === personId) {
+          this._voiceEnrollmentDialog.status = String(recovered.progress.user_safe_status_summary || "Enrollment recovered");
+          this._voiceEnrollmentDialog.progress = recovered.progress;
+          this._voiceEnrollmentDialog.enrollmentSessionId = String(recovered.session_id || this._voiceEnrollmentDialog.enrollmentSessionId || "").trim();
+          this._render();
+        }
+        this._setVoiceEnrollmentStatus(personId, String(recovered.progress.user_safe_status_summary || "Enrollment recovered"));
+      }
+    } catch (err) {
+      // Recovery lookup failures should not block opening enrollment dialog.
+    } finally {
+      this._setVoiceEnrollmentBusy(personId, false);
+    }
+    this._setVoiceEnrollmentBusy(personId, true, "Refreshing enrollment progress from backend...");
+    try {
+      await this._refreshVoiceEnrollmentDialogProgress(personId, activeVoiceProfileId);
+    } finally {
+      this._setVoiceEnrollmentBusy(personId, false);
+    }
   }
 
   async _captureVoiceEnrollmentSample(personId) {
@@ -4281,25 +4799,127 @@ var ConciergeApp = globalThis.ConciergeApp || class ConciergeApp extends HTMLEle
       return;
     }
 
-    if (!window.isSecureContext) {
-      dialog.status = "Microphone recording requires a secure browser context. Open Home Assistant over HTTPS or from localhost, then try again.";
-      this._render();
-      return;
-    }
-
-    if (!navigator?.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
-      dialog.status = "This browser does not support microphone recording for voice enrollment.";
-      this._render();
-      return;
-    }
-
     const phrases = this._voiceEnrollmentPhrases();
     const phraseIndex = Math.max(0, Math.min(dialog.phraseIndex, phrases.length - 1));
     const speechText = String(phrases[phraseIndex] || "").trim();
     if (!speechText) return;
 
+    if (dialog.captureProvider === "satellite") {
+      if (!dialog.satelliteEntityId) {
+        dialog.status = "Select a Voice Assistant device before capturing this phrase.";
+        this._render();
+        return;
+      }
+
+      dialog.showProviderFallback = false;
+      dialog.status = "Capturing phrase through Voice Assistant Satellite...";
+      this._render();
+      this._setVoiceEnrollmentBusy(personId, true, "Capturing phrase and verifying backend status...");
+      try {
+        const voiceProfileId = await this._ensureVoiceEnrollmentStarted(personId);
+        if (!voiceProfileId) return;
+
+        const result = await this._hass.callService(
+          "concierge",
+          "capture_voice_enrollment_sample",
+          {
+            voice_profile_id: voiceProfileId,
+            person_id: personId,
+            speech_text: speechText,
+            prompt_text: conciergeBuildSatelliteEnrollmentPrompt(phraseIndex, speechText),
+            source: "guided_enrollment_dialog",
+            phrase_index: phraseIndex,
+            capture_provider: "satellite",
+            satellite_entity_id: dialog.satelliteEntityId,
+            timeout_seconds: 8.0,
+          },
+          undefined,
+          true,
+          true
+        );
+
+        const returnedSampleCount = Math.max(0, Number(result?.sample_count || 0));
+        const reportedRegistered = Boolean(result?.sample_registered);
+        const returnedCapturedPhraseIndices = Array.isArray(result?.captured_phrase_indices)
+          ? result.captured_phrase_indices.map((value) => Number(value)).filter((value) => Number.isFinite(value) && value >= 0)
+          : [];
+        const returnedCapturedPhraseSet = returnedCapturedPhraseIndices.length > 0
+          ? new Set(returnedCapturedPhraseIndices.map((value) => Math.floor(value)))
+          : null;
+        const observedRegistered = returnedCapturedPhraseSet
+          ? returnedCapturedPhraseSet.has(phraseIndex)
+          : returnedSampleCount >= phraseIndex + 1;
+        if (!reportedRegistered && !observedRegistered) {
+          const progressResponse = await this._fetchVoiceEnrollmentProgress(personId, voiceProfileId);
+          const refreshedSampleCount = Math.max(0, Number(progressResponse?.progress?.sample_count || 0));
+          const refreshedCapturedPhraseIndices = Array.isArray(progressResponse?.progress?.captured_phrase_indices)
+            ? progressResponse.progress.captured_phrase_indices.map((value) => Number(value)).filter((value) => Number.isFinite(value) && value >= 0)
+            : [];
+          const refreshedCapturedPhraseSet = refreshedCapturedPhraseIndices.length > 0
+            ? new Set(refreshedCapturedPhraseIndices.map((value) => Math.floor(value)))
+            : null;
+          const phraseConfirmedByProgress = refreshedCapturedPhraseSet
+            ? refreshedCapturedPhraseSet.has(phraseIndex)
+            : refreshedSampleCount >= phraseIndex + 1;
+          if (phraseConfirmedByProgress) {
+            dialog.currentCaptured = true;
+            if (refreshedSampleCount > phraseIndex + 1) {
+              dialog.phraseIndex = Math.min(refreshedSampleCount - 1, phrases.length - 1);
+            }
+            dialog.progressSummary = `${refreshedSampleCount}/${phrases.length} samples`;
+            dialog.status = "Phrase captured. Click Next to continue.";
+            dialog.voiceProfileId = voiceProfileId;
+            await this._load();
+            await this._refreshVoiceEnrollmentDialogProgress(personId, voiceProfileId);
+            this._render();
+            return;
+          }
+
+          const failureMessage = String(result?.failure_message_safe || result?.failure_code || "Satellite capture failed.").trim();
+          dialog.status = failureMessage || "Satellite capture failed.";
+          this._render();
+          return;
+        }
+
+        dialog.currentCaptured = true;
+        if (returnedSampleCount > phraseIndex + 1) {
+          dialog.phraseIndex = Math.min(returnedSampleCount - 1, phrases.length - 1);
+        }
+        dialog.progressSummary = returnedSampleCount
+          ? `${returnedSampleCount}/${phrases.length} samples`
+          : dialog.progressSummary;
+        dialog.status = "Phrase captured. Click Next to continue.";
+        dialog.voiceProfileId = voiceProfileId;
+        this._ensureVoiceEnrollmentPersonView(personId);
+        await this._load();
+        await this._refreshVoiceEnrollmentDialogProgress(personId, voiceProfileId);
+        this._render();
+      } catch (err) {
+        dialog.status = `Capture failed: ${err?.message || err}`;
+        this._render();
+      } finally {
+        this._setVoiceEnrollmentBusy(personId, false);
+      }
+      return;
+    }
+
+    if (!dialog.browserSecureContext) {
+      dialog.status = dialog.browserStatusSummary;
+      dialog.showProviderFallback = Array.isArray(dialog.satelliteOptions) && dialog.satelliteOptions.length > 0;
+      this._render();
+      return;
+    }
+
+    if (!dialog.browserMicSupported) {
+      dialog.status = dialog.browserStatusSummary;
+      dialog.showProviderFallback = Array.isArray(dialog.satelliteOptions) && dialog.satelliteOptions.length > 0;
+      this._render();
+      return;
+    }
+
     const recording = this._voiceEnrollmentRecording;
     if (recording.active && recording.personId === personId && recording.recorder) {
+      this._setVoiceEnrollmentBusy(personId, true, "Saving recording and verifying backend status...");
       dialog.status = "Saving recording...";
       this._render();
       try {
@@ -4314,12 +4934,14 @@ var ConciergeApp = globalThis.ConciergeApp || class ConciergeApp extends HTMLEle
           stream: null,
           startedAt: 0,
         };
+        this._setVoiceEnrollmentBusy(personId, false);
         this._render();
       }
       return;
     }
 
     dialog.status = "Requesting microphone access...";
+    dialog.showProviderFallback = false;
     this._render();
     try {
       const voiceProfileId = await this._ensureVoiceEnrollmentStarted(personId);
@@ -4343,29 +4965,21 @@ var ConciergeApp = globalThis.ConciergeApp || class ConciergeApp extends HTMLEle
         const activeDialog = this._voiceEnrollmentDialog;
         try {
           const blob = new Blob(chunks, { type: recorder.mimeType || preferredMimeType || "audio/webm" });
-          const uploadResult = await this._uploadVoiceEnrollmentRecording(personId, voiceProfileId, phraseIndex, blob);
-          await this._hass.callService(
-            "concierge",
-            "capture_voice_enrollment_sample",
-            {
-              voice_profile_id: voiceProfileId,
-              speech_text: speechText,
-              source: "guided_enrollment_dialog",
-              phrase_index: phraseIndex,
-              recording_path: uploadResult.recording_path,
-              recording_mime_type: uploadResult.recording_mime_type,
-              recording_size_bytes: uploadResult.recording_size_bytes,
-              recording_duration_ms: Math.max(0, Date.now() - startedAt),
-            },
-            undefined,
-            true,
-            true
+          await this._captureVoiceEnrollmentRecording(
+            personId,
+            voiceProfileId,
+            phraseIndex,
+            speechText,
+            Math.max(0, Date.now() - startedAt),
+            blob
           );
           if (activeDialog?.open && activeDialog.personId === personId) {
             activeDialog.currentCaptured = true;
             activeDialog.status = "Phrase captured. Click Next to continue.";
           }
+          this._ensureVoiceEnrollmentPersonView(personId);
           await this._load();
+          await this._refreshVoiceEnrollmentDialogProgress(personId, voiceProfileId);
           this._render();
         } catch (err) {
           if (activeDialog?.open && activeDialog.personId === personId) {
@@ -4381,6 +4995,7 @@ var ConciergeApp = globalThis.ConciergeApp || class ConciergeApp extends HTMLEle
             stream: null,
             startedAt: 0,
           };
+          this._setVoiceEnrollmentBusy(personId, false);
           this._render();
         }
       }, { once: true });
@@ -4397,7 +5012,8 @@ var ConciergeApp = globalThis.ConciergeApp || class ConciergeApp extends HTMLEle
       recorder.start();
       this._render();
     } catch (err) {
-      dialog.status = `Capture failed: ${err?.message || err}`;
+      dialog.status = this._browserVoiceEnrollmentFailureMessage(err);
+      dialog.showProviderFallback = Array.isArray(dialog.satelliteOptions) && dialog.satelliteOptions.length > 0;
       this._stopVoiceEnrollmentRecordingTracks();
       this._voiceEnrollmentRecording = {
         active: false,
@@ -4441,10 +5057,11 @@ var ConciergeApp = globalThis.ConciergeApp || class ConciergeApp extends HTMLEle
     }
 
     this._setVoiceEnrollmentStatus(personId, "Building voice profile...");
+    this._setVoiceEnrollmentBusy(personId, true, "Building voice profile and cleaning enrollment artifacts...");
     try {
       await this._hass.callService(
         "concierge",
-        "build_voice_profile",
+        "complete_voice_enrollment",
         { voice_profile_id: voiceProfileId, person_id: personId, min_samples: minSamples },
         undefined,
         true,
@@ -4463,6 +5080,8 @@ var ConciergeApp = globalThis.ConciergeApp || class ConciergeApp extends HTMLEle
         return;
       }
       this._setVoiceEnrollmentStatus(personId, `Build failed: ${err?.message || err}`);
+    } finally {
+      this._setVoiceEnrollmentBusy(personId, false);
     }
   }
 
@@ -4478,12 +5097,48 @@ var ConciergeApp = globalThis.ConciergeApp || class ConciergeApp extends HTMLEle
     }
 
     if (dialog.phraseIndex >= phrases.length - 1) {
+      const voiceProfileId = this._activeVoiceProfileIdForPerson(personId);
+      if (!voiceProfileId) {
+        dialog.status = "Start enrollment first.";
+        this._render();
+        return;
+      }
+
+      try {
+        this._setVoiceEnrollmentBusy(personId, true, "Checking completion readiness with backend...");
+        const readinessResponse = await this._hass.callService(
+          "concierge",
+          "get_voice_enrollment_completion_readiness",
+          { voice_profile_id: voiceProfileId, min_samples: phrases.length },
+          undefined,
+          true,
+          true
+        );
+        const readiness = this._normalizeVoiceEnrollmentReadiness(readinessResponse);
+        if (!readiness?.ready) {
+          dialog.completionReadiness = readiness;
+          const statusSummary = String(readiness?.user_safe_status_summary || "Enrollment is not ready for completion.").trim();
+          const readinessReason = String(readiness?.reason_code || "").trim();
+          dialog.status = readinessReason ? `${statusSummary} [${readinessReason}]` : statusSummary;
+          this._render();
+          return;
+        }
+        dialog.completionReadiness = readiness;
+      } catch (err) {
+        dialog.status = `Readiness check failed: ${err?.message || err}`;
+        this._render();
+        return;
+      } finally {
+        this._setVoiceEnrollmentBusy(personId, false);
+      }
+
       await this._buildVoiceProfile(personId, phrases.length);
       return;
     }
 
     dialog.phraseIndex += 1;
     dialog.currentCaptured = false;
+    dialog.completionReadiness = null;
     dialog.status = "Read the next phrase naturally, then click Record Phrase.";
     this._render();
   }
@@ -4835,10 +5490,6 @@ var ConciergeApp = globalThis.ConciergeApp || class ConciergeApp extends HTMLEle
 
     this.querySelectorAll("[data-activity-detail-dialog]").forEach((dialog) => {
       dialog.addEventListener("closed", () => this._closeActivityDetails());
-    });
-
-    this.querySelectorAll("[data-voice-enrollment-dialog]").forEach((dialog) => {
-      dialog.addEventListener("closed", () => this._closeVoiceEnrollmentDialog());
     });
 
     const globalSaveButton = this.querySelector(".cg-save-global");
@@ -5206,7 +5857,55 @@ var ConciergeApp = globalThis.ConciergeApp || class ConciergeApp extends HTMLEle
 
     this.querySelectorAll(".cg-person-voice-dialog-close").forEach((button) => {
       button.addEventListener("click", () => {
-        this._closeVoiceEnrollmentDialog();
+        const personId = button.getAttribute("data-person-id") || this._voiceEnrollmentDialog?.personId || "";
+        this._cancelVoiceEnrollmentDialog(personId);
+      });
+    });
+
+    this.querySelectorAll('[data-voice-field="consent_acknowledged"], [data-voice-field="local_only"]').forEach((field) => {
+      field.addEventListener("change", () => {
+        const personId = field.getAttribute("data-person-id") || this._voiceEnrollmentDialog?.personId || "";
+        const dialog = personId ? this._syncVoiceEnrollmentDialogOptionsFromDom(personId) : null;
+        if (!personId || !dialog?.open || dialog.personId !== personId) return;
+
+        if (!conciergeIsVoiceEnrollmentAuthorized(dialog)) {
+          dialog.status = "Check both authorization boxes to enable capture method, phrase workflow, and completion controls.";
+        } else if (dialog.captureProvider === "satellite" && !dialog.satelliteEntityId) {
+          dialog.status = "Select a Voice Assistant device before capturing this phrase.";
+        } else if (dialog.captureProvider === "satellite") {
+          dialog.status = "Capture transport and phrase workflow are now available.";
+        } else {
+          dialog.status = dialog.browserStatusSummary || "Capture transport and phrase workflow are now available.";
+        }
+
+        this._render();
+      });
+    });
+
+    this.querySelectorAll('input[data-voice-field="capture_provider"]').forEach((field) => {
+      field.addEventListener("change", () => {
+        const personId = field.getAttribute("data-person-id") || this._voiceEnrollmentDialog?.personId || "";
+        if (personId) this._setVoiceEnrollmentCaptureProvider(personId, field.value, { render: true });
+      });
+    });
+
+    this.querySelectorAll('[data-voice-field="satellite_entity_id"]').forEach((field) => {
+      field.addEventListener("change", () => {
+        const personId = field.getAttribute("data-person-id") || this._voiceEnrollmentDialog?.personId || "";
+        const dialog = this._voiceEnrollmentDialog;
+        if (!personId || !dialog?.open || dialog.personId !== personId) return;
+        dialog.satelliteEntityId = String(field.value || "").trim();
+        dialog.status = dialog.satelliteEntityId
+          ? "Voice Assistant device selected. Capture the phrase when ready."
+          : "Select a Voice Assistant device before capturing this phrase.";
+        this._render();
+      });
+    });
+
+    this.querySelectorAll(".cg-person-voice-provider-fallback").forEach((button) => {
+      button.addEventListener("click", () => {
+        const personId = button.getAttribute("data-person-id") || this._voiceEnrollmentDialog?.personId || "";
+        if (personId) this._useVoiceEnrollmentSatelliteFallback(personId);
       });
     });
 
@@ -6339,43 +7038,139 @@ var ConciergeApp = globalThis.ConciergeApp || class ConciergeApp extends HTMLEle
       ? Math.max(0, Math.min(this._voiceEnrollmentDialog.phraseIndex, voiceEnrollmentPhrases.length - 1))
       : 0;
     const voiceEnrollmentPhrase = voiceEnrollmentPhrases[voiceEnrollmentPhraseIndex] || "";
-    const voiceEnrollmentNextLabel = voiceEnrollmentPhraseIndex >= voiceEnrollmentPhrases.length - 1 ? "Create Profile" : "Next";
+    const voiceEnrollmentNextLabel = voiceEnrollmentPhraseIndex >= voiceEnrollmentPhrases.length - 1 ? "Build Profile" : "Next";
     const voiceEnrollmentNextDisabled = voiceEnrollmentDialogOpen && this._voiceEnrollmentDialog.currentCaptured ? "" : " disabled";
     const showVoiceEnrollmentBegin = !activeVoiceProfileId || enrollmentState !== "trained";
     const voiceEnrollmentBeginLabel = activeVoiceProfileId ? "Resume Voice Enrollment" : "Begin Voice Enrollment";
-    const voiceRecordingActive = Boolean(this._voiceEnrollmentRecording?.active && this._voiceEnrollmentRecording.personId === personId);
-    const voiceRecordButtonLabel = voiceRecordingActive ? "End Record" : "Begin Record";
+    const selectedCaptureProvider = voiceEnrollmentDialogOpen
+      ? (conciergeNormalizeVoiceEnrollmentProvider(this._voiceEnrollmentDialog.captureProvider) || "browser")
+      : "browser";
+    const voiceRecordingActive = selectedCaptureProvider === "browser"
+      && Boolean(this._voiceEnrollmentRecording?.active && this._voiceEnrollmentRecording.personId === personId);
+    const voiceRecordButtonLabel = selectedCaptureProvider === "satellite"
+      ? "Capture Phrase"
+      : (voiceRecordingActive ? "End Record" : "Begin Record");
     const voiceStorageDestination = String(this._archiveStatus?.destination_uri || "").trim();
+    const voiceEnrollmentSatelliteOptions = voiceEnrollmentDialogOpen && Array.isArray(this._voiceEnrollmentDialog.satelliteOptions)
+      ? this._voiceEnrollmentDialog.satelliteOptions
+      : [];
+    const voiceEnrollmentCompletionSummary = voiceEnrollmentDialogOpen
+      ? this._voiceEnrollmentCompletionStatus(this._voiceEnrollmentDialog)
+      : "";
+    const voiceEnrollmentInstructions = selectedCaptureProvider === "satellite"
+      ? `Click ${voiceRecordButtonLabel}. Concierge will prompt the selected Voice Assistant Satellite and listen for this phrase. After the phrase is captured, ${voiceEnrollmentNextLabel} becomes available.`
+      : `Click ${voiceRecordButtonLabel} to start recording and read the sentence, then click End Record when you are done. After the phrase is captured, ${voiceEnrollmentNextLabel} becomes available.`;
+    const voiceEnrollmentAuthorized = voiceEnrollmentDialogOpen
+      ? conciergeIsVoiceEnrollmentAuthorized(this._voiceEnrollmentDialog)
+      : false;
+    const voiceEnrollmentBusy = voiceEnrollmentDialogOpen
+      ? Boolean(this._voiceEnrollmentDialog.isBusy)
+      : false;
+    const voiceEnrollmentBusyLabel = String(this._voiceEnrollmentDialog?.busyLabel || "Working on your request...").trim();
+    const voiceProviderAvailability = voiceEnrollmentDialogOpen
+      ? conciergeGetVoiceEnrollmentProviderAvailability({
+        browserAvailable: this._voiceEnrollmentDialog.browserAvailable,
+        satelliteCount: voiceEnrollmentSatelliteOptions.length,
+      })
+      : { browserSelectable: true, satelliteSelectable: true };
+    const voiceCaptureButtonDisabled = (!voiceRecordingActive && this._voiceEnrollmentDialog.currentCaptured)
+      || voiceEnrollmentBusy
+      || !voiceEnrollmentAuthorized
+      || (
+        selectedCaptureProvider === "satellite"
+        && voiceEnrollmentSatelliteOptions.length > 1
+        && !String(this._voiceEnrollmentDialog.satelliteEntityId || "").trim()
+      )
+      ? " disabled"
+      : "";
+    const voiceNextButtonDisabled = !voiceEnrollmentAuthorized
+      || voiceEnrollmentBusy
+      || !this._voiceEnrollmentDialog.currentCaptured
+      ? " disabled"
+      : "";
     const voiceEnrollmentDialogMarkup = capVoiceEnrollment && voiceEnrollmentDialogOpen ? `
       <ha-dialog
         open
-        scrimClickAction
-        escapeKeyAction
         hideActions
         data-voice-enrollment-dialog
         header-title="Voice Enrollment"
       >
         <div style="padding: 0 16px 16px; display:grid; gap:14px;">
-          <div class="cg-modal-copy">Phrase ${this._escapeHtml(String(voiceEnrollmentPhraseIndex + 1))} of ${this._escapeHtml(String(voiceEnrollmentPhrases.length))}</div>
-          <div class="cg-muted">Click the button to record the phrase and read the sentence, then click End Record when done. Once the phrase is captured, ${this._escapeHtml(voiceEnrollmentNextLabel)} becomes available.</div>
-          <div class="cg-muted">Recordings are stored under ${this._escapeHtml(voiceStorageDestination || "the configured attached storage root")} in a dedicated Concierge voice enrollment folder.</div>
+          <div class="cg-voice-context-grid">
+            <div class="cg-voice-context-item">
+              <div class="cg-muted">Enrollment Person</div>
+              <div class="cg-voice-context-value">${this._escapeHtml(personName || personId)}</div>
+            </div>
+            <div class="cg-voice-context-item">
+              <div class="cg-muted">Voice Profile</div>
+              <div class="cg-voice-context-value">${this._escapeHtml(this._voiceEnrollmentDialog.voiceProfileId || activeVoiceProfileId || derivedVoiceProfileId)}</div>
+            </div>
+          </div>
           <div class="cg-switch-field">
             <ha-formfield label="I explicitly consent to voice enrollment for this person">
-              <ha-checkbox data-person-id="${this._escapeHtml(personId)}" data-voice-field="consent_acknowledged" ${this._voiceEnrollmentDialog.consentAcknowledged ? "checked" : ""}></ha-checkbox>
+              <ha-checkbox data-person-id="${this._escapeHtml(personId)}" data-voice-field="consent_acknowledged" ${this._voiceEnrollmentDialog.consentAcknowledged ? "checked" : ""}${voiceEnrollmentBusy ? " disabled" : ""}></ha-checkbox>
             </ha-formfield>
           </div>
           <div class="cg-switch-field">
             <ha-formfield label="Keep voice identity processing local-first (recommended)">
-              <ha-checkbox data-person-id="${this._escapeHtml(personId)}" data-voice-field="local_only" ${this._voiceEnrollmentDialog.localOnly !== false ? "checked" : ""}></ha-checkbox>
+              <ha-checkbox data-person-id="${this._escapeHtml(personId)}" data-voice-field="local_only" ${this._voiceEnrollmentDialog.localOnly !== false ? "checked" : ""}${voiceEnrollmentBusy ? " disabled" : ""}></ha-checkbox>
             </ha-formfield>
           </div>
-          <div class="cg-voice-phrase-card">${this._escapeHtml(voiceEnrollmentPhrase)}</div>
-          <div class="cg-voice-enrollment-status">${this._escapeHtml(this._voiceEnrollmentDialog.status || "")}</div>
+          <div class="cg-muted">${this._escapeHtml(voiceEnrollmentAuthorized ? "Capture transport and phrase workflow are now available." : "Check both authorization boxes to enable capture method, phrase workflow, and completion controls.")}</div>
+          ${voiceEnrollmentBusy ? `<div class="cg-voice-busy-banner" role="status" aria-live="polite"><span class="cg-voice-busy-spinner" aria-hidden="true"></span><span>${this._escapeHtml(voiceEnrollmentBusyLabel)}</span></div>` : ""}
+          <div class="cg-voice-workflow-block${voiceEnrollmentAuthorized ? "" : " is-disabled"}${voiceEnrollmentBusy ? " is-busy" : ""}">
+            <div class="cg-field">
+              <label>Capture Method</label>
+              <div class="cg-voice-provider-options">
+                <label class="cg-voice-provider-option${selectedCaptureProvider === "browser" ? " is-selected" : ""}${voiceProviderAvailability.browserSelectable ? "" : " is-disabled"}${voiceEnrollmentAuthorized ? "" : " is-locked"}">
+                  <input type="radio" name="cg-voice-provider-${this._escapeHtml(personId)}" data-person-id="${this._escapeHtml(personId)}" data-voice-field="capture_provider" value="browser" ${selectedCaptureProvider === "browser" ? "checked" : ""}${voiceProviderAvailability.browserSelectable && voiceEnrollmentAuthorized && !voiceEnrollmentBusy ? "" : " disabled"}>
+                  <span class="cg-voice-provider-option-title">Browser Microphone</span>
+                  <span class="cg-voice-provider-option-copy">${this._escapeHtml(voiceProviderAvailability.browserSelectable ? "Capture the phrase with this browser session." : (this._voiceEnrollmentDialog.browserStatusSummary || "Browser microphone capture is unavailable in this environment."))}</span>
+                </label>
+                <label class="cg-voice-provider-option${selectedCaptureProvider === "satellite" ? " is-selected" : ""}${voiceProviderAvailability.satelliteSelectable ? "" : " is-disabled"}${voiceEnrollmentAuthorized ? "" : " is-locked"}">
+                  <input type="radio" name="cg-voice-provider-${this._escapeHtml(personId)}" data-person-id="${this._escapeHtml(personId)}" data-voice-field="capture_provider" value="satellite" ${selectedCaptureProvider === "satellite" ? "checked" : ""}${voiceProviderAvailability.satelliteSelectable && voiceEnrollmentAuthorized && !voiceEnrollmentBusy ? "" : " disabled"}>
+                  <span class="cg-voice-provider-option-title">Voice Assistant Satellite</span>
+                  <span class="cg-voice-provider-option-copy">${this._escapeHtml(voiceProviderAvailability.satelliteSelectable ? "Speak and capture the same phrase through an Assist satellite." : "No Voice Assistant satellites are available in this environment.")}</span>
+                  ${selectedCaptureProvider === "satellite" ? `
+                    <div class="cg-field cg-voice-provider-nested-field">
+                      <label>Voice Assistant Device</label>
+                      <select data-person-id="${this._escapeHtml(personId)}" data-voice-field="satellite_entity_id" class="cg-room-source-select"${voiceEnrollmentAuthorized && !voiceEnrollmentBusy ? "" : " disabled"}>
+                        <option value="">${voiceEnrollmentSatelliteOptions.length === 1 ? "Satellite selected" : "Select Satellite"}</option>
+                        ${voiceEnrollmentSatelliteOptions.map((option) => `<option value="${this._escapeHtml(option.entity_id)}"${option.entity_id === this._voiceEnrollmentDialog.satelliteEntityId ? " selected" : ""}>${this._escapeHtml(option.label)}</option>`).join("")}
+                      </select>
+                      <div class="cg-muted">${voiceEnrollmentSatelliteOptions.length ? "Choose the Assist satellite that should speak and capture this phrase." : "No Assist satellites are currently available."}</div>
+                    </div>
+                  ` : ""}
+                </label>
+              </div>
+              ${selectedCaptureProvider === "browser" ? `<div class="cg-muted">${this._escapeHtml(this._voiceEnrollmentDialog.browserStatusSummary || "")}</div>` : ""}
+            </div>
+            <div class="cg-modal-copy">Phrase ${this._escapeHtml(String(voiceEnrollmentPhraseIndex + 1))} of ${this._escapeHtml(String(voiceEnrollmentPhrases.length))}</div>
+            <div class="cg-muted">${this._escapeHtml(voiceEnrollmentInstructions)}</div>
+            <div class="cg-voice-phrase-card">${this._escapeHtml(voiceEnrollmentPhrase)}</div>
+            <div class="cg-voice-context-grid">
+              <div class="cg-voice-context-item">
+                <div class="cg-muted">Enrollment Progress</div>
+                <div class="cg-voice-context-value">${this._escapeHtml(this._voiceEnrollmentDialog.progressSummary || "Waiting for captured phrases.")}</div>
+              </div>
+              <div class="cg-voice-context-item">
+                <div class="cg-muted">Completion Status</div>
+                <div class="cg-voice-context-value">${this._escapeHtml(voiceEnrollmentCompletionSummary)}</div>
+              </div>
+            </div>
+            <div class="cg-muted">Recordings are stored under ${this._escapeHtml(voiceStorageDestination || "the configured attached storage root")} in a dedicated Concierge voice enrollment folder.</div>
+            <div class="cg-voice-enrollment-status">${this._escapeHtml(this._voiceEnrollmentDialog.status || "")}</div>
+            ${selectedCaptureProvider === "browser" && this._voiceEnrollmentDialog.showProviderFallback ? `
+              <div>
+                <ha-button class="cg-person-voice-provider-fallback" data-person-id="${this._escapeHtml(personId)}"${voiceEnrollmentAuthorized && !voiceEnrollmentBusy ? "" : " disabled"}>Use Voice Assistant Satellite Instead</ha-button>
+              </div>
+            ` : ""}
+          </div>
         </div>
         <div slot="footer" style="display:flex; justify-content:flex-end; gap:10px; padding: 0 16px 16px;">
-          <ha-button appearance="plain" class="cg-person-voice-dialog-close">Cancel</ha-button>
-          <ha-button variant="brand" class="cg-person-record-voice-phrase" data-person-id="${this._escapeHtml(personId)}">${this._escapeHtml(voiceRecordButtonLabel)}</ha-button>
-          <ha-button variant="brand" class="cg-person-next-voice-phrase" data-person-id="${this._escapeHtml(personId)}"${voiceEnrollmentNextDisabled}>${this._escapeHtml(voiceEnrollmentNextLabel)}</ha-button>
+          <ha-button appearance="plain" class="cg-person-voice-dialog-close" data-person-id="${this._escapeHtml(personId)}"${voiceEnrollmentBusy ? " disabled" : ""}>Cancel</ha-button>
+          <ha-button variant="brand" class="cg-person-record-voice-phrase" data-person-id="${this._escapeHtml(personId)}"${voiceCaptureButtonDisabled}>${this._escapeHtml(voiceRecordButtonLabel)}</ha-button>
+          <ha-button variant="brand" class="cg-person-next-voice-phrase" data-person-id="${this._escapeHtml(personId)}"${voiceNextButtonDisabled}>${this._escapeHtml(voiceEnrollmentNextLabel)}</ha-button>
         </div>
       </ha-dialog>
     ` : "";
@@ -6423,7 +7218,25 @@ var ConciergeApp = globalThis.ConciergeApp || class ConciergeApp extends HTMLEle
         .cg-voice-meta { font-size: 12px; color: var(--secondary-text-color); margin-top: 6px; }
         .cg-voice-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
         .cg-voice-actions ha-button { --mdc-theme-primary: var(--primary-color); }
+        .cg-voice-context-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; }
+        .cg-voice-context-item { border-radius: 10px; padding: 10px 12px; background: color-mix(in srgb, var(--card-background-color) 90%, var(--primary-color) 10%); }
+        .cg-voice-context-value { font-size: 13px; color: var(--primary-text-color); font-weight: 600; margin-top: 4px; word-break: break-word; }
+        .cg-voice-provider-options { display: grid; gap: 10px; }
+        .cg-voice-provider-option { display: grid; gap: 4px; border: 1px solid var(--divider-color); border-radius: 12px; padding: 10px 12px; background: var(--ha-card-background, var(--card-background-color)); cursor: pointer; }
+        .cg-voice-provider-option.is-selected { border-color: var(--primary-color); background: color-mix(in srgb, var(--primary-color) 10%, var(--card-background-color) 90%); }
+        .cg-voice-provider-option.is-disabled { opacity: 0.55; cursor: not-allowed; }
+        .cg-voice-provider-option.is-locked { opacity: 0.7; }
+        .cg-voice-provider-option input { margin: 0; }
+        .cg-voice-provider-option-title { font-size: 14px; font-weight: 700; color: var(--primary-text-color); }
+        .cg-voice-provider-option-copy { font-size: 12px; color: var(--secondary-text-color); }
+        .cg-voice-provider-nested-field { margin-top: 10px; padding-top: 10px; border-top: 1px solid color-mix(in srgb, var(--divider-color) 70%, transparent); }
+        .cg-voice-workflow-block { display: grid; gap: 14px; }
+        .cg-voice-workflow-block.is-disabled { opacity: 0.55; }
+        .cg-voice-workflow-block.is-busy { opacity: 0.7; }
+        .cg-voice-busy-banner { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 10px; border: 1px solid color-mix(in srgb, var(--primary-color) 35%, var(--divider-color) 65%); background: color-mix(in srgb, var(--primary-color) 14%, var(--card-background-color) 86%); color: var(--primary-text-color); font-size: 13px; font-weight: 600; }
+        .cg-voice-busy-spinner { width: 14px; height: 14px; border-radius: 999px; border: 2px solid color-mix(in srgb, var(--primary-color) 20%, transparent); border-top-color: var(--primary-color); animation: cg-spin 0.9s linear infinite; }
         .cg-voice-enrollment-status { font-size: 12px; color: var(--secondary-text-color); margin-top: 8px; }
+        @keyframes cg-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
         .cg-modal-backdrop { position: fixed; inset: 0; z-index: 1000; display: flex; align-items: center; justify-content: center; padding: 24px; background: rgba(0, 0, 0, 0.42); }
         .cg-modal { width: min(640px, 100%); border-radius: 18px; padding: 18px; background: var(--ha-card-background, var(--card-background-color)); box-shadow: var(--ha-card-box-shadow, 0 16px 48px rgba(0, 0, 0, 0.24)); }
         .cg-modal-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
@@ -6961,4 +7774,18 @@ var ConciergeApp = globalThis.ConciergeApp || class ConciergeApp extends HTMLEle
 
 if (!customElements.get("concierge-app")) {
   customElements.define("concierge-app", ConciergeApp);
+}
+
+if (typeof module !== "undefined" && module.exports) {
+  module.exports = {
+    conciergeBuildSatelliteEnrollmentPrompt,
+    ConciergeApp,
+    conciergeBuildVoiceEnrollmentDialogState,
+    conciergeCollectSatelliteOptions,
+    conciergeGetBrowserVoiceEnrollmentCapability,
+    conciergeGetVoiceEnrollmentProviderAvailability,
+    conciergeIsVoiceEnrollmentAuthorized,
+    conciergeNormalizeVoiceEnrollmentProvider,
+    conciergeResolveVoiceEnrollmentDefaultProvider,
+  };
 }
