@@ -182,7 +182,7 @@ test("dialog state merge preserves enrollment choices and progress across refres
       { entity_id: "assist_satellite.office", label: "Office Voice Assistant" },
       { entity_id: "assist_satellite.kitchen", label: "Kitchen Voice Assistant" },
     ],
-    progressSummary: "2/8 samples, 25%",
+    progressSummary: "2/10 samples, 20%",
     enrollmentSessionId: "session-123",
     completionReadiness: readiness,
     voiceProfileId: "tom_voice",
@@ -200,7 +200,7 @@ test("dialog state merge preserves enrollment choices and progress across refres
   assert.equal(merged.captureProvider, "satellite");
   assert.equal(merged.satelliteEntityId, "assist_satellite.office");
   assert.equal(merged.phraseIndex, 2);
-  assert.equal(merged.progressSummary, "2/8 samples, 25%");
+  assert.equal(merged.progressSummary, "2/10 samples, 20%");
   assert.equal(merged.enrollmentSessionId, "session-123");
   assert.deepEqual(merged.completionReadiness, readiness);
   assert.equal(merged.voiceProfileId, "tom_voice");
@@ -400,7 +400,7 @@ test("satellite capture falls back to progress confirmation when response is inc
     progress: {
       sample_count: 6,
       captured_phrase_indices: [5],
-      target_sample_count: 8,
+      target_sample_count: 10,
       completion_percentage: 75,
       provider_type: "satellite",
       user_safe_status_summary: "Ready to record sample",
@@ -443,7 +443,7 @@ test("satellite capture fallback does not mark success when phrase index is not 
   app._voiceProfiles = {
     tom_voice: {
       enrollment_state: "capturing",
-      sample_count: 8,
+      sample_count: 10,
       consent: { voice_enrollment: { consent_acknowledged: true, local_only: true } },
     },
   };
@@ -451,7 +451,7 @@ test("satellite capture fallback does not mark success when phrase index is not 
     open: true,
     personId: "person.tom",
     voiceProfileId: "tom_voice",
-    phraseIndex: 7,
+    phraseIndex: 9,
     currentCaptured: false,
     consentAcknowledged: true,
     localOnly: true,
@@ -467,9 +467,9 @@ test("satellite capture fallback does not mark success when phrase index is not 
     found: true,
     voice_profile_id: "tom_voice",
     progress: {
-      sample_count: 8,
-      captured_phrase_indices: [0, 1, 2, 3, 4, 5, 6],
-      target_sample_count: 8,
+      sample_count: 10,
+      captured_phrase_indices: [0, 1, 2, 3, 4, 5, 6, 7, 8],
+      target_sample_count: 10,
       completion_percentage: 100,
       provider_type: "satellite",
       user_safe_status_summary: "Ready to record sample",
@@ -483,8 +483,8 @@ test("satellite capture fallback does not mark success when phrase index is not 
       if (service === "capture_voice_enrollment_sample") {
         return {
           sample_registered: false,
-          sample_count: 8,
-          captured_phrase_indices: [0, 1, 2, 3, 4, 5, 6],
+          sample_count: 10,
+          captured_phrase_indices: [0, 1, 2, 3, 4, 5, 6, 7, 8],
         };
       }
       return { ready: false };
@@ -507,7 +507,7 @@ test("build profile button stays enabled so click can perform authoritative read
   app._voiceProfiles = {
     tom_voice: {
       enrollment_state: "capturing",
-      sample_count: 8,
+      sample_count: 10,
       consent: { voice_enrollment: { consent_acknowledged: true, local_only: true } },
     },
   };
@@ -518,7 +518,7 @@ test("build profile button stays enabled so click can perform authoritative read
     open: true,
     personId: "person.tom",
     voiceProfileId: "tom_voice",
-    phraseIndex: 7,
+    phraseIndex: 9,
     currentCaptured: true,
     consentAcknowledged: true,
     localOnly: true,
@@ -543,7 +543,7 @@ test("busy banner is shown and dialog actions are disabled while backend verific
   app._voiceProfiles = {
     tom_voice: {
       enrollment_state: "capturing",
-      sample_count: 8,
+      sample_count: 10,
       consent: { voice_enrollment: { consent_acknowledged: true, local_only: true } },
     },
   };
@@ -554,7 +554,7 @@ test("busy banner is shown and dialog actions are disabled while backend verific
     open: true,
     personId: "person.tom",
     voiceProfileId: "tom_voice",
-    phraseIndex: 7,
+    phraseIndex: 9,
     currentCaptured: true,
     consentAcknowledged: true,
     localOnly: true,
@@ -564,7 +564,7 @@ test("busy banner is shown and dialog actions are disabled while backend verific
     isBusy: true,
     busyLabel: "Checking completion readiness with backend...",
     completionReadiness: null,
-    progress: { sample_count: 8, target_sample_count: 8 },
+    progress: { sample_count: 10, target_sample_count: 10 },
   });
 
   app._renderPersonDetail("person.tom");

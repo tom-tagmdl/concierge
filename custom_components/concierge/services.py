@@ -72,6 +72,7 @@ from .models import (
     SignalState,
 )
 from .storage import ConciergeStorage
+from .voice_identity_bridge import async_get_voice_identity_enrollment_status
 
 _PROVIDER_NONE = "none"
 _PROVIDER_ASSET_INTELLIGENCE = "asset_intelligence"
@@ -305,6 +306,13 @@ SERVICE_CAPTURE_VOICE_ENROLLMENT_SAMPLE_SCHEMA = vol.Schema(
         vol.Optional("recording_size_bytes"): int,
         vol.Optional("recording_duration_ms"): int,
         vol.Optional("phrase_index"): int,
+        vol.Optional("prompt_id"): str,
+        vol.Optional("prompt_order"): int,
+        vol.Optional("prompt_category"): str,
+        vol.Optional("prompt_length_bucket"): str,
+        vol.Optional("capture_distance"): str,
+        vol.Optional("capture_noise"): str,
+        vol.Optional("quality_pass"): bool,
         vol.Optional("person_id"): str,
         vol.Optional("satellite_entity_id"): str,
         vol.Optional("device_id"): str,
@@ -337,20 +345,22 @@ SERVICE_BUILD_VOICE_PROFILE_SCHEMA = vol.Schema(
     {
         vol.Required("voice_profile_id"): str,
         vol.Optional("person_id"): str,
-        vol.Optional("min_samples", default=3): vol.All(int, vol.Range(min=1, max=50)),
+        vol.Optional("min_samples", default=8): vol.All(int, vol.Range(min=1, max=50)),
     }
 )
 SERVICE_COMPLETE_VOICE_ENROLLMENT_SCHEMA = vol.Schema(
     {
         vol.Required("voice_profile_id"): str,
         vol.Optional("person_id"): str,
-        vol.Optional("min_samples", default=3): vol.All(int, vol.Range(min=1, max=50)),
+        vol.Optional("min_samples", default=8): vol.All(int, vol.Range(min=1, max=50)),
+        vol.Optional("min_total_duration_ms", default=30000): vol.All(int, vol.Range(min=1000, max=300000)),
     }
 )
 SERVICE_GET_VOICE_ENROLLMENT_COMPLETION_READINESS_SCHEMA = vol.Schema(
     {
         vol.Required("voice_profile_id"): str,
-        vol.Optional("min_samples", default=3): vol.All(int, vol.Range(min=1, max=50)),
+        vol.Optional("min_samples", default=8): vol.All(int, vol.Range(min=1, max=50)),
+        vol.Optional("min_total_duration_ms", default=30000): vol.All(int, vol.Range(min=1000, max=300000)),
     }
 )
 SERVICE_CANCEL_VOICE_ENROLLMENT_SCHEMA = vol.Schema(
@@ -940,8 +950,8 @@ def _effective_minor_fields(call: ServiceCall) -> tuple[bool, bool, list[str], s
     )
 
 
-def _resolve_integration_capabilities(hass: HomeAssistant) -> dict[str, bool]:
-    """Resolve Concierge capability flags from config entry options/data."""
+async def _async_resolve_integration_capabilities(hass: HomeAssistant) -> dict[str, Any]:
+    """Resolve Concierge capability flags from config entry options/data and Voice Identity discovery."""
     entries = hass.config_entries.async_entries(DOMAIN)
     if not entries:
         return {
@@ -951,6 +961,9 @@ def _resolve_integration_capabilities(hass: HomeAssistant) -> dict[str, bool]:
             "cap_assets": False,
             "cap_voice_enrollment": False,
             "cap_extended_history": False,
+            "archive_ready": False,
+            "voice_enrollment_reason_code": "concierge_not_configured",
+            "voice_enrollment_status_summary": "Voice enrollment requires Concierge to be configured.",
         }
 
     entry = entries[0]
@@ -980,12 +993,30 @@ def _resolve_integration_capabilities(hass: HomeAssistant) -> dict[str, bool]:
     cap_tts = bool(tts_enabled and tts_provider != _PROVIDER_NONE)
     cap_persona = bool(cap_ai or cap_tts)
     cap_assets = bool(asset_intelligence_provider == _PROVIDER_ASSET_INTELLIGENCE)
-    cap_voice_enrollment = bool(
+    archive_ready = bool(
         archive_options.get("destination_configured") and archive_options.get("archive_enabled")
     )
     cap_extended_history = bool(
         archive_options.get("destination_configured") and archive_options.get("archive_enabled")
     )
+    voice_identity_status = await async_get_voice_identity_enrollment_status(hass)
+    voice_identity_ready = bool(voice_identity_status.get("voice_enrollment_enabled", False))
+    cap_voice_enrollment = bool(archive_ready and voice_identity_ready)
+
+    if not archive_ready:
+        reason_code = "archive_not_configured"
+        status_summary = "Voice enrollment requires attached storage and archive export to be enabled in Concierge options."
+    elif not voice_identity_ready:
+        reason_code = str(voice_identity_status.get("voice_enrollment_reason_code", "voice_identity_unavailable"))
+        status_summary = str(
+            voice_identity_status.get(
+                "voice_enrollment_status_summary",
+                "Voice enrollment is unavailable because Voice Identity is not ready.",
+            )
+        )
+    else:
+        reason_code = "ready"
+        status_summary = "Voice enrollment is ready."
 
     return {
         "cap_ai": cap_ai,
@@ -994,7 +1025,23 @@ def _resolve_integration_capabilities(hass: HomeAssistant) -> dict[str, bool]:
         "cap_assets": cap_assets,
         "cap_voice_enrollment": cap_voice_enrollment,
         "cap_extended_history": cap_extended_history,
+        "archive_ready": archive_ready,
+        "voice_enrollment_reason_code": reason_code,
+        "voice_enrollment_status_summary": status_summary,
     }
+
+
+def _voice_enrollment_unavailable_error(capabilities: dict[str, Any], *, action: str) -> str:
+    """Build user-safe enrollment unavailable error text from capability projection."""
+    summary = str(
+        capabilities.get(
+            "voice_enrollment_status_summary",
+            "Voice enrollment is unavailable because required dependencies are not ready.",
+        )
+    ).strip()
+    if not summary:
+        summary = "Voice enrollment is unavailable because required dependencies are not ready."
+    return f"{action} is unavailable: {summary}"
 
 
 def _enforce_minor_intent_policy(
@@ -1254,7 +1301,7 @@ async def _async_handle_update_room_config(hass: HomeAssistant, call: ServiceCal
     tts_voice = call.data.get("tts_voice")
     tts_language = call.data.get("tts_language")
     ai_knowledge_enabled = call.data.get("ai_knowledge_enabled")
-    capabilities = _resolve_integration_capabilities(hass)
+    capabilities = await _async_resolve_integration_capabilities(hass)
 
     if not capabilities["cap_ai"] and ai_knowledge_enabled is not None:
         ai_knowledge_enabled = False
@@ -1486,7 +1533,7 @@ async def _async_handle_update_person_profile(
         minor_allow_general_qna,
         mobile_voice_endpoint_enabled,
     ) = _effective_minor_fields(call)
-    capabilities = _resolve_integration_capabilities(hass)
+    capabilities = await _async_resolve_integration_capabilities(hass)
     voice_profile_id = call.data.get("voice_profile_id")
 
     if not capabilities["cap_ai"]:
@@ -1574,11 +1621,9 @@ async def _async_handle_start_voice_enrollment(
     call: ServiceCall,
 ) -> dict[str, Any]:
     """Start or resume explicit voice enrollment for a person profile."""
-    capabilities = _resolve_integration_capabilities(hass)
+    capabilities = await _async_resolve_integration_capabilities(hass)
     if not capabilities["cap_voice_enrollment"]:
-        raise vol.Invalid(
-            "voice enrollment is unavailable until attached storage and archive export are enabled in Concierge options"
-        )
+        raise vol.Invalid(_voice_enrollment_unavailable_error(capabilities, action="voice enrollment"))
     person_id = call.data["person_id"]
     if not bool(call.data.get("consent_acknowledged", False)):
         raise vol.Invalid("voice enrollment requires explicit consent_acknowledged=true")
@@ -1605,11 +1650,9 @@ async def _async_handle_capture_voice_enrollment_sample(
     call: ServiceCall,
 ) -> dict[str, Any]:
     """Capture one speech item for a voice profile during enrollment."""
-    capabilities = _resolve_integration_capabilities(hass)
+    capabilities = await _async_resolve_integration_capabilities(hass)
     if not capabilities["cap_voice_enrollment"]:
-        raise vol.Invalid(
-            "voice enrollment capture is unavailable until attached storage and archive export are enabled in Concierge options"
-        )
+        raise vol.Invalid(_voice_enrollment_unavailable_error(capabilities, action="voice enrollment capture"))
     voice_profile_id = call.data["voice_profile_id"]
     speech_text = str(call.data.get("speech_text", "")).strip()
     if not speech_text:
@@ -1641,11 +1684,9 @@ async def _async_handle_run_satellite_capture_poc(
     call: ServiceCall,
 ) -> dict[str, Any]:
     """Run the bounded satellite capture proof of concept (internal/dev-only)."""
-    capabilities = _resolve_integration_capabilities(hass)
+    capabilities = await _async_resolve_integration_capabilities(hass)
     if not capabilities["cap_voice_enrollment"]:
-        raise vol.Invalid(
-            "satellite capture POC is unavailable until attached storage and archive export are enabled in Concierge options"
-        )
+        raise vol.Invalid(_voice_enrollment_unavailable_error(capabilities, action="satellite capture POC"))
 
     async def _runner() -> dict[str, Any]:
         return await EnrollmentOrchestrator(hass).run_satellite_capture_poc(dict(call.data))
@@ -1669,11 +1710,9 @@ async def _async_handle_remove_voice_enrollment_sample(
     call: ServiceCall,
 ) -> dict[str, Any]:
     """Remove one previously captured speech item from a voice profile."""
-    capabilities = _resolve_integration_capabilities(hass)
+    capabilities = await _async_resolve_integration_capabilities(hass)
     if not capabilities["cap_voice_enrollment"]:
-        raise vol.Invalid(
-            "voice enrollment sample management is unavailable until attached storage and archive export are enabled in Concierge options"
-        )
+        raise vol.Invalid(_voice_enrollment_unavailable_error(capabilities, action="voice enrollment sample management"))
     voice_profile_id = call.data["voice_profile_id"]
     sample_id = call.data["sample_id"]
 
@@ -1697,11 +1736,9 @@ async def _async_handle_build_voice_profile(
     call: ServiceCall,
 ) -> dict[str, Any]:
     """Build a trained voice profile from captured enrollment samples."""
-    capabilities = _resolve_integration_capabilities(hass)
+    capabilities = await _async_resolve_integration_capabilities(hass)
     if not capabilities["cap_voice_enrollment"]:
-        raise vol.Invalid(
-            "voice profile build is unavailable until attached storage and archive export are enabled in Concierge options"
-        )
+        raise vol.Invalid(_voice_enrollment_unavailable_error(capabilities, action="voice profile build"))
     voice_profile_id = call.data["voice_profile_id"]
     min_samples = int(call.data.get("min_samples", 3))
 
@@ -1726,6 +1763,9 @@ async def _async_handle_complete_voice_enrollment(
     call: ServiceCall,
 ) -> dict[str, Any]:
     """Run deterministic enrollment completion workflow through orchestrator."""
+    capabilities = await _async_resolve_integration_capabilities(hass)
+    if not capabilities["cap_voice_enrollment"]:
+        raise vol.Invalid(_voice_enrollment_unavailable_error(capabilities, action="voice enrollment completion"))
     voice_profile_id = call.data["voice_profile_id"]
 
     async def _runner() -> dict[str, Any]:
@@ -2050,7 +2090,7 @@ async def _async_handle_update_composite_config(
 
     composite_id = call.data["composite_id"]
     existing = state.composites.get(composite_id)
-    capabilities = _resolve_integration_capabilities(hass)
+    capabilities = await _async_resolve_integration_capabilities(hass)
 
     area_ids = call.data.get("area_ids")
     if area_ids is None and existing is not None:
@@ -2606,7 +2646,7 @@ async def _async_handle_export_activity_archive(
     call: ServiceCall,
 ) -> dict[str, Any]:
     """Export a self-contained offline activity archive package."""
-    capabilities = _resolve_integration_capabilities(hass)
+    capabilities = await _async_resolve_integration_capabilities(hass)
     if not capabilities["cap_extended_history"]:
         raise vol.Invalid(
             "activity archive export is unavailable until attached storage and archive export are enabled in Concierge options"

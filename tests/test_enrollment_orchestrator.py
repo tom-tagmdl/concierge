@@ -309,7 +309,7 @@ async def test_orchestrator_completion_readiness_is_deterministic(
     not_ready = await orchestrator.get_completion_readiness(
         {
             "voice_profile_id": "tom_voice",
-            "min_samples": 2,
+            "min_samples": 3,
         }
     )
     assert not_ready["ready"] is False
@@ -321,6 +321,11 @@ async def test_orchestrator_completion_readiness_is_deterministic(
             "speech_text": "Phrase one",
             "phrase_index": 0,
             "source": "guided_enrollment_dialog",
+            "recording_duration_ms": 11000,
+            "prompt_category": "command",
+            "capture_distance": "near_field",
+            "capture_noise": "quiet",
+            "quality_pass": True,
         }
     )
     await orchestrator.record_sample(
@@ -329,13 +334,31 @@ async def test_orchestrator_completion_readiness_is_deterministic(
             "speech_text": "Phrase two",
             "phrase_index": 1,
             "source": "guided_enrollment_dialog",
+            "recording_duration_ms": 10000,
+            "prompt_category": "question",
+            "capture_distance": "mid_field",
+            "capture_noise": "moderate",
+            "quality_pass": True,
+        }
+    )
+    await orchestrator.record_sample(
+        {
+            "voice_profile_id": "tom_voice",
+            "speech_text": "Phrase three",
+            "phrase_index": 2,
+            "source": "guided_enrollment_dialog",
+            "recording_duration_ms": 10000,
+            "prompt_category": "conversational",
+            "capture_distance": "near_field",
+            "capture_noise": "quiet",
+            "quality_pass": True,
         }
     )
 
     ready = await orchestrator.get_completion_readiness(
         {
             "voice_profile_id": "tom_voice",
-            "min_samples": 2,
+            "min_samples": 3,
         }
     )
     assert ready["ready"] is True
@@ -351,10 +374,385 @@ async def test_orchestrator_completion_readiness_is_deterministic(
     ready_with_cleanup_flag = await orchestrator.get_completion_readiness(
         {
             "voice_profile_id": "tom_voice",
-            "min_samples": 2,
+            "min_samples": 3,
         }
     )
     assert ready_with_cleanup_flag["ready"] is True
+
+
+async def test_orchestrator_completion_readiness_blocks_when_duration_is_too_short(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """Readiness should require minimum usable duration even when sample count is complete."""
+    storage = ConciergeStorage(hass)
+    await storage.async_update_person_profile(
+        PersonProfile(person_id="person.tom", name="Tom", voice_profile_id="tom_voice"),
+        set_as_default=True,
+    )
+    await storage.async_update_voice_profile(
+        VoiceProfile(
+            voice_profile_id="tom_voice",
+            name="Tom Voice",
+            enrollment_state="capturing",
+            enrollment_source="people_setup",
+        )
+    )
+
+    orchestrator = EnrollmentOrchestrator(hass)
+    await orchestrator.start_enrollment(
+        {
+            "person_id": "person.tom",
+            "voice_profile_id": "tom_voice",
+            "voice_name": "Tom Voice",
+            "local_only": True,
+        }
+    )
+    await orchestrator.record_sample(
+        {
+            "voice_profile_id": "tom_voice",
+            "speech_text": "Phrase one",
+            "phrase_index": 0,
+            "source": "guided_enrollment_dialog",
+            "recording_duration_ms": 700,
+            "prompt_category": "command",
+            "capture_distance": "near_field",
+            "capture_noise": "quiet",
+            "quality_pass": True,
+        }
+    )
+    await orchestrator.record_sample(
+        {
+            "voice_profile_id": "tom_voice",
+            "speech_text": "Phrase two",
+            "phrase_index": 1,
+            "source": "guided_enrollment_dialog",
+            "recording_duration_ms": 700,
+            "prompt_category": "question",
+            "capture_distance": "mid_field",
+            "capture_noise": "moderate",
+            "quality_pass": True,
+        }
+    )
+    await orchestrator.record_sample(
+        {
+            "voice_profile_id": "tom_voice",
+            "speech_text": "Phrase three",
+            "phrase_index": 2,
+            "source": "guided_enrollment_dialog",
+            "recording_duration_ms": 700,
+            "prompt_category": "conversational",
+            "capture_distance": "near_field",
+            "capture_noise": "quiet",
+            "quality_pass": True,
+        }
+    )
+
+    readiness = await orchestrator.get_completion_readiness(
+        {
+            "voice_profile_id": "tom_voice",
+            "min_samples": 3,
+            "min_total_duration_ms": 5000,
+        }
+    )
+
+    assert readiness["ready"] is False
+    assert readiness["reason_code"] == "insufficient_duration"
+    assert int(readiness["total_duration_ms"]) < int(readiness["min_total_duration_ms"])
+    assert any(item.get("reason") == "insufficient_duration" for item in readiness["retry_recommendations"])
+
+
+async def test_orchestrator_completion_readiness_blocks_when_prompt_categories_lack_diversity(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """Readiness should report missing phrase categories with explicit retry guidance."""
+    storage = ConciergeStorage(hass)
+    await storage.async_update_person_profile(
+        PersonProfile(person_id="person.tom", name="Tom", voice_profile_id="tom_voice"),
+        set_as_default=True,
+    )
+    await storage.async_update_voice_profile(
+        VoiceProfile(
+            voice_profile_id="tom_voice",
+            name="Tom Voice",
+            enrollment_state="capturing",
+            enrollment_source="people_setup",
+        )
+    )
+
+    orchestrator = EnrollmentOrchestrator(hass)
+    await orchestrator.start_enrollment(
+        {
+            "person_id": "person.tom",
+            "voice_profile_id": "tom_voice",
+            "voice_name": "Tom Voice",
+            "local_only": True,
+        }
+    )
+    for index in range(3):
+        await orchestrator.record_sample(
+            {
+                "voice_profile_id": "tom_voice",
+                "speech_text": f"Phrase {index + 1}",
+                "phrase_index": index,
+                "source": "guided_enrollment_dialog",
+                "recording_duration_ms": 12000,
+                "prompt_category": "command",
+                "capture_distance": "near_field" if index % 2 == 0 else "mid_field",
+                "capture_noise": "quiet",
+                "quality_pass": True,
+            }
+        )
+
+    readiness = await orchestrator.get_completion_readiness(
+        {
+            "voice_profile_id": "tom_voice",
+            "min_samples": 3,
+        }
+    )
+
+    assert readiness["ready"] is False
+    assert readiness["reason_code"] == "missing_category_coverage"
+    assert "question" in readiness["missing_prompt_categories"]
+    assert "conversational" in readiness["missing_prompt_categories"]
+    assert any(item.get("reason") == "missing_category_coverage" for item in readiness["retry_recommendations"])
+
+
+async def test_orchestrator_completion_readiness_reports_missing_mid_field_retry_reason(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """Readiness should emit explicit mid-field retry taxonomy when coverage is missing."""
+    storage = ConciergeStorage(hass)
+    await storage.async_update_person_profile(
+        PersonProfile(person_id="person.tom", name="Tom", voice_profile_id="tom_voice"),
+        set_as_default=True,
+    )
+    await storage.async_update_voice_profile(
+        VoiceProfile(
+            voice_profile_id="tom_voice",
+            name="Tom Voice",
+            enrollment_state="capturing",
+            enrollment_source="people_setup",
+        )
+    )
+
+    orchestrator = EnrollmentOrchestrator(hass)
+    await orchestrator.start_enrollment(
+        {
+            "person_id": "person.tom",
+            "voice_profile_id": "tom_voice",
+            "voice_name": "Tom Voice",
+            "local_only": True,
+        }
+    )
+    await orchestrator.record_sample(
+        {
+            "voice_profile_id": "tom_voice",
+            "speech_text": "Phrase one",
+            "phrase_index": 0,
+            "source": "guided_enrollment_dialog",
+            "recording_duration_ms": 11000,
+            "prompt_category": "command",
+            "capture_distance": "near_field",
+            "capture_noise": "quiet",
+            "quality_pass": True,
+        }
+    )
+    await orchestrator.record_sample(
+        {
+            "voice_profile_id": "tom_voice",
+            "speech_text": "Phrase two",
+            "phrase_index": 1,
+            "source": "guided_enrollment_dialog",
+            "recording_duration_ms": 10000,
+            "prompt_category": "question",
+            "capture_distance": "near_field",
+            "capture_noise": "quiet",
+            "quality_pass": True,
+        }
+    )
+    await orchestrator.record_sample(
+        {
+            "voice_profile_id": "tom_voice",
+            "speech_text": "Phrase three",
+            "phrase_index": 2,
+            "source": "guided_enrollment_dialog",
+            "recording_duration_ms": 10000,
+            "prompt_category": "conversational",
+            "capture_distance": "near_field",
+            "capture_noise": "quiet",
+            "quality_pass": True,
+        }
+    )
+
+    readiness = await orchestrator.get_completion_readiness(
+        {
+            "voice_profile_id": "tom_voice",
+            "min_samples": 3,
+        }
+    )
+
+    assert readiness["ready"] is False
+    assert readiness["reason_code"] == "missing_mid_field_sample"
+    assert any(item.get("reason") == "missing_mid_field_sample" for item in readiness["retry_recommendations"])
+
+
+async def test_orchestrator_complete_enrollment_uses_voice_identity_generation_result(
+    hass: HomeAssistant,
+    setup_integration,
+    monkeypatch,
+) -> None:
+    """Completion should invoke Voice Identity generation and use returned voiceprint ID."""
+    storage = ConciergeStorage(hass)
+    await storage.async_update_person_profile(
+        PersonProfile(person_id="person.tom", name="Tom", voice_profile_id="tom_voice"),
+        set_as_default=True,
+    )
+    await storage.async_update_voice_profile(
+        VoiceProfile(
+            voice_profile_id="tom_voice",
+            name="Tom Voice",
+            enrollment_state="capturing",
+            enrollment_source="people_setup",
+        )
+    )
+
+    orchestrator = EnrollmentOrchestrator(hass)
+    await orchestrator.start_enrollment(
+        {
+            "person_id": "person.tom",
+            "voice_profile_id": "tom_voice",
+            "voice_name": "Tom Voice",
+            "local_only": True,
+        }
+    )
+    for index, category in enumerate(("command", "question", "conversational")):
+        await orchestrator.record_sample(
+            {
+                "voice_profile_id": "tom_voice",
+                "speech_text": f"Phrase {index + 1}",
+                "phrase_index": index,
+                "source": "guided_enrollment_dialog",
+                "recording_duration_ms": 10000,
+                "prompt_category": category,
+                "capture_distance": "near_field" if index != 1 else "mid_field",
+                "capture_noise": "quiet",
+                "quality_pass": True,
+            }
+        )
+
+    generate_called = {"count": 0}
+
+    async def _fake_generate(self, **kwargs):
+        generate_called["count"] += 1
+        return {
+            "success": True,
+            "reason_code": "ready",
+            "failure_category": "",
+            "voiceprint_id": "vp_generated_001",
+            "revision": 4,
+        }
+
+    async def _fake_status(self, voiceprint_id):
+        return {
+            "success": True,
+            "voiceprint_id": voiceprint_id,
+            "revision": 4,
+            "status_summary": "voiceprint_active",
+            "lifecycle_status": "active",
+            "active": True,
+        }
+
+    monkeypatch.setattr(EnrollmentOrchestrator, "_async_generate_voiceprint", _fake_generate)
+    monkeypatch.setattr(EnrollmentOrchestrator, "_async_get_voiceprint_status", _fake_status)
+
+    completion = await orchestrator.complete_enrollment(
+        {
+            "voice_profile_id": "tom_voice",
+            "person_id": "person.tom",
+            "min_samples": 3,
+        }
+    )
+
+    assert completion["completed"] is True
+    assert completion["voiceprint_id"] == "vp_generated_001"
+    assert completion["voiceprint_revision"] == 4
+    assert generate_called["count"] == 1
+
+    state = await storage.async_load_state()
+    assert state.voice_profiles["tom_voice"].speaker_embedding_id == "vp_generated_001"
+
+
+async def test_orchestrator_complete_enrollment_generation_failure_preserves_profile(
+    hass: HomeAssistant,
+    setup_integration,
+    monkeypatch,
+) -> None:
+    """Generation failure should not mutate existing voiceprint metadata fields."""
+    storage = ConciergeStorage(hass)
+    await storage.async_update_person_profile(
+        PersonProfile(person_id="person.tom", name="Tom", voice_profile_id="tom_voice"),
+        set_as_default=True,
+    )
+    await storage.async_update_voice_profile(
+        VoiceProfile(
+            voice_profile_id="tom_voice",
+            name="Tom Voice",
+            enrollment_state="capturing",
+            enrollment_source="people_setup",
+            speaker_embedding_id="vp_existing_001",
+        )
+    )
+
+    orchestrator = EnrollmentOrchestrator(hass)
+    await orchestrator.start_enrollment(
+        {
+            "person_id": "person.tom",
+            "voice_profile_id": "tom_voice",
+            "voice_name": "Tom Voice",
+            "local_only": True,
+        }
+    )
+    for index, category in enumerate(("command", "question", "conversational")):
+        await orchestrator.record_sample(
+            {
+                "voice_profile_id": "tom_voice",
+                "speech_text": f"Phrase {index + 1}",
+                "phrase_index": index,
+                "source": "guided_enrollment_dialog",
+                "recording_duration_ms": 10000,
+                "prompt_category": category,
+                "capture_distance": "near_field" if index != 1 else "mid_field",
+                "capture_noise": "quiet",
+                "quality_pass": True,
+            }
+        )
+
+    async def _fake_generate_failure(self, **kwargs):
+        _ = kwargs
+        return {
+            "success": False,
+            "reason_code": "generation_failed",
+            "failure_category": "operation_failed",
+            "voiceprint_id": "",
+            "revision": None,
+        }
+
+    monkeypatch.setattr(EnrollmentOrchestrator, "_async_generate_voiceprint", _fake_generate_failure)
+
+    with pytest.raises(Exception, match="generation_failed"):
+        await orchestrator.complete_enrollment(
+            {
+                "voice_profile_id": "tom_voice",
+                "person_id": "person.tom",
+                "min_samples": 3,
+            }
+        )
+
+    state = await storage.async_load_state()
+    assert state.voice_profiles["tom_voice"].speaker_embedding_id == "vp_existing_001"
 
 
 async def test_orchestrator_complete_enrollment_integrates_with_recovery_terminal_state(
@@ -391,6 +789,11 @@ async def test_orchestrator_complete_enrollment_integrates_with_recovery_termina
             "speech_text": "Phrase one",
             "phrase_index": 0,
             "source": "guided_enrollment_dialog",
+            "recording_duration_ms": 11000,
+            "prompt_category": "command",
+            "capture_distance": "near_field",
+            "capture_noise": "quiet",
+            "quality_pass": True,
         }
     )
     await orchestrator.record_sample(
@@ -399,6 +802,24 @@ async def test_orchestrator_complete_enrollment_integrates_with_recovery_termina
             "speech_text": "Phrase two",
             "phrase_index": 1,
             "source": "guided_enrollment_dialog",
+            "recording_duration_ms": 10000,
+            "prompt_category": "question",
+            "capture_distance": "mid_field",
+            "capture_noise": "moderate",
+            "quality_pass": True,
+        }
+    )
+    await orchestrator.record_sample(
+        {
+            "voice_profile_id": "tom_voice",
+            "speech_text": "Phrase three",
+            "phrase_index": 2,
+            "source": "guided_enrollment_dialog",
+            "recording_duration_ms": 10000,
+            "prompt_category": "conversational",
+            "capture_distance": "near_field",
+            "capture_noise": "quiet",
+            "quality_pass": True,
         }
     )
 
@@ -452,6 +873,11 @@ async def test_orchestrator_complete_enrollment_invalid_person_fails_before_sess
             "speech_text": "Phrase one",
             "phrase_index": 0,
             "source": "guided_enrollment_dialog",
+            "recording_duration_ms": 11000,
+            "prompt_category": "command",
+            "capture_distance": "near_field",
+            "capture_noise": "quiet",
+            "quality_pass": True,
         }
     )
     await orchestrator.record_sample(
@@ -460,6 +886,24 @@ async def test_orchestrator_complete_enrollment_invalid_person_fails_before_sess
             "speech_text": "Phrase two",
             "phrase_index": 1,
             "source": "guided_enrollment_dialog",
+            "recording_duration_ms": 10000,
+            "prompt_category": "question",
+            "capture_distance": "mid_field",
+            "capture_noise": "moderate",
+            "quality_pass": True,
+        }
+    )
+    await orchestrator.record_sample(
+        {
+            "voice_profile_id": "tom_voice",
+            "speech_text": "Phrase three",
+            "phrase_index": 2,
+            "source": "guided_enrollment_dialog",
+            "recording_duration_ms": 10000,
+            "prompt_category": "conversational",
+            "capture_distance": "near_field",
+            "capture_noise": "quiet",
+            "quality_pass": True,
         }
     )
 
@@ -507,6 +951,11 @@ async def test_orchestrator_complete_enrollment_allows_session_bound_person_with
             "speech_text": "Phrase one",
             "phrase_index": 0,
             "source": "guided_enrollment_dialog",
+            "recording_duration_ms": 11000,
+            "prompt_category": "command",
+            "capture_distance": "near_field",
+            "capture_noise": "quiet",
+            "quality_pass": True,
         }
     )
     await orchestrator.record_sample(
@@ -515,6 +964,24 @@ async def test_orchestrator_complete_enrollment_allows_session_bound_person_with
             "speech_text": "Phrase two",
             "phrase_index": 1,
             "source": "guided_enrollment_dialog",
+            "recording_duration_ms": 10000,
+            "prompt_category": "question",
+            "capture_distance": "mid_field",
+            "capture_noise": "moderate",
+            "quality_pass": True,
+        }
+    )
+    await orchestrator.record_sample(
+        {
+            "voice_profile_id": "tom_voice",
+            "speech_text": "Phrase three",
+            "phrase_index": 2,
+            "source": "guided_enrollment_dialog",
+            "recording_duration_ms": 10000,
+            "prompt_category": "conversational",
+            "capture_distance": "near_field",
+            "capture_noise": "quiet",
+            "quality_pass": True,
         }
     )
 
@@ -527,7 +994,7 @@ async def test_orchestrator_complete_enrollment_allows_session_bound_person_with
         {
             "voice_profile_id": "tom_voice",
             "person_id": "person.tom",
-            "min_samples": 2,
+            "min_samples": 3,
         }
     )
 
@@ -568,6 +1035,11 @@ async def test_orchestrator_completion_readiness_treats_storage_preflight_failur
             "speech_text": "Phrase one",
             "phrase_index": 0,
             "source": "guided_enrollment_dialog",
+            "recording_duration_ms": 11000,
+            "prompt_category": "command",
+            "capture_distance": "near_field",
+            "capture_noise": "quiet",
+            "quality_pass": True,
         }
     )
     await orchestrator.record_sample(
@@ -576,6 +1048,24 @@ async def test_orchestrator_completion_readiness_treats_storage_preflight_failur
             "speech_text": "Phrase two",
             "phrase_index": 1,
             "source": "guided_enrollment_dialog",
+            "recording_duration_ms": 10000,
+            "prompt_category": "question",
+            "capture_distance": "mid_field",
+            "capture_noise": "moderate",
+            "quality_pass": True,
+        }
+    )
+    await orchestrator.record_sample(
+        {
+            "voice_profile_id": "tom_voice",
+            "speech_text": "Phrase three",
+            "phrase_index": 2,
+            "source": "guided_enrollment_dialog",
+            "recording_duration_ms": 10000,
+            "prompt_category": "conversational",
+            "capture_distance": "near_field",
+            "capture_noise": "quiet",
+            "quality_pass": True,
         }
     )
 
@@ -587,7 +1077,7 @@ async def test_orchestrator_completion_readiness_treats_storage_preflight_failur
     readiness = await orchestrator.get_completion_readiness(
         {
             "voice_profile_id": "tom_voice",
-            "min_samples": 2,
+            "min_samples": 3,
         }
     )
 
@@ -629,6 +1119,11 @@ async def test_orchestrator_completion_readiness_allows_blank_session_state_when
             "speech_text": "Phrase one",
             "phrase_index": 0,
             "source": "guided_enrollment_dialog",
+            "recording_duration_ms": 11000,
+            "prompt_category": "command",
+            "capture_distance": "near_field",
+            "capture_noise": "quiet",
+            "quality_pass": True,
         }
     )
     await orchestrator.record_sample(
@@ -637,6 +1132,24 @@ async def test_orchestrator_completion_readiness_allows_blank_session_state_when
             "speech_text": "Phrase two",
             "phrase_index": 1,
             "source": "guided_enrollment_dialog",
+            "recording_duration_ms": 10000,
+            "prompt_category": "question",
+            "capture_distance": "mid_field",
+            "capture_noise": "moderate",
+            "quality_pass": True,
+        }
+    )
+    await orchestrator.record_sample(
+        {
+            "voice_profile_id": "tom_voice",
+            "speech_text": "Phrase three",
+            "phrase_index": 2,
+            "source": "guided_enrollment_dialog",
+            "recording_duration_ms": 10000,
+            "prompt_category": "conversational",
+            "capture_distance": "near_field",
+            "capture_noise": "quiet",
+            "quality_pass": True,
         }
     )
 
@@ -647,7 +1160,7 @@ async def test_orchestrator_completion_readiness_allows_blank_session_state_when
     readiness = await orchestrator.get_completion_readiness(
         {
             "voice_profile_id": "tom_voice",
-            "min_samples": 2,
+            "min_samples": 3,
         }
     )
 

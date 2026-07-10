@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from homeassistant.core import HomeAssistant
@@ -58,5 +60,46 @@ async def setup_integration(hass: HomeAssistant, mock_config_entry: MockConfigEn
 
     mock_config_entry.add_to_hass(hass)
     assert await hass.config_entries.async_setup(mock_config_entry.entry_id)
+
+    class _DiscoveryIntegration:
+        async def discover(self, request):
+            _ = request
+            projection = SimpleNamespace(
+                discovery_state="healthy",
+                service_available=True,
+                service_compatible=True,
+                enabled_capabilities=("generate_voiceprint", "voiceprint_status"),
+                supported_capabilities=("metadata_retrieval",),
+            )
+            return SimpleNamespace(success=True, projection=projection)
+
+    class _GenerateVoiceprintOperation:
+        async def execute(self, request):
+            _ = request
+            return SimpleNamespace(
+                success=True,
+                reason_code="ready",
+                failure_category="",
+                voiceprint_id="vp_test_001",
+                revision=1,
+            )
+
+    class _GetVoiceprintStatusOperation:
+        async def execute(self, request):
+            return SimpleNamespace(
+                success=True,
+                voiceprint_id=str(getattr(request, "voiceprint_id", "vp_test_001") or "vp_test_001"),
+                lifecycle_status="active",
+                active=True,
+                revision=1,
+                status_summary="voiceprint_active",
+            )
+
+    hass.data["voice_identity"] = {
+        "concierge_discovery_integration": _DiscoveryIntegration(),
+        "generate_voiceprint_operation": _GenerateVoiceprintOperation(),
+        "get_voiceprint_status_operation": _GetVoiceprintStatusOperation(),
+    }
+
     await hass.async_block_till_done()
     return mock_config_entry

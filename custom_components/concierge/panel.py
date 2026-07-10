@@ -27,6 +27,7 @@ from .archive_runtime import (
 )
 from .enrollment_orchestrator import EnrollmentOrchestrator
 from .storage import ConciergeStorage
+from .voice_identity_bridge import async_get_voice_identity_enrollment_status
 
 _LOGGER = logging.getLogger(__name__)
 _PANEL_REGISTERED_FLAG = "_panel_registered"
@@ -107,6 +108,19 @@ def _integration_options_from_entry(hass) -> dict[str, Any]:
             "media_provider": _PROVIDER_NONE,
             "asset_intelligence_provider": _PROVIDER_NONE,
             "capabilities": capabilities,
+            "voice_enrollment_reason_code": "concierge_not_configured",
+            "voice_enrollment_status_summary": "Voice enrollment requires Concierge to be configured.",
+            "voice_identity": {
+                "voice_enrollment_enabled": False,
+                "voice_enrollment_reason_code": "voice_identity_not_loaded",
+                "voice_enrollment_status_summary": "Voice enrollment requires Voice Identity to be loaded.",
+                "voice_identity_connected": False,
+                "voice_identity_available": False,
+                "voice_identity_compatible": False,
+                "voice_identity_discovery_state": "unavailable",
+                "voice_identity_enabled_capabilities": (),
+                "voice_identity_supported_capabilities": (),
+            },
         }
 
     entry = entries[0]
@@ -147,7 +161,55 @@ def _integration_options_from_entry(hass) -> dict[str, Any]:
             "cap_voice_enrollment": cap_voice_enrollment,
             "cap_extended_history": cap_extended_history,
         },
+        "voice_enrollment_reason_code": "archive_not_configured" if not cap_voice_enrollment else "archive_ready",
+        "voice_enrollment_status_summary": (
+            "Voice enrollment requires attached storage and archive export to be enabled in Concierge options."
+            if not cap_voice_enrollment
+            else "Archive storage requirements are ready."
+        ),
+        "voice_identity": {
+            "voice_enrollment_enabled": False,
+            "voice_enrollment_reason_code": "voice_identity_not_checked",
+            "voice_enrollment_status_summary": "Voice Identity discovery has not been evaluated yet.",
+            "voice_identity_connected": False,
+            "voice_identity_available": False,
+            "voice_identity_compatible": False,
+            "voice_identity_discovery_state": "unknown",
+            "voice_identity_enabled_capabilities": (),
+            "voice_identity_supported_capabilities": (),
+        },
     }
+
+
+async def _async_integration_options_with_discovery(hass) -> dict[str, Any]:
+    """Return integration options enriched with Voice Identity discovery status."""
+    integration_options = _integration_options_from_entry(hass)
+    archive_ready = bool(integration_options.get("capabilities", {}).get("cap_voice_enrollment", False))
+
+    voice_identity_status = await async_get_voice_identity_enrollment_status(hass)
+    voice_identity_ready = bool(voice_identity_status.get("voice_enrollment_enabled", False))
+    enrollment_enabled = bool(archive_ready and voice_identity_ready)
+
+    if not archive_ready:
+        reason_code = "archive_not_configured"
+        summary = "Voice enrollment requires attached storage and archive export to be enabled in Concierge options."
+    elif not voice_identity_ready:
+        reason_code = str(voice_identity_status.get("voice_enrollment_reason_code", "voice_identity_unavailable"))
+        summary = str(
+            voice_identity_status.get(
+                "voice_enrollment_status_summary",
+                "Voice enrollment is unavailable because Voice Identity is not ready.",
+            )
+        )
+    else:
+        reason_code = "ready"
+        summary = "Voice enrollment is ready."
+
+    integration_options["capabilities"]["cap_voice_enrollment"] = enrollment_enabled
+    integration_options["voice_enrollment_reason_code"] = reason_code
+    integration_options["voice_enrollment_status_summary"] = summary
+    integration_options["voice_identity"] = voice_identity_status
+    return integration_options
 
 
 def _normalize_language_tag(tag: str | None) -> str:
@@ -1043,7 +1105,7 @@ class ConciergeStorageSnapshotView(HomeAssistantView):
                 "global_features": global_features,
                 "global_context_usage": global_context_usage,
                 "archive_status": _archive_status_from_options(hass),
-                "integration_options": _integration_options_from_entry(hass),
+                "integration_options": await _async_integration_options_with_discovery(hass),
                 "tts_catalog": await _async_build_tts_catalog(hass),
                 "asset_intelligence_connected": _is_asset_intelligence_connected(hass),
             }
@@ -1183,6 +1245,13 @@ class ConciergeVoiceEnrollmentCaptureView(HomeAssistantView):
         speech_text = str(fields.get("speech_text", "") or "").strip()
         source = str(fields.get("source", "guided_enrollment_dialog") or "guided_enrollment_dialog").strip()
         duration_raw = str(fields.get("recording_duration_ms", "") or "").strip()
+        prompt_id = str(fields.get("prompt_id", "") or "").strip() or None
+        prompt_order_raw = str(fields.get("prompt_order", "") or "").strip()
+        prompt_category = str(fields.get("prompt_category", "") or "").strip() or None
+        prompt_length_bucket = str(fields.get("prompt_length_bucket", "") or "").strip() or None
+        capture_distance = str(fields.get("capture_distance", "") or "").strip() or None
+        capture_noise = str(fields.get("capture_noise", "") or "").strip() or None
+        quality_pass_raw = str(fields.get("quality_pass", "") or "").strip().lower()
 
         if not person_id:
             raise web.HTTPBadRequest(text="person_id is required")
@@ -1207,6 +1276,25 @@ class ConciergeVoiceEnrollmentCaptureView(HomeAssistantView):
         else:
             recording_duration_ms = None
 
+        prompt_order: int | None
+        if prompt_order_raw:
+            try:
+                prompt_order = max(0, int(prompt_order_raw))
+            except ValueError as err:
+                raise web.HTTPBadRequest(text="prompt_order must be an integer") from err
+        else:
+            prompt_order = None
+
+        quality_pass: bool | None
+        if quality_pass_raw in {"true", "1", "yes"}:
+            quality_pass = True
+        elif quality_pass_raw in {"false", "0", "no"}:
+            quality_pass = False
+        elif not quality_pass_raw:
+            quality_pass = None
+        else:
+            raise web.HTTPBadRequest(text="quality_pass must be a boolean")
+
         orchestrator = EnrollmentOrchestrator(hass)
         try:
             payload = await orchestrator.capture_browser_sample(
@@ -1218,6 +1306,13 @@ class ConciergeVoiceEnrollmentCaptureView(HomeAssistantView):
                 audio_bytes=audio_bytes,
                 source=source,
                 recording_duration_ms=recording_duration_ms,
+                prompt_id=prompt_id,
+                prompt_order=prompt_order,
+                prompt_category=prompt_category,
+                prompt_length_bucket=prompt_length_bucket,
+                capture_distance=capture_distance,
+                capture_noise=capture_noise,
+                quality_pass=quality_pass,
             )
         except vol.Invalid as err:
             raise web.HTTPPreconditionFailed(text=str(err)) from err

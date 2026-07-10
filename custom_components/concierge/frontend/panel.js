@@ -122,6 +122,106 @@ function conciergeBuildSatelliteEnrollmentPrompt(phraseIndex, speechText) {
   return `Please read phrase ${ordinal} now.`;
 }
 
+const CONCIERGE_VOICE_ENROLLMENT_CORPUS = [
+  {
+    prompt_id: "cmd_lights_kitchen_01",
+    speech_text: "Hello Concierge, turn on the kitchen lights and set them to seventy percent.",
+    prompt_category: "command",
+    prompt_length_bucket: "medium",
+    capture_distance: "near_field",
+    capture_noise: "quiet",
+  },
+  {
+    prompt_id: "query_living_env_02",
+    speech_text: "What are the temperature and humidity in the living room right now?",
+    prompt_category: "question",
+    prompt_length_bucket: "medium",
+    capture_distance: "mid_field",
+    capture_noise: "quiet",
+  },
+  {
+    prompt_id: "cmd_bedroom_scene_03",
+    speech_text: "Set the bedroom shades halfway, then dim the lamps to thirty percent.",
+    prompt_category: "command",
+    prompt_length_bucket: "medium",
+    capture_distance: "near_field",
+    capture_noise: "moderate",
+  },
+  {
+    prompt_id: "query_security_04",
+    speech_text: "Remind me if any doors or windows are still open after ten thirty tonight.",
+    prompt_category: "question",
+    prompt_length_bucket: "long",
+    capture_distance: "mid_field",
+    capture_noise: "moderate",
+  },
+  {
+    prompt_id: "conv_morning_digest_05",
+    speech_text: "Good morning Concierge, give me a short summary of the weather and top news.",
+    prompt_category: "conversational",
+    prompt_length_bucket: "long",
+    capture_distance: "near_field",
+    capture_noise: "quiet",
+  },
+  {
+    prompt_id: "cmd_music_office_06",
+    speech_text: "Please play soft jazz in the office speaker group for fifteen minutes.",
+    prompt_category: "command",
+    prompt_length_bucket: "medium",
+    capture_distance: "mid_field",
+    capture_noise: "moderate",
+  },
+  {
+    prompt_id: "conv_presence_07",
+    speech_text: "Concierge, I am in the family room and I want a calm, detailed answer.",
+    prompt_category: "conversational",
+    prompt_length_bucket: "long",
+    capture_distance: "near_field",
+    capture_noise: "quiet",
+  },
+  {
+    prompt_id: "query_garage_alert_08",
+    speech_text: "If the garage door opens, send a message to my phone and show the driveway camera.",
+    prompt_category: "question",
+    prompt_length_bucket: "long",
+    capture_distance: "mid_field",
+    capture_noise: "moderate",
+  },
+  {
+    prompt_id: "cmd_night_mode_09",
+    speech_text: "At eleven p.m., lock the doors, turn off downstairs lights, and set the alarm to home mode.",
+    prompt_category: "command",
+    prompt_length_bucket: "long",
+    capture_distance: "near_field",
+    capture_noise: "moderate",
+  },
+  {
+    prompt_id: "conv_daily_checkin_10",
+    speech_text: "Before we finish, tell me tomorrow's first meeting and whether I left anything pending tonight.",
+    prompt_category: "conversational",
+    prompt_length_bucket: "long",
+    capture_distance: "mid_field",
+    capture_noise: "quiet",
+  },
+];
+
+const CONCIERGE_VOICE_ENROLLMENT_MIN_TOTAL_DURATION_MS = 30000;
+const CONCIERGE_VOICE_ENROLLMENT_MIN_ACCEPTED_UTTERANCES = 8;
+
+function conciergeVoiceEnrollmentPrompt(index) {
+  const clampedIndex = Math.max(0, Math.min(Number(index || 0), CONCIERGE_VOICE_ENROLLMENT_CORPUS.length - 1));
+  const prompt = CONCIERGE_VOICE_ENROLLMENT_CORPUS[clampedIndex] || CONCIERGE_VOICE_ENROLLMENT_CORPUS[0];
+  return {
+    prompt_id: String(prompt.prompt_id || `prompt_${clampedIndex + 1}`).trim(),
+    prompt_order: clampedIndex + 1,
+    speech_text: String(prompt.speech_text || "").trim(),
+    prompt_category: String(prompt.prompt_category || "conversational").trim(),
+    prompt_length_bucket: String(prompt.prompt_length_bucket || "medium").trim(),
+    capture_distance: String(prompt.capture_distance || "near_field").trim(),
+    capture_noise: String(prompt.capture_noise || "quiet").trim(),
+  };
+}
+
 function conciergeBuildVoiceEnrollmentDialogState(previousState = {}, seedState = {}) {
   const previous = previousState && typeof previousState === "object" ? previousState : {};
   const seed = seedState && typeof seedState === "object" ? seedState : {};
@@ -4293,16 +4393,7 @@ var ConciergeApp = globalThis.ConciergeApp || class ConciergeApp extends HTMLEle
   }
 
   _voiceEnrollmentPhrases() {
-    return [
-      "Hello Concierge, please turn on the kitchen lights and set them to seventy percent.",
-      "What is the temperature and humidity in the living room right now?",
-      "Set the bedroom shades halfway, then dim the lamps to thirty percent.",
-      "Remind me if any doors or windows are still open after ten thirty tonight.",
-      "Good morning Concierge, give me a short summary of the weather and the top news.",
-      "Please play soft jazz in the office speaker group for fifteen minutes.",
-      "If the garage door opens, send a message to my phone and show the driveway camera.",
-      "Concierge, I am in the family room and I want a calm, detailed answer.",
-    ];
+    return CONCIERGE_VOICE_ENROLLMENT_CORPUS.map((item) => String(item.speech_text || "").trim());
   }
 
   async _fetchVoiceEnrollmentProgress(personId, voiceProfileId = "") {
@@ -4377,7 +4468,8 @@ var ConciergeApp = globalThis.ConciergeApp || class ConciergeApp extends HTMLEle
           "get_voice_enrollment_completion_readiness",
           {
             voice_profile_id: dialog.voiceProfileId,
-            min_samples: phrases.length,
+            min_samples: CONCIERGE_VOICE_ENROLLMENT_MIN_ACCEPTED_UTTERANCES,
+            min_total_duration_ms: CONCIERGE_VOICE_ENROLLMENT_MIN_TOTAL_DURATION_MS,
           },
           undefined,
           true,
@@ -4422,7 +4514,7 @@ var ConciergeApp = globalThis.ConciergeApp || class ConciergeApp extends HTMLEle
     return response.json();
   }
 
-  async _captureVoiceEnrollmentRecording(personId, voiceProfileId, phraseIndex, speechText, recordingDurationMs, blob) {
+  async _captureVoiceEnrollmentRecording(personId, voiceProfileId, phraseIndex, speechText, recordingDurationMs, blob, promptMeta = {}) {
     const token = this._hass?.auth?.data?.access_token || "";
     const headers = token ? { Authorization: `Bearer ${token}` } : {};
     const formData = new FormData();
@@ -4432,6 +4524,13 @@ var ConciergeApp = globalThis.ConciergeApp || class ConciergeApp extends HTMLEle
     formData.append("speech_text", speechText);
     formData.append("source", "guided_enrollment_dialog");
     formData.append("recording_duration_ms", String(Math.max(0, Number(recordingDurationMs) || 0)));
+    if (promptMeta.prompt_id) formData.append("prompt_id", String(promptMeta.prompt_id));
+    if (promptMeta.prompt_order !== undefined) formData.append("prompt_order", String(promptMeta.prompt_order));
+    if (promptMeta.prompt_category) formData.append("prompt_category", String(promptMeta.prompt_category));
+    if (promptMeta.prompt_length_bucket) formData.append("prompt_length_bucket", String(promptMeta.prompt_length_bucket));
+    if (promptMeta.capture_distance) formData.append("capture_distance", String(promptMeta.capture_distance));
+    if (promptMeta.capture_noise) formData.append("capture_noise", String(promptMeta.capture_noise));
+    formData.append("quality_pass", "true");
     formData.append("audio", blob, `phrase_${String(phraseIndex + 1).padStart(2, "0")}.webm`);
 
     const response = await fetch("/api/concierge/voice_enrollment_capture", {
@@ -4641,7 +4740,11 @@ var ConciergeApp = globalThis.ConciergeApp || class ConciergeApp extends HTMLEle
 
   _openVoiceEnrollmentDialog(personId) {
     if (!personId) return;
-    if (!this._integrationOptions?.capabilities?.cap_voice_enrollment) return;
+    if (!this._integrationOptions?.capabilities?.cap_voice_enrollment) {
+      const unavailableSummary = String(this._integrationOptions?.voice_enrollment_status_summary || "Voice enrollment is unavailable until integration prerequisites are met.").trim();
+      this._setVoiceEnrollmentStatus(personId, unavailableSummary);
+      return;
+    }
     const dialog = this._applyVoiceEnrollmentDialogState(personId, {}, true);
     this._refreshVoiceEnrollmentDialogProgress(personId, dialog.voiceProfileId);
   }
@@ -4759,7 +4862,11 @@ var ConciergeApp = globalThis.ConciergeApp || class ConciergeApp extends HTMLEle
   }
 
   async _startVoiceEnrollment(personId) {
-    if (!this._integrationOptions?.capabilities?.cap_voice_enrollment) return;
+    if (!this._integrationOptions?.capabilities?.cap_voice_enrollment) {
+      const unavailableSummary = String(this._integrationOptions?.voice_enrollment_status_summary || "Voice enrollment is unavailable until integration prerequisites are met.").trim();
+      this._setVoiceEnrollmentStatus(personId, unavailableSummary);
+      return;
+    }
     this._ensureVoiceEnrollmentPersonView(personId);
     this._openVoiceEnrollmentDialog(personId);
     const activeVoiceProfileId = this._activeVoiceProfileIdForPerson(personId) || this._voiceEnrollmentDialog?.voiceProfileId || "";
@@ -4802,6 +4909,7 @@ var ConciergeApp = globalThis.ConciergeApp || class ConciergeApp extends HTMLEle
     const phrases = this._voiceEnrollmentPhrases();
     const phraseIndex = Math.max(0, Math.min(dialog.phraseIndex, phrases.length - 1));
     const speechText = String(phrases[phraseIndex] || "").trim();
+    const promptMeta = conciergeVoiceEnrollmentPrompt(phraseIndex);
     if (!speechText) return;
 
     if (dialog.captureProvider === "satellite") {
@@ -4829,6 +4937,13 @@ var ConciergeApp = globalThis.ConciergeApp || class ConciergeApp extends HTMLEle
             prompt_text: conciergeBuildSatelliteEnrollmentPrompt(phraseIndex, speechText),
             source: "guided_enrollment_dialog",
             phrase_index: phraseIndex,
+            prompt_id: promptMeta.prompt_id,
+            prompt_order: promptMeta.prompt_order,
+            prompt_category: promptMeta.prompt_category,
+            prompt_length_bucket: promptMeta.prompt_length_bucket,
+            capture_distance: promptMeta.capture_distance,
+            capture_noise: promptMeta.capture_noise,
+            quality_pass: true,
             capture_provider: "satellite",
             satellite_entity_id: dialog.satelliteEntityId,
             timeout_seconds: 8.0,
@@ -4971,7 +5086,8 @@ var ConciergeApp = globalThis.ConciergeApp || class ConciergeApp extends HTMLEle
             phraseIndex,
             speechText,
             Math.max(0, Date.now() - startedAt),
-            blob
+            blob,
+            promptMeta
           );
           if (activeDialog?.open && activeDialog.personId === personId) {
             activeDialog.currentCaptured = true;
@@ -5048,7 +5164,7 @@ var ConciergeApp = globalThis.ConciergeApp || class ConciergeApp extends HTMLEle
     }
   }
 
-  async _buildVoiceProfile(personId, minSamples = 3) {
+  async _buildVoiceProfile(personId, minSamples = CONCIERGE_VOICE_ENROLLMENT_MIN_ACCEPTED_UTTERANCES) {
     if (!personId) return;
     const voiceProfileId = this._activeVoiceProfileIdForPerson(personId);
     if (!voiceProfileId) {
@@ -5062,7 +5178,12 @@ var ConciergeApp = globalThis.ConciergeApp || class ConciergeApp extends HTMLEle
       await this._hass.callService(
         "concierge",
         "complete_voice_enrollment",
-        { voice_profile_id: voiceProfileId, person_id: personId, min_samples: minSamples },
+        {
+          voice_profile_id: voiceProfileId,
+          person_id: personId,
+          min_samples: minSamples,
+          min_total_duration_ms: CONCIERGE_VOICE_ENROLLMENT_MIN_TOTAL_DURATION_MS,
+        },
         undefined,
         true,
         true
@@ -5109,7 +5230,11 @@ var ConciergeApp = globalThis.ConciergeApp || class ConciergeApp extends HTMLEle
         const readinessResponse = await this._hass.callService(
           "concierge",
           "get_voice_enrollment_completion_readiness",
-          { voice_profile_id: voiceProfileId, min_samples: phrases.length },
+          {
+            voice_profile_id: voiceProfileId,
+            min_samples: CONCIERGE_VOICE_ENROLLMENT_MIN_ACCEPTED_UTTERANCES,
+            min_total_duration_ms: CONCIERGE_VOICE_ENROLLMENT_MIN_TOTAL_DURATION_MS,
+          },
           undefined,
           true,
           true
@@ -5132,7 +5257,7 @@ var ConciergeApp = globalThis.ConciergeApp || class ConciergeApp extends HTMLEle
         this._setVoiceEnrollmentBusy(personId, false);
       }
 
-      await this._buildVoiceProfile(personId, phrases.length);
+      await this._buildVoiceProfile(personId, CONCIERGE_VOICE_ENROLLMENT_MIN_ACCEPTED_UTTERANCES);
       return;
     }
 
@@ -7292,19 +7417,20 @@ var ConciergeApp = globalThis.ConciergeApp || class ConciergeApp extends HTMLEle
             </div>
           </div>
 
-          <div class="cg-config-card" style="display:${capVoiceEnrollment ? "block" : "none"};">
+          <div class="cg-config-card">
             <div class="cg-config-title">Voice Enrollment</div>
             <div class="cg-muted">Guided local-first enrollment uses a standard set of phrases to build this person's voice profile.</div>
+            ${!capVoiceEnrollment ? `<div class="cg-muted">${this._escapeHtml(String(this._integrationOptions?.voice_enrollment_status_summary || "Voice enrollment is unavailable until integration prerequisites are met.").trim())}</div>` : ""}
             <div class="cg-voice-meta">Profile ID: ${this._escapeHtml(activeVoiceProfileId || derivedVoiceProfileId)}</div>
             <div class="cg-voice-meta">State: ${this._escapeHtml(enrollmentState)}</div>
             <div class="cg-voice-meta">Samples: ${this._escapeHtml(String(enrollmentSampleCount))}</div>
             <div class="cg-voice-meta">Confidence: ${this._escapeHtml(enrollmentConfidence === undefined || enrollmentConfidence === null ? "Not built" : Number(enrollmentConfidence).toFixed(2))}</div>
             <div class="cg-voice-meta">Last built: ${this._escapeHtml(enrollmentLastBuiltAt || "Not built yet")}</div>
             <div class="cg-voice-actions">
-              ${showVoiceEnrollmentBegin ? `<ha-button class="cg-person-begin-enrollment" data-person-id="${this._escapeHtml(personId)}">${this._escapeHtml(voiceEnrollmentBeginLabel)}</ha-button>` : ""}
+              ${capVoiceEnrollment && showVoiceEnrollmentBegin ? `<ha-button class="cg-person-begin-enrollment" data-person-id="${this._escapeHtml(personId)}">${this._escapeHtml(voiceEnrollmentBeginLabel)}</ha-button>` : ""}
               ${activeVoiceProfileId ? `<ha-button class="cg-person-delete-voice" data-person-id="${this._escapeHtml(personId)}">Delete</ha-button>` : ""}
             </div>
-            <div class="cg-voice-enrollment-status" data-person-id="${this._escapeHtml(personId)}">${this._escapeHtml(activeVoiceProfileId ? "" : "No voice profile enrolled yet.")}</div>
+            <div class="cg-voice-enrollment-status" data-person-id="${this._escapeHtml(personId)}">${this._escapeHtml(activeVoiceProfileId ? "" : (capVoiceEnrollment ? "No voice profile enrolled yet." : String(this._integrationOptions?.voice_enrollment_status_summary || "Voice enrollment is unavailable until integration prerequisites are met.").trim()))}</div>
           </div>
 
           <div class="cg-config-card">

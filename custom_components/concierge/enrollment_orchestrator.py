@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
@@ -77,7 +78,25 @@ from .repairs import async_create_or_update_capture_provider_issue
 from .repairs import async_create_or_update_storage_issue
 from .storage import ConciergeStorage
 
-DEFAULT_ENROLLMENT_TARGET_SAMPLE_COUNT = 8
+DEFAULT_ENROLLMENT_MIN_SAMPLE_COUNT = 8
+DEFAULT_ENROLLMENT_TARGET_SAMPLE_COUNT = 10
+DEFAULT_ENROLLMENT_ROBUST_SAMPLE_COUNT = 12
+DEFAULT_ENROLLMENT_MIN_TOTAL_DURATION_MS = 30000
+DEFAULT_ENROLLMENT_RECOMMENDED_TOTAL_DURATION_MS = 45000
+DEFAULT_ENROLLMENT_QUALITY_SCORE_THRESHOLD = 0.75
+DEFAULT_REQUIRED_PROMPT_CATEGORIES: tuple[str, ...] = (
+    "command",
+    "question",
+    "conversational",
+)
+DEFAULT_REQUIRED_CAPTURE_DISTANCES: tuple[str, ...] = (
+    "near_field",
+    "mid_field",
+)
+
+_VOICE_IDENTITY_DOMAIN = "voice_identity"
+_VI_GENERATE_OPERATION_KEY = "generate_voiceprint_operation"
+_VI_STATUS_OPERATION_KEY = "get_voiceprint_status_operation"
 
 
 def resolve_enrollment_storage_provider_from_entry(
@@ -179,6 +198,112 @@ class EnrollmentOrchestrator:
 
     def __init__(self, hass: HomeAssistant) -> None:
         self.hass = hass
+
+    def _voice_identity_runtime(self) -> dict[str, Any]:
+        runtime = self.hass.data.get(_VOICE_IDENTITY_DOMAIN)
+        return runtime if isinstance(runtime, dict) else {}
+
+    def _voice_identity_generate_operation(self) -> Any:
+        return self._voice_identity_runtime().get(_VI_GENERATE_OPERATION_KEY)
+
+    def _voice_identity_status_operation(self) -> Any:
+        return self._voice_identity_runtime().get(_VI_STATUS_OPERATION_KEY)
+
+    async def _async_generate_voiceprint(
+        self,
+        *,
+        voice_profile_id: str,
+        subject_id: str,
+        session_id: str,
+        sample_items: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        operation = self._voice_identity_generate_operation()
+        execute = getattr(operation, "execute", None)
+        if not callable(execute):
+            return {
+                "success": False,
+                "reason_code": "generation_failed",
+                "failure_category": "operation_not_loaded",
+                "voiceprint_id": "",
+                "revision": None,
+            }
+
+        sample_references = tuple(
+            str(item.get("sample_id", "") or "").strip()
+            for item in sample_items
+            if str(item.get("sample_id", "") or "").strip()
+        )
+        if not sample_references:
+            sample_references = tuple(
+                f"sample_{index + 1}"
+                for index, _ in enumerate(sample_items)
+            )
+
+        prepared_inputs = tuple(
+            str(item.get("recording_path", "") or "").strip()
+            for item in sample_items
+            if str(item.get("recording_path", "") or "").strip()
+        )
+
+        request = SimpleNamespace(
+            operation_id=f"concierge_generate_{uuid4().hex[:12]}",
+            subject_id=str(subject_id or voice_profile_id).strip(),
+            source="concierge",
+            sample_references=sample_references,
+            enrollment_references=(session_id,),
+            prepared_enrollment_inputs=prepared_inputs,
+            model_preference="ecapa_v1",
+            timeout_seconds=30.0,
+            activate=True,
+            generation_id=None,
+            current_voiceprint_id=None,
+            voice_profile_id=voice_profile_id,
+            enrollment_reference=session_id,
+            correlation_id=f"concierge_{session_id}",
+            request_id=f"concierge_{uuid4().hex[:8]}",
+            request_metadata={"caller": "concierge"},
+            requested_at=datetime.now(timezone.utc).isoformat(),
+        )
+
+        result = await execute(request)
+        success = bool(getattr(result, "success", False))
+        reason_code = str(getattr(result, "reason_code", "") or "").strip().lower()
+        failure_category = str(getattr(result, "failure_category", "") or "").strip().lower()
+        if not reason_code:
+            reason_code = "generation_failed" if not success else "ready"
+
+        return {
+            "success": success,
+            "reason_code": reason_code,
+            "failure_category": failure_category,
+            "voiceprint_id": str(getattr(result, "voiceprint_id", "") or "").strip(),
+            "revision": getattr(result, "revision", None),
+        }
+
+    async def _async_get_voiceprint_status(self, voiceprint_id: str) -> dict[str, Any]:
+        operation = self._voice_identity_status_operation()
+        execute = getattr(operation, "execute", None)
+        if not callable(execute) or not voiceprint_id:
+            return {"success": False}
+
+        request = SimpleNamespace(
+            voiceprint_id=str(voiceprint_id).strip(),
+            compatibility_version=1,
+            correlation_id=f"concierge_status_{uuid4().hex[:8]}",
+            request_metadata={"caller": "concierge"},
+        )
+        result = await execute(request)
+        if not bool(getattr(result, "success", False)):
+            return {"success": False}
+
+        return {
+            "success": True,
+            "voiceprint_id": str(getattr(result, "voiceprint_id", "") or "").strip(),
+            "revision": getattr(result, "revision", None),
+            "status_summary": str(getattr(result, "status_summary", "") or "").strip(),
+            "lifecycle_status": str(getattr(result, "lifecycle_status", "") or "").strip(),
+            "active": bool(getattr(result, "active", False)),
+        }
 
     @staticmethod
     def _normalize_capture_provider_preference(preferred_provider: str | None) -> str:
@@ -388,6 +513,13 @@ class EnrollmentOrchestrator:
         audio_bytes: bytes,
         source: str = "guided_enrollment_dialog",
         recording_duration_ms: int | None = None,
+        prompt_id: str | None = None,
+        prompt_order: int | None = None,
+        prompt_category: str | None = None,
+        prompt_length_bucket: str | None = None,
+        capture_distance: str | None = None,
+        capture_noise: str | None = None,
+        quality_pass: bool | None = None,
     ) -> dict[str, Any]:
         """Coordinate browser upload and EnrollmentSession sample registration."""
         upload_payload = await self.upload_browser_sample(
@@ -409,6 +541,20 @@ class EnrollmentOrchestrator:
         }
         if recording_duration_ms is not None:
             registration_payload["recording_duration_ms"] = max(0, int(recording_duration_ms))
+        if prompt_id:
+            registration_payload["prompt_id"] = str(prompt_id).strip()
+        if prompt_order is not None:
+            registration_payload["prompt_order"] = int(prompt_order)
+        if prompt_category:
+            registration_payload["prompt_category"] = str(prompt_category).strip()
+        if prompt_length_bucket:
+            registration_payload["prompt_length_bucket"] = str(prompt_length_bucket).strip()
+        if capture_distance:
+            registration_payload["capture_distance"] = str(capture_distance).strip()
+        if capture_noise:
+            registration_payload["capture_noise"] = str(capture_noise).strip()
+        if quality_pass is not None:
+            registration_payload["quality_pass"] = bool(quality_pass)
 
         capture_payload = await self.record_sample(registration_payload)
         return {
@@ -1023,7 +1169,14 @@ class EnrollmentOrchestrator:
         storage = ConciergeStorage(self.hass)
         state = await storage.async_load_state()
         voice_profile_id = str(call_data.get("voice_profile_id", "") or "").strip()
-        min_samples = max(1, int(call_data.get("min_samples", DEFAULT_ENROLLMENT_TARGET_SAMPLE_COUNT)))
+        min_samples = max(1, int(call_data.get("min_samples", DEFAULT_ENROLLMENT_MIN_SAMPLE_COUNT)))
+        min_total_duration_ms = max(
+            1000,
+            int(call_data.get("min_total_duration_ms", DEFAULT_ENROLLMENT_MIN_TOTAL_DURATION_MS)),
+        )
+        recommended_sample_count = DEFAULT_ENROLLMENT_TARGET_SAMPLE_COUNT
+        robust_sample_count = DEFAULT_ENROLLMENT_ROBUST_SAMPLE_COUNT
+        recommended_total_duration_ms = DEFAULT_ENROLLMENT_RECOMMENDED_TOTAL_DURATION_MS
 
         if not voice_profile_id:
             return {
@@ -1032,6 +1185,11 @@ class EnrollmentOrchestrator:
                 "voice_profile_id": "",
                 "sample_count": 0,
                 "min_samples": min_samples,
+                "recommended_sample_count": recommended_sample_count,
+                "robust_sample_count": robust_sample_count,
+                "total_duration_ms": 0,
+                "min_total_duration_ms": min_total_duration_ms,
+                "recommended_total_duration_ms": recommended_total_duration_ms,
                 "enrollment_state": "unknown",
                 "user_safe_status_summary": "Voice profile is required before completion.",
             }
@@ -1044,6 +1202,11 @@ class EnrollmentOrchestrator:
                 "voice_profile_id": voice_profile_id,
                 "sample_count": 0,
                 "min_samples": min_samples,
+                "recommended_sample_count": recommended_sample_count,
+                "robust_sample_count": robust_sample_count,
+                "total_duration_ms": 0,
+                "min_total_duration_ms": min_total_duration_ms,
+                "recommended_total_duration_ms": recommended_total_duration_ms,
                 "enrollment_state": "unknown",
                 "user_safe_status_summary": "Voice profile is not configured.",
             }
@@ -1054,6 +1217,11 @@ class EnrollmentOrchestrator:
                 "voice_profile_id": voice_profile_id,
                 "sample_count": int(existing_voice.sample_count),
                 "min_samples": min_samples,
+                "recommended_sample_count": recommended_sample_count,
+                "robust_sample_count": robust_sample_count,
+                "total_duration_ms": 0,
+                "min_total_duration_ms": min_total_duration_ms,
+                "recommended_total_duration_ms": recommended_total_duration_ms,
                 "enrollment_state": str(existing_voice.enrollment_state or "unknown"),
                 "user_safe_status_summary": "Voice profile is disabled.",
             }
@@ -1066,11 +1234,164 @@ class EnrollmentOrchestrator:
                 "voice_profile_id": voice_profile_id,
                 "sample_count": int(existing_voice.sample_count),
                 "min_samples": min_samples,
+                "recommended_sample_count": recommended_sample_count,
+                "robust_sample_count": robust_sample_count,
+                "total_duration_ms": 0,
+                "min_total_duration_ms": min_total_duration_ms,
+                "recommended_total_duration_ms": recommended_total_duration_ms,
                 "enrollment_state": str(existing_voice.enrollment_state or "unknown"),
                 "user_safe_status_summary": "Enrollment session is unavailable.",
             }
 
-        sample_count = len(enrollment_session.sample_items)
+        sample_items = list(enrollment_session.sample_items)
+        sample_count = len(sample_items)
+        total_duration_ms = 0
+        categories_seen: set[str] = set()
+        distances_seen: set[str] = set()
+        noise_seen: set[str] = set()
+        quality_failed_count = 0
+        low_signal_count = 0
+        clipped_audio_count = 0
+        excessive_noise_count = 0
+        validation_failed_count = 0
+
+        for sample in sample_items:
+            duration_raw = sample.get("recording_duration_ms")
+            try:
+                duration_ms = max(0, int(duration_raw)) if duration_raw is not None else 0
+            except (TypeError, ValueError):
+                duration_ms = 0
+            total_duration_ms += duration_ms
+
+            category = str(sample.get("prompt_category", "") or "").strip().lower()
+            if category:
+                categories_seen.add(category)
+
+            distance = str(sample.get("capture_distance", "") or "").strip().lower()
+            if distance:
+                distances_seen.add(distance)
+
+            noise = str(sample.get("capture_noise", "") or "").strip().lower()
+            if noise:
+                noise_seen.add(noise)
+                if noise in {"high", "noisy", "very_noisy", "excessive", "excessive_noise"}:
+                    excessive_noise_count += 1
+
+            validation_failed = bool(sample.get("validation_failed", False))
+            if validation_failed:
+                validation_failed_count += 1
+
+            findings_raw = sample.get("quality_findings")
+            findings = (
+                [str(item).strip().lower() for item in findings_raw if str(item).strip()]
+                if isinstance(findings_raw, (list, tuple, set))
+                else []
+            )
+            if any(item == "clipped_audio" for item in findings) or bool(sample.get("clipped_audio", False)):
+                clipped_audio_count += 1
+
+            quality_pass_raw = sample.get("quality_pass")
+            if quality_pass_raw is None:
+                score_raw = sample.get("quality_score")
+                if score_raw is None:
+                    quality_pass = True
+                else:
+                    try:
+                        score_value = float(score_raw)
+                        quality_pass = score_value >= DEFAULT_ENROLLMENT_QUALITY_SCORE_THRESHOLD
+                        if not quality_pass and clipped_audio_count == 0 and excessive_noise_count == 0:
+                            low_signal_count += 1
+                    except (TypeError, ValueError):
+                        quality_pass = False
+                        validation_failed_count += 1
+            else:
+                quality_pass = bool(quality_pass_raw)
+            if not quality_pass:
+                quality_failed_count += 1
+
+        missing_categories = sorted(
+            set(DEFAULT_REQUIRED_PROMPT_CATEGORIES) - categories_seen
+        )
+        missing_distances = sorted(
+            set(DEFAULT_REQUIRED_CAPTURE_DISTANCES) - distances_seen
+        )
+
+        retry_recommendations: list[dict[str, Any]] = []
+        if total_duration_ms < min_total_duration_ms:
+            retry_recommendations.append(
+                {
+                    "reason": "insufficient_duration",
+                    "retry_count": min(3, max(1, min_samples // 4)),
+                    "summary": "Capture additional speech to satisfy minimum usable duration.",
+                }
+            )
+        if missing_categories:
+            retry_recommendations.append(
+                {
+                    "reason": "missing_category_coverage",
+                    "retry_count": min(3, len(missing_categories)),
+                    "missing_categories": missing_categories,
+                    "summary": "Capture prompts from missing phrase categories.",
+                }
+            )
+        if "near_field" in missing_distances:
+            retry_recommendations.append(
+                {
+                    "reason": "missing_near_field_sample",
+                    "retry_count": 1,
+                    "summary": "Capture at least one additional near-field sample.",
+                }
+            )
+        if "mid_field" in missing_distances:
+            retry_recommendations.append(
+                {
+                    "reason": "missing_mid_field_sample",
+                    "retry_count": 1,
+                    "summary": "Capture at least one additional mid-field sample.",
+                }
+            )
+        if excessive_noise_count > 0:
+            retry_recommendations.append(
+                {
+                    "reason": "excessive_noise",
+                    "retry_count": min(3, excessive_noise_count),
+                    "summary": "Retry samples in a quieter environment to reduce noise.",
+                }
+            )
+        if clipped_audio_count > 0:
+            retry_recommendations.append(
+                {
+                    "reason": "clipped_audio",
+                    "retry_count": min(3, clipped_audio_count),
+                    "summary": "Retry clipped samples with lower input gain and steady speech.",
+                }
+            )
+        if low_signal_count > 0:
+            retry_recommendations.append(
+                {
+                    "reason": "low_signal",
+                    "retry_count": min(3, low_signal_count),
+                    "summary": "Retry weak samples with clearer, stronger speech input.",
+                }
+            )
+        if validation_failed_count > 0:
+            retry_recommendations.append(
+                {
+                    "reason": "validation_failed",
+                    "retry_count": min(2, validation_failed_count),
+                    "summary": "Retry samples that failed validation requirements.",
+                }
+            )
+        last_generation_failure = str(enrollment_session.metadata.get("last_generation_failure", "") or "").strip()
+        if last_generation_failure:
+            retry_recommendations.append(
+                {
+                    "reason": "generation_failed",
+                    "retry_count": 1,
+                    "summary": "Retry profile generation after capturing any additional requested samples.",
+                }
+            )
+
         enrollment_state = str(enrollment_session.state or "").strip()
         if sample_count < min_samples:
             return {
@@ -1079,8 +1400,106 @@ class EnrollmentOrchestrator:
                 "voice_profile_id": voice_profile_id,
                 "sample_count": sample_count,
                 "min_samples": min_samples,
+                "recommended_sample_count": recommended_sample_count,
+                "robust_sample_count": robust_sample_count,
+                "total_duration_ms": total_duration_ms,
+                "min_total_duration_ms": min_total_duration_ms,
+                "recommended_total_duration_ms": recommended_total_duration_ms,
+                "missing_prompt_categories": missing_categories,
+                "missing_capture_distances": missing_distances,
+                "quality_failed_count": quality_failed_count,
+                "retry_recommendations": retry_recommendations,
                 "enrollment_state": enrollment_state or "unknown",
                 "user_safe_status_summary": "More samples are required before completion.",
+            }
+
+        if total_duration_ms < min_total_duration_ms:
+            return {
+                "ready": False,
+                "reason_code": "insufficient_duration",
+                "voice_profile_id": voice_profile_id,
+                "sample_count": sample_count,
+                "min_samples": min_samples,
+                "recommended_sample_count": recommended_sample_count,
+                "robust_sample_count": robust_sample_count,
+                "total_duration_ms": total_duration_ms,
+                "min_total_duration_ms": min_total_duration_ms,
+                "recommended_total_duration_ms": recommended_total_duration_ms,
+                "missing_prompt_categories": missing_categories,
+                "missing_capture_distances": missing_distances,
+                "quality_failed_count": quality_failed_count,
+                "retry_recommendations": retry_recommendations,
+                "enrollment_state": enrollment_state or "unknown",
+                "user_safe_status_summary": "More usable speech duration is required before completion.",
+            }
+
+        if missing_categories:
+            return {
+                "ready": False,
+                "reason_code": "missing_category_coverage",
+                "voice_profile_id": voice_profile_id,
+                "sample_count": sample_count,
+                "min_samples": min_samples,
+                "recommended_sample_count": recommended_sample_count,
+                "robust_sample_count": robust_sample_count,
+                "total_duration_ms": total_duration_ms,
+                "min_total_duration_ms": min_total_duration_ms,
+                "recommended_total_duration_ms": recommended_total_duration_ms,
+                "missing_prompt_categories": missing_categories,
+                "missing_capture_distances": missing_distances,
+                "quality_failed_count": quality_failed_count,
+                "retry_recommendations": retry_recommendations,
+                "enrollment_state": enrollment_state or "unknown",
+                "user_safe_status_summary": "Capture more diverse phrase categories before completion.",
+            }
+
+        if missing_distances:
+            reason_code = "missing_near_field_sample" if "near_field" in missing_distances else "missing_mid_field_sample"
+            return {
+                "ready": False,
+                "reason_code": reason_code,
+                "voice_profile_id": voice_profile_id,
+                "sample_count": sample_count,
+                "min_samples": min_samples,
+                "recommended_sample_count": recommended_sample_count,
+                "robust_sample_count": robust_sample_count,
+                "total_duration_ms": total_duration_ms,
+                "min_total_duration_ms": min_total_duration_ms,
+                "recommended_total_duration_ms": recommended_total_duration_ms,
+                "missing_prompt_categories": missing_categories,
+                "missing_capture_distances": missing_distances,
+                "quality_failed_count": quality_failed_count,
+                "retry_recommendations": retry_recommendations,
+                "enrollment_state": enrollment_state or "unknown",
+                "user_safe_status_summary": "Capture samples across required recording conditions before completion.",
+            }
+
+        if quality_failed_count > 0:
+            if validation_failed_count > 0:
+                reason_code = "validation_failed"
+            elif excessive_noise_count > 0:
+                reason_code = "excessive_noise"
+            elif clipped_audio_count > 0:
+                reason_code = "clipped_audio"
+            else:
+                reason_code = "low_signal"
+            return {
+                "ready": False,
+                "reason_code": reason_code,
+                "voice_profile_id": voice_profile_id,
+                "sample_count": sample_count,
+                "min_samples": min_samples,
+                "recommended_sample_count": recommended_sample_count,
+                "robust_sample_count": robust_sample_count,
+                "total_duration_ms": total_duration_ms,
+                "min_total_duration_ms": min_total_duration_ms,
+                "recommended_total_duration_ms": recommended_total_duration_ms,
+                "missing_prompt_categories": missing_categories,
+                "missing_capture_distances": missing_distances,
+                "quality_failed_count": quality_failed_count,
+                "retry_recommendations": retry_recommendations,
+                "enrollment_state": enrollment_state or "unknown",
+                "user_safe_status_summary": "Retry low-quality samples before completion.",
             }
 
         if enrollment_state and enrollment_state not in {
@@ -1096,6 +1515,15 @@ class EnrollmentOrchestrator:
                 "voice_profile_id": voice_profile_id,
                 "sample_count": sample_count,
                 "min_samples": min_samples,
+                "recommended_sample_count": recommended_sample_count,
+                "robust_sample_count": robust_sample_count,
+                "total_duration_ms": total_duration_ms,
+                "min_total_duration_ms": min_total_duration_ms,
+                "recommended_total_duration_ms": recommended_total_duration_ms,
+                "missing_prompt_categories": missing_categories,
+                "missing_capture_distances": missing_distances,
+                "quality_failed_count": quality_failed_count,
+                "retry_recommendations": retry_recommendations,
                 "enrollment_state": enrollment_state,
                 "user_safe_status_summary": "Enrollment session is not in a buildable state.",
             }
@@ -1109,6 +1537,15 @@ class EnrollmentOrchestrator:
                 "voice_profile_id": voice_profile_id,
                 "sample_count": sample_count,
                 "min_samples": min_samples,
+                "recommended_sample_count": recommended_sample_count,
+                "robust_sample_count": robust_sample_count,
+                "total_duration_ms": total_duration_ms,
+                "min_total_duration_ms": min_total_duration_ms,
+                "recommended_total_duration_ms": recommended_total_duration_ms,
+                "missing_prompt_categories": missing_categories,
+                "missing_capture_distances": missing_distances,
+                "quality_failed_count": quality_failed_count,
+                "retry_recommendations": retry_recommendations,
                 "enrollment_state": enrollment_state or "unknown",
                 "user_safe_status_summary": "Enrollment is ready for profile completion; storage cleanup readiness will be rechecked during build.",
             }
@@ -1119,6 +1556,15 @@ class EnrollmentOrchestrator:
             "voice_profile_id": voice_profile_id,
             "sample_count": sample_count,
             "min_samples": min_samples,
+            "recommended_sample_count": recommended_sample_count,
+            "robust_sample_count": robust_sample_count,
+            "total_duration_ms": total_duration_ms,
+            "min_total_duration_ms": min_total_duration_ms,
+            "recommended_total_duration_ms": recommended_total_duration_ms,
+            "missing_prompt_categories": missing_categories,
+            "missing_capture_distances": missing_distances,
+            "quality_failed_count": quality_failed_count,
+            "retry_recommendations": retry_recommendations,
             "enrollment_state": enrollment_state or "unknown",
             "user_safe_status_summary": "Enrollment is ready for profile completion.",
         }
@@ -1133,7 +1579,7 @@ class EnrollmentOrchestrator:
         storage = ConciergeStorage(self.hass)
         state = await storage.async_load_state()
         voice_profile_id = str(call_data["voice_profile_id"])
-        min_samples = max(1, int(call_data.get("min_samples", DEFAULT_ENROLLMENT_TARGET_SAMPLE_COUNT)))
+        min_samples = max(1, int(call_data.get("min_samples", DEFAULT_ENROLLMENT_MIN_SAMPLE_COUNT)))
         existing_voice = state.voice_profiles.get(voice_profile_id)
         if existing_voice is None:
             raise vol.Invalid("voice_profile_id is not configured")
@@ -1153,6 +1599,44 @@ class EnrollmentOrchestrator:
             person_id = session_person_id
 
         sample_count = len(enrollment_session.sample_items)
+        generation_subject_id = person_id or str(enrollment_session.person_id or "").strip() or voice_profile_id
+
+        generation = await self._async_generate_voiceprint(
+            voice_profile_id=voice_profile_id,
+            subject_id=generation_subject_id,
+            session_id=enrollment_session.session_id,
+            sample_items=list(enrollment_session.sample_items),
+        )
+        if not generation["success"]:
+            generation_reason = generation["reason_code"]
+            failure_category = generation["failure_category"]
+            await storage.async_update_enrollment_session(
+                session_id=enrollment_session.session_id,
+                metadata={
+                    **dict(enrollment_session.metadata),
+                    "last_generation_failure": generation_reason or "generation_failed",
+                },
+            )
+            if "validation" in generation_reason or "validation" in failure_category:
+                raise vol.Invalid("completion_not_ready: validation_failed")
+            raise vol.Invalid("completion_not_ready: generation_failed")
+
+        voiceprint_id = str(generation.get("voiceprint_id", "") or "").strip()
+        if not voiceprint_id:
+            await storage.async_update_enrollment_session(
+                session_id=enrollment_session.session_id,
+                metadata={
+                    **dict(enrollment_session.metadata),
+                    "last_generation_failure": "generation_failed",
+                },
+            )
+            raise vol.Invalid("completion_not_ready: generation_failed")
+
+        status_projection = await self._async_get_voiceprint_status(voiceprint_id)
+        lifecycle_status = str(status_projection.get("lifecycle_status", "") or "").strip().lower()
+        status_summary = str(status_projection.get("status_summary", "") or "").strip()
+        voiceprint_active = bool(status_projection.get("active", False))
+
         retained_sample_items = [
             {
                 key: value
@@ -1163,8 +1647,6 @@ class EnrollmentOrchestrator:
         ]
 
         now_iso = datetime.now(timezone.utc).isoformat()
-        embedding_id = f"spk_{uuid4().hex}"
-        confidence = _voice_confidence_for_sample_count(sample_count)
 
         enrollment_session = await storage.async_update_enrollment_session(
             session_id=enrollment_session.session_id,
@@ -1172,6 +1654,8 @@ class EnrollmentOrchestrator:
             sample_items=retained_sample_items,
         )
         enrollment_session = enrollment_session_mark_profile_built(enrollment_session, built_at=now_iso)
+        success_metadata = dict(enrollment_session.metadata)
+        success_metadata.pop("last_generation_failure", None)
         enrollment_session = await storage.async_update_enrollment_session(
             session_id=enrollment_session.session_id,
             state_name=enrollment_session.state,
@@ -1180,6 +1664,7 @@ class EnrollmentOrchestrator:
             enrollment_started_at=enrollment_session.enrollment_started_at,
             last_sample_at=enrollment_session.last_sample_at,
             last_built_at=enrollment_session.last_built_at,
+            metadata=success_metadata,
         )
         await self.sync_manifest(enrollment_session, target_sample_count=min_samples)
 
@@ -1189,12 +1674,14 @@ class EnrollmentOrchestrator:
             name=existing_voice.name,
             session=enrollment_session,
             enrollment_source=existing_voice.enrollment_source,
-            speaker_embedding_id=embedding_id,
-            attribution_confidence=confidence,
+            speaker_embedding_id=voiceprint_id,
+            attribution_confidence=existing_voice.attribution_confidence,
             disabled=False,
             consent=dict(existing_voice.consent),
             tts_voice=existing_voice.tts_voice,
         )
+        if lifecycle_status in {"active", "pending", "inactive", "superseded", "failed", "retired"}:
+            updated.enrollment_state = "trained" if voiceprint_active else updated.enrollment_state
         await storage.async_update_voice_profile(updated)
         enrollment_session, cleanup_summary = await self.execute_cleanup(
             storage,
@@ -1219,6 +1706,9 @@ class EnrollmentOrchestrator:
             "person_id": person_id or None,
             "cleanup_result_code": cleanup_summary["cleanup_result_code"],
             "completion_state": str(enrollment_session.state),
+            "voiceprint_id": voiceprint_id,
+            "voiceprint_revision": generation.get("revision"),
+            "voiceprint_status_summary": status_summary,
             "ready_for_recovery": False,
         }
 
@@ -1628,6 +2118,20 @@ class EnrollmentOrchestrator:
             sample_payload["recording_mime_type"] = str(call_data["recording_mime_type"])
         if call_data.get("recording_size_bytes") is not None:
             sample_payload["recording_size_bytes"] = int(call_data["recording_size_bytes"])
+        if call_data.get("prompt_id"):
+            sample_payload["prompt_id"] = str(call_data["prompt_id"])
+        if call_data.get("prompt_order") is not None:
+            sample_payload["prompt_order"] = int(call_data["prompt_order"])
+        if call_data.get("prompt_category"):
+            sample_payload["prompt_category"] = str(call_data["prompt_category"])
+        if call_data.get("prompt_length_bucket"):
+            sample_payload["prompt_length_bucket"] = str(call_data["prompt_length_bucket"])
+        if call_data.get("capture_distance"):
+            sample_payload["capture_distance"] = str(call_data["capture_distance"])
+        if call_data.get("capture_noise"):
+            sample_payload["capture_noise"] = str(call_data["capture_noise"])
+        if call_data.get("quality_pass") is not None:
+            sample_payload["quality_pass"] = bool(call_data["quality_pass"])
 
         enrollment_session = await storage.async_get_latest_enrollment_session_for_voice_profile(voice_profile_id)
         if enrollment_session is None:
