@@ -4,301 +4,517 @@
 ## How It Works
 ![Concierge Flow](custom_components/concierge/brand/Concierge-Flow.png)
 
+
 # 🏠 Concierge
 
-**Concierge is the Homes Platform interaction and orchestration integration for Home Assistant, delivering room-aware, deterministic, and explainable smart home experiences.**
+**Concierge is the Household Coordination Engine for the Homes That Behave Well platform.**
 
-It connects devices, rooms, signals, and global context into a unified interaction layer so the home can respond clearly, consistently, and without guesswork.
+Concierge transforms governed household knowledge into deterministic, explainable, room-aware experiences.
 
-***
+Rather than controlling devices directly, Concierge coordinates context, capabilities, experiences, identity, continuity, occupancy, restoration, messaging, productivity, and household awareness into a unified interaction system.
 
-## ✨ What Concierge Does
+---
+
+# ⚠ Current Release Status
+
+## Concierge V1 (Current Release)
+
+The current release focuses on:
+
+- Room-aware interactions
+- Alias-driven execution
+- Scene activation
+- Signals
+- Global context
+- Dashboard experiences
+- Deterministic execution
+
+## Concierge V2 (Roadmap Vision)
+
+The architecture documented in this repository represents the future Concierge V2 platform.
+
+Coordinator V2 expands Concierge into a complete household coordination engine capable of consuming:
+
+- Vocabulary
+- Capabilities
+- Experiences
+- Continuity
+- Affinity
+- Restoration
+- Occupancy
+- Presence
+- Messaging
+- Household Memory
+- Productivity Context
+- Provenance
+
+---
+
+# 🌎 Platform Position
+
+Homes That Behave Well separates responsibility across several platform services.
+
+```text
+Foundation
+    What is true?
+
+Asset Intelligence
+    What matters?
+
+Voice Identity
+    Who is interacting?
+
+Concierge
+    What should happen?
+```
+
+Concierge does not define truth.
+
+Concierge consumes governed context and determines how the home should respond.
+
+---
+
+# 🧠 Coordinator V2
+
+Coordinator V2 is the runtime heart of Concierge.
+
+Coordinator consumes governed platform knowledge and transforms that knowledge into household behavior.
+
+Coordinator consumes:
+
+- Room Vocabulary
+- Capability Projections
+- Experiences
+- Person Continuity
+- Person-Room Affinity
+- Experience Restoration
+- Occupancy
+- Presence
+- Messaging Context
+- Productivity Context
+- Household Provenance
+
+Coordinator does not own governance.
+
+Governance remains in **Homes That Behave Well (HTBW)**.
+
+---
+
+# ✨ What Concierge Does
 
 Concierge bridges the gap between:
 
-* what your home knows
-* what your home can do
-* what you actually experience
+- what the home knows
+- what the home can do
+- what the household needs
+- what the household experiences
 
-It provides a unified layer that brings clarity, speed, and predictability to your smart home.
+It provides a deterministic coordination layer that creates predictable household behavior.
 
-***
+---
 
-### 🧠 Context-Aware Interactions
+# 🧠 Context-Aware Interactions
 
 Concierge responds based on:
 
-* the room you are in
-* what devices and systems exist there
-* what is happening in your home
+- room context
+- occupancy
+- presence
+- household state
+- experience eligibility
+- household priorities
 
-No guessing. No scanning. No ambiguity.
+Every interaction is grounded in known context.
 
-***
+No runtime guessing.
 
-### ⚡ Fast, Deterministic Actions
+No ambiguous device selection.
 
-Concierge executes instantly because it already knows what to do.
+No uncontrolled discovery.
 
-* No runtime discovery
-* No layered automation delays
-* No inconsistent behavior
+---
+
+# ⚡ Deterministic Planning and Execution
+
+Concierge is designed around predictable behavior.
+
+Execution follows governed models rather than runtime inference.
 
 Examples:
 
-“close the shades” → executes configured scene immediately  
-“movie time” → triggers a scene via alias
+```text
+Close the shades
+```
 
-***
+→ Executes the appropriate room capability.
 
-### 🏠 Room-Based Experience
+```text
+Movie time
+```
 
-Every interaction is grounded in **room context**:
+→ Selects the experience appropriate to the room, occupancy, and context.
 
-* devices and sensors in that room
-* scenes and execution behavior
-* signals relevant to that space
+```text
+What should I know?
+```
 
-You do not control devices—you interact with a space.
+→ Produces a synthesized household briefing.
 
-***
+---
 
-### 🌍 Whole-Home Awareness
+# 🏠 Room-Aware by Design
 
-Concierge integrates global context:
+Every experience begins with room context.
 
-* weather
-* news
-* calendar
-* email summaries
-* household signals (laundry, dishwasher, etc.)
+Concierge understands:
 
-So your home can answer:
+- Rooms
+- Merged Rooms
+- Composite Rooms
+- Floors
+- Occupancy Zones
 
-* “what should I know?”
-* “what’s happening today?”
-* “is anything done?”
+The household interacts with places.
 
-***
+Not devices.
 
-### 📊 Unified Voice + UI Experience
+---
 
-Concierge connects:
+# 👤 Person-Aware Experiences
 
-* Voice (Home Assistant Assist, alias-first)
-* UI (room dashboards and interaction panels)
-* System state (signals and context)
+Through Voice Identity and governed household models, Concierge can consume:
 
-Everything stays in sync.
+- Identity attribution
+- Room affinity
+- Communication preferences
+- Restoration preferences
+- Household continuity
 
-***
+This allows the home to adapt while remaining deterministic and explainable.
 
-## 🧩 Key Concepts
+---
 
-### Signals
+# 🔄 Continuity and Restoration
 
-Stateful conditions in the home:
+Concierge can preserve continuity across interactions.
 
-* laundry complete
-* upcoming meetings
-* shopping list
+Examples:
 
-***
+- Restore media
+- Restore lighting scenes
+- Restore work context
+- Restore household experiences
 
-### Global Context
+Every restoration decision remains explainable.
 
-Informational awareness:
+Questions the platform should always answer:
 
-* weather
-* time
-* news
-* email summaries
+```text
+Why was this restored?
+Why wasn't it restored?
+Why was restoration suppressed?
+```
 
-***
+---
 
-### Interactions
+# 🚶 Occupancy and Presence Awareness
 
-What the system surfaces:
+Concierge consumes:
 
-* actions you can take
-* things you should know
-* guided workflows
+- Occupancy state
+- Presence state
+- Confidence state
+- Multi-occupant context
 
-***
+This allows decisions to be informed by:
 
-### Execution Patterns
+- Who is present
+- Where they are
+- Confidence levels
+- Household composition
 
-How actions happen:
+---
 
-1. Scene (preferred)
-2. Group
-3. Entity fallback
+# 🌍 Household Awareness
 
-Always fast. Always predictable.
+Concierge combines:
 
-***
+- Weather
+- Calendar
+- Email summaries
+- News
+- Household signals
+- Tasks
+- Shopping state
+- Productivity context
 
-## 🧠 Design Principles
+to answer questions such as:
 
-Concierge follows the **Homes That Behave Well** philosophy:
+```text
+What should I know?
 
-* Calm by default
-* Deterministic behavior
-* Explainable decisions
-* Local-first execution
-* Configuration over discovery
+What happened while I was away?
 
-***
+What still needs attention?
+```
 
-## 🚫 Not Just Another Voice Assistant
+---
 
-Concierge is **not Alexa or Google Assistant**.
+# 💬 Messaging and Notification Discipline
 
-It does NOT:
+Concierge follows a calm-by-default philosophy.
 
-* guess what you meant
-* scan devices at runtime
-* rely on cloud-first interpretation
+Messaging behavior is:
 
-It DOES:
+- Deliberate
+- Explainable
+- Occupant-aware
+- Room-aware
+- Interruption-aware
 
-* understand your configured home
-* execute immediately
-* explain what it is doing
+Concierge focuses on:
 
-***
+- Useful notifications
+- Escalation when appropriate
+- Acknowledgement awareness
+- Household coordination
 
-## 🛠 Configuration Model
+---
 
-Concierge separates configuration into two layers:
+# 📋 Household Productivity
 
-### ⚙️ System Configuration (Integration Settings / Gear Icon)
+Concierge can surface governed productivity experiences such as:
 
-* AI providers (optional)
-* External integrations (M365, etc.)
-* Authentication and system behavior
+- Calendar awareness
+- Household briefings
+- Task coordination
+- Shopping coordination
+- Status synthesis
+- Knowledge experiences
 
-***
+Calendar and task systems remain systems of record.
 
-### 🏠 UI Configuration (Concierge Interface)
+Concierge consumes context.
 
-* rooms and composite rooms
-* scenes and aliases
-* signals and global context
-* execution behavior
+It does not replace provider systems.
 
-***
+---
 
-## 🧪 Example Interactions
+# 🧠 Household Memory and Explainability
 
-### Voice
+Concierge is designed to explain itself.
 
-User: close the shades  
-→ scene executes immediately
+Core questions include:
 
-User: what should I know?  
-→ calendar + weather + signals combined
+```text
+What happened?
 
-***
+Why did it happen?
 
-### UI (Room Panel)
+Why here?
 
-Great Room
+Why now?
 
-Context
+Why for this person?
 
-* Weather
-* News
+Why didn't it happen?
+```
 
-Signals
+Explainability is a first-class platform concern.
 
-* Laundry complete
+---
 
-Actions
+# 🧩 Core Concepts
 
-* Close shades
-* Movie mode
+## Vocabulary
 
-***
+Defines how the household refers to spaces and experiences.
 
-## ⚡ Performance by Design
+## Capabilities
 
-Concierge is fast because it:
+What the household can do.
 
-* eliminates runtime discovery
-* uses precomputed configuration
-* prefers single-call execution
-* bypasses unnecessary layers
+## Experiences
 
-The system never hesitates once intent is known.
+Meaningful household outcomes.
 
-***
+## Continuity
 
-## 📦 Repository Structure
+What was happening previously.
 
-custom\_components/concierge/  
-services.py  
-coordinator.py  
-store.py
+## Affinity
 
-docs/  
-contracts/  
-models/  
-patterns/  
-architecture/  
+Household preferences and context.
+
+## Restoration
+
+How previous experiences resume.
+
+## Occupancy
+
+Who is present and where.
+
+## Messaging
+
+How the home communicates.
+
+## Provenance
+
+Who did what, when, where, and how.
+
+---
+
+# 🧠 Design Principles
+
+Concierge follows the Homes That Behave Well philosophy:
+
+- Calm by default
+- Deterministic behavior
+- Explainable decisions
+- Local-first execution
+- Governed architecture
+- Configuration over discovery
+- Household-facing outcomes over implementation compatibility
+
+---
+
+# 🚫 What Concierge Is Not
+
+Concierge is not:
+
+- Alexa
+- Google Assistant
+- A generic LLM wrapper
+- A device discovery engine
+- A cloud-first orchestration engine
+
+Concierge does not:
+
+- Guess device targets
+- Scan devices during execution
+- Redefine governance
+- Replace systems of record
+
+---
+
+# 🏗 Governance Model
+
+## Homes That Behave Well (HTBW) Owns
+
+- Architecture
+- ADRs
+- Contracts
+- Models
+- Governance
+- Canonical definitions
+
+## Concierge Owns
+
+- Consumption
+- Resolution
+- Orchestration
+- Planning
+- Routing
+- Execution behavior
+
+Coordinator V2 consumes governance.
+
+It does not define governance.
+
+---
+
+# 📦 Repository Structure
+
+```text
+custom_components/concierge/
+
+coordinator/
+consumption/
+vocabulary/
+capability/
+experience/
+continuity/
+affinity/
+restoration/
+occupancy/
+presence/
+messaging/
+memory/
+productivity/
+diagnostics/
+explainability/
+
+docs/
+
+architecture/
+contracts/
+models/
+governance/
+patterns/
 philosophy/
+```
 
-***
+---
 
-## 🚀 Development
+# 🚀 Development
 
-### Install dependencies
+## Install Dependencies
 
+```bash
 pip install -r requirements-dev.txt
+```
 
-***
+## Run Tests
 
-### Run tests
-
+```bash
 pytest -q
+```
 
-***
+---
 
-## ✅ Release Requirements
+# ✅ Release Requirements
 
-* Update version in `manifest.json`
-* Pass HACS validation
-* Pass hassfest
-* Pass tests
-* Tag and publish release
+- Pass hassfest
+- Pass HACS validation
+- Pass tests
+- Pass architecture review
+- Pass ownership review
+- Pass readiness review
+- Publish release
 
-***
+---
 
-## 🏁 Vision
+# 🏁 Vision
 
-Concierge is not about controlling your home.
+Concierge is not a smart-home controller.
 
-It is about creating a home that:
+Concierge is the household coordination engine for Homes That Behave Well.
 
-* understands context
-* behaves predictably
-* explains itself
+It combines governed household knowledge, identity, context, occupancy, continuity, experiences, restoration, messaging, productivity, memory, and provenance into deterministic household behavior.
 
-A home that simply works.
+A home that understands context.
 
-***
+A home that behaves predictably.
 
-## 🧭 Learn More
+A home that explains itself.
 
-Explore the full architecture:
+A home that behaves well.
 
-* /docs/philosophy/
-* /docs/contracts/
-* /docs/patterns/
-* /docs/architecture/
+---
 
-***
+# 🧭 Learn More
+
+Explore the platform architecture:
+
+```text
+/docs/architecture/
+/docs/contracts/
+/docs/models/
+/docs/governance/
+/docs/patterns/
+/docs/philosophy/
+```
+
+---
 
 **Concierge is part of the Homes That Behave Well platform.**
-
-***
