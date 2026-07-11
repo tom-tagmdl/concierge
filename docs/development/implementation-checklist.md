@@ -9,8 +9,69 @@ Use it at the start of every development session.
 1. Review open items in GitHub Project view: Now.
 2. Pick one vertical slice that can reach done.
 3. Confirm contract alignment with Homes That Behave Well.
-4. Implement backend + UI + tests for the same slice.
-5. Move item to Done only after acceptance checks pass.
+4. Confirm Room Vocabulary ownership remains external.
+5. Confirm Coordinator acts only as consumer.
+6. Confirm implementation aligns with `docs/governance/room-vocabulary-consumption-architecture.md`.
+7. Confirm vocabulary resolution remains deterministic.
+8. Confirm ambiguity handling is documented.
+9. Confirm ownership remains external.
+10. Confirm implementation aligns with `docs/governance/runtime-vocabulary-resolution-architecture.md`.
+11. Confirm room context remains governed input.
+12. Confirm room-aware behavior is deterministic.
+13. Confirm ambiguity handling remains explainable.
+14. Confirm ownership remains external.
+15. Confirm implementation aligns with `docs/governance/room-context-aware-vocabulary-consumption-architecture.md`.
+16. Confirm merged-room vocabulary is not treated as a separate vocabulary system.
+17. Confirm merged-room scope expansion behavior is documented.
+18. Confirm merged-room ambiguity/conflict handling remains deterministic and explainable.
+19. Confirm ownership remains external for merged-room definitions and membership.
+20. Confirm implementation aligns with `docs/governance/merged-room-vocabulary-consumption-architecture.md`.
+21. Confirm composite-room vocabulary is not treated as a separate vocabulary system.
+22. Confirm hierarchy traversal behavior is deterministic and documented.
+23. Confirm scope expansion behavior for composite and floor scopes is documented.
+24. Confirm ambiguity handling for composite/hierarchy conflicts remains explainable.
+25. Confirm ownership remains external for composite, zone, floor, and hierarchy definitions.
+26. Confirm implementation aligns with `docs/governance/composite-room-vocabulary-consumption-architecture.md`.
+27. Confirm validation categories are documented for affected vocabulary/scope paths.
+28. Confirm duplicate, conflict, and orphan detection coverage is documented.
+29. Confirm validation outcomes are classified as PASS/WARNING/ERROR/BLOCKED where applicable.
+30. Confirm diagnostics and explainability participation for validation outcomes is documented.
+31. Confirm ownership boundaries remain external while validating consumption.
+32. Confirm implementation aligns with `docs/governance/vocabulary-validation-framework.md`.
+33. Confirm explanation categories are documented for affected vocabulary/scope decisions.
+34. Confirm machine-readable explanation structures are documented for affected decision paths.
+35. Confirm human-readable explanation structures are documented for operator-facing scenarios.
+36. Confirm validation outcomes are reflected in explainability when applicable.
+37. Confirm diagnostics surfaces expose explanation references where required.
+38. Confirm ownership boundaries remain external while explaining consumption decisions.
+39. Confirm implementation aligns with `docs/governance/vocabulary-explainability-framework.md`.
+40. Confirm vocabulary discovery remains room-aware and capability-aware.
+41. Confirm guest-safe discovery filtering is documented.
+42. Confirm discovery outputs do not expose internal identifiers or platform internals.
+43. Confirm discovery filtering and visibility decisions are explainable.
+44. Confirm diagnostics surfaces expose discovery filtering decisions.
+45. Confirm ownership boundaries remain external while providing discovery outputs.
+46. Confirm implementation aligns with `docs/governance/vocabulary-discovery-framework.md`.
+47. Confirm diagnostics categories are documented for affected vocabulary/scope decisions.
+48. Confirm lookup, alias, room-resolution, merged-room, and composite traces are documented.
+49. Confirm conflict and validation trace paths are documented with severity outcomes.
+50. Confirm diagnostics traces link to explainability and validation references.
+51. Confirm troubleshooting workflow is documented for reported issues.
+52. Confirm ownership boundaries remain external while exposing diagnostics outputs.
+53. Confirm implementation aligns with `docs/governance/vocabulary-diagnostics-framework.md`.
+54. Before beginning E5: review E4 readiness determination.
+55. Before beginning E5: verify E5 authorization is documented.
+56. Before beginning E5: verify no vocabulary ownership drift unresolved.
+57. Confirm preserved Concierge V1 household-facing outcomes remain intact per `docs/governance/concierge-v1-outcome-preservation-baseline.md`.
+58. If merged-room behavior may be affected, verify parity against `docs/governance/merged-room-outcome-preservation-contract.md`.
+59. If composite-room, floor-scope, zone-scope, whole-house-scope, or hierarchy traversal behavior may be affected, verify parity against `docs/governance/composite-room-scope-outcome-preservation-contract.md`.
+60. If execution hierarchy, room-level execution, merged-room execution, composite-room execution, floor-level execution, or whole-house execution behavior may be affected, verify parity against `docs/governance/execution-hierarchy-outcome-preservation-contract.md`.
+61. If global context, home status, occupancy references, shared context, environmental context, platform state, signals, or household-summary behavior may be affected, verify parity against `docs/governance/global-context-outcome-preservation-contract.md`.
+62. Confirm affected V1 household-facing outcomes are mapped in `docs/governance/v1-to-v2-capability-parity-matrix.md` before implementation.
+63. Complete applicable checks from `docs/governance/v1-outcome-regression-checklist.md` before closing any implementation issue that affects preserved V1 household-facing outcomes.
+64. Confirm E3a preservation readiness review has no blocking findings.
+65. Implement backend + UI + tests for the same slice.
+66. Move item to Done only after acceptance checks pass.
 
 ## Definition of Done
 
