@@ -17,3 +17,17 @@
 - #371 - P3-R6-E14-04 Productivity coordination implementation
 - #372 - P3-R6-E14-05 Provenance diagnostics and explainability implementation
 - #373 - P3-R6-VAL-01 Release 6 governed implementation validation
+
+## Authority Source Hardening
+
+A Phase 3 authority-source hardening pass was performed across the canonical Phase 3 backlog.
+
+Implementation issues were reviewed against canonical HTBW ADRs, contracts, and models in the homes_that_behave_well repository.
+
+Supporting source references from voice_identity and asset_intelligence were added where relevant.
+
+No missing authority sources were invented.
+
+No implementation code was changed.
+
+No roadmap scope was expanded.

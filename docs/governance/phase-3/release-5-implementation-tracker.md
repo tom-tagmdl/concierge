@@ -17,3 +17,17 @@
 - #359 - P3-R5-E12-05 Config flow and options flow readiness implementation evidence
 - #360 - P3-R5-E12-06 Testing, migration, release, packaging, and documentation readiness implementation evidence
 - #361 - P3-R5-VAL-01 Release 5 governed implementation validation
+
+## Authority Source Hardening
+
+A Phase 3 authority-source hardening pass was performed across the canonical Phase 3 backlog.
+
+Implementation issues were reviewed against canonical HTBW ADRs, contracts, and models in the homes_that_behave_well repository.
+
+Supporting source references from voice_identity and asset_intelligence were added where relevant.
+
+No missing authority sources were invented.
+
+No implementation code was changed.
+
+No roadmap scope was expanded.

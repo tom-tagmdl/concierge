@@ -19,3 +19,17 @@
 - #336 - P3-R3-E8A-04 Multi-occupant behavior implementation
 - #337 - P3-R3-E8A-05 Occupancy/presence diagnostics and explainability implementation
 - #338 - P3-R3-VAL-01 Release 3 governed implementation validation
+
+## Authority Source Hardening
+
+A Phase 3 authority-source hardening pass was performed across the canonical Phase 3 backlog.
+
+Implementation issues were reviewed against canonical HTBW ADRs, contracts, and models in the homes_that_behave_well repository.
+
+Supporting source references from voice_identity and asset_intelligence were added where relevant.
+
+No missing authority sources were invented.
+
+No implementation code was changed.
+
+No roadmap scope was expanded.

@@ -17,3 +17,17 @@
 - #310 - P3-R1-E4-03 Asset vocabulary and Asset Intelligence handoff implementation
 - #311 - P3-R1-E4-04 Vocabulary diagnostics and explainability implementation
 - #312 - P3-R1-VAL-01 Release 1 governed implementation validation
+
+## Authority Source Hardening
+
+A Phase 3 authority-source hardening pass was performed across the canonical Phase 3 backlog.
+
+Implementation issues were reviewed against canonical HTBW ADRs, contracts, and models in the homes_that_behave_well repository.
+
+Supporting source references from voice_identity and asset_intelligence were added where relevant.
+
+No missing authority sources were invented.
+
+No implementation code was changed.
+
+No roadmap scope was expanded.
