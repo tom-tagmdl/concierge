@@ -157,6 +157,9 @@ Diagnostics expose:
 - discovery filtering
 - capability filtering
 - visibility decisions
+- guest-safe discovery visibility decisions
+- Asset Intelligence-related vocabulary discovery visibility decisions
+- future/non-E4 surface exclusion decisions
 
 ## Context Assembly Integration
 Mapped to CF2.

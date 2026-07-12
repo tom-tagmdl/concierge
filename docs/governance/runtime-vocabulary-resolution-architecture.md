@@ -236,10 +236,15 @@ Vocabulary diagnostics participation is defined in:
 
 Diagnostics must expose:
 - lookup results
+- match decisions
 - conflicts
 - ambiguity
 - failed matches
 - stale data
+
+Diagnostics must include runtime lookup, match, conflict, and deterministic resolution traces through:
+
+- `docs/governance/vocabulary-diagnostics-framework.md`
 
 ## Ownership Matrix
 | Area | Authority | Coordinator Role |

@@ -169,6 +169,10 @@ Diagnostics must expose:
 - merged-room ambiguity/conflict outcomes
 - merged-room scope expansion outcomes
 
+Merged-room diagnostics must align with the merged-room trace architecture in:
+
+- `docs/governance/vocabulary-diagnostics-framework.md`
+
 ## Ownership Matrix
 | Area | Authority | Coordinator Role |
 |---|---|---|

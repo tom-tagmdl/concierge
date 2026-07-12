@@ -194,6 +194,12 @@ Diagnostics must expose:
 - room-aware match decisions
 - room-aware ambiguity outcomes
 - room-aware conflict outcomes
+- stale room context outcomes
+- unavailable room context outcomes
+
+Detailed room-context diagnostics participation is defined in:
+
+- `docs/governance/vocabulary-diagnostics-framework.md`
 
 ## Ownership Matrix
 | Area | Authority | Coordinator Role |

@@ -213,6 +213,8 @@ Diagnostics surfaces include:
 - conflict conditions
 - orphan conditions
 
+Validation trace diagnostics must expose PASS, WARNING, ERROR, and BLOCKED outcomes without redefining validation authority.
+
 ## Ownership Matrix
 | Area | Authority | Coordinator Role |
 |---|---|---|

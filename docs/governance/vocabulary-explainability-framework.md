@@ -217,6 +217,8 @@ Relationship to diagnostics framework:
 
 Diagnostics must expose explanation references and explanation outcomes for operator-visible troubleshooting.
 
+Diagnostics-backed explainability must preserve source attribution and ownership-boundary explanation when post-resolution Asset Intelligence output is consumed.
+
 ## Ownership Matrix
 | Area | Authority | Coordinator Role |
 |---|---|---|

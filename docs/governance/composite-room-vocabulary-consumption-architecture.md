@@ -196,6 +196,10 @@ Diagnostics must expose:
 - conflict conditions
 - ambiguous scope matches
 
+Composite-room diagnostics must align with the composite-room and hierarchy trace architecture in:
+
+- `docs/governance/vocabulary-diagnostics-framework.md`
+
 ## Ownership Matrix
 | Area | Authority | Coordinator Role |
 |---|---|---|
