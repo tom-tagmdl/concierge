@@ -139,6 +139,18 @@ Diagnostics exposes:
 - separation boundary assertions
 - diagnostics non-rights authority-claim flags
 
+Issue #346 diagnostics-schema alignment remediation adds explicit closure-evidence fields while preserving existing aggregate fields:
+
+- `identity_separation_ref_count`
+- `latest_identity_separation_status`
+- `privacy_separation_ref_count`
+- `latest_privacy_separation_status`
+- `retention_separation_ref_count`
+- `latest_retention_separation_status`
+- `claims_household_truth_authority`
+
+Per-domain separation counts are derived from the same #346 separation boundary reference collection because each boundary ref represents identity/privacy/retention separation together.
+
 No private household memory content is exposed by this diagnostics addition.
 
 ## Files Changed And Why
@@ -206,3 +218,87 @@ No private household memory content is exposed by this diagnostics addition.
 ## Closure Recommendation
 
 Provisional PASS pending runtime package execution and diagnostics export confirmation.
+
+## Issue Comment Draft (Architect Review Package)
+
+Use the following as the #346 issue update for architect review.
+
+> ## #346 Closeout Evidence Package (Architect Review)
+>
+> Scope: P3-R4-E10-03 Memory Identity Privacy and Retention Separation implementation.
+>
+> Authority order used: ADR -> Contract -> Model -> Existing Implementation -> GitHub Issue.
+>
+> ### 1) Implementation Summary
+>
+> Added deterministic, non-authoritative separation surfaces to `concierge.push_person_message`:
+>
+> - `household_memory_identity_privacy_retention_separation_boundary` in service response
+> - `household_memory_identity_privacy_retention_separation_boundary` in activity external refs (success and deny)
+> - `household_memory_identity_privacy_retention_separation_visibility` in diagnostics
+>
+> Boundary behavior is metadata-only and preserves external authority ownership for identity, privacy, retention, and source-of-truth.
+>
+> ### 2) Files Changed
+>
+> - `custom_components/concierge/services.py`
+> - `custom_components/concierge/diagnostics.py`
+> - `tests/test_services.py`
+> - `tests/test_diagnostics.py`
+> - `docs/governance/phase-3/issue-346-memory-identity-privacy-retention-separation-evidence.md`
+> - `docs/governance/phase-3/release-4-implementation-tracker.md`
+>
+> ### 3) Validation Evidence (Local)
+>
+> - `get_errors` on touched files: PASS
+> - `py_compile` on touched files: PASS
+> - `compileall` on touched files: PASS
+> - targeted `pytest`: blocked by known local environment issue
+>   - `ModuleNotFoundError: No module named 'homeassistant.helpers'`
+> - deployment via `scripts/deploy-to-ha.ps1`: PASS (`robocopy` exit code `1`)
+> - deployed hash parity: PASS
+>   - `services.py` local/HA SHA256 match = `True`
+>   - `diagnostics.py` local/HA SHA256 match = `True`
+>
+> ### 4) Runtime Validation Package (Pending User Execution)
+>
+> Execute the following checks in Home Assistant and attach outputs to this issue:
+>
+> 1. Success path response includes `household_memory_identity_privacy_retention_separation_boundary`.
+> 2. `boundary_path == governed_household_memory_identity_privacy_retention_separation_boundary`.
+> 3. `identity_separation.identity_separated == true`.
+> 4. `privacy_separation.privacy_separated == true`.
+> 5. `retention_separation.retention_separated == true`.
+> 6. `separation_explainability.separation_permitted == true` on permitted delivery.
+> 7. Deny path activity ref exists with `ref_type == household_memory_identity_privacy_retention_separation_boundary`.
+> 8. Deny path ref contains `separation_permitted == false` and deterministic `separation_decision_reason`.
+> 9. Non-authority flags remain false in response/ref (`claims_identity_authority`, `claims_privacy_authority`, `claims_retention_authority`, `claims_source_of_truth_authority`).
+> 10. Diagnostics includes `household_memory_identity_privacy_retention_separation_visibility` with:
+>     - `separation_boundary_ref_count >= 1`
+>     - `latest_boundary_status == active`
+>     - all diagnostics non-rights authority claims == `false`
+>
+> ### 5) Runtime Evidence Block (Fill In)
+>
+> - Runtime package executed by: `<name>`
+> - Execution timestamp: `<timestamp>`
+> - Tests 1-10 result: `<PASS/FAIL with notes>`
+> - Diagnostics export attached: `<yes/no>`
+> - Any variance from expected deterministic values: `<none or details>`
+>
+> ### 6) Scope and Deferral Confirmation
+>
+> Confirmed in-scope for #346 only:
+>
+> - identity/privacy/retention separation metadata
+> - deterministic explainability metadata
+> - diagnostics visibility for separation refs
+>
+> Confirmed deferred and not implemented in #346:
+>
+> - #347 memory messaging/continuity/affinity/occupancy/restoration separation behavior
+> - #348 provenance/diagnostics/explainability expansion behavior
+>
+> ### 7) Current Closeout Recommendation
+>
+> Provisional PASS pending runtime package completion and diagnostics export confirmation.

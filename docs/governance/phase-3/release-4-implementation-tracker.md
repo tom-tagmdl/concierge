@@ -91,9 +91,32 @@ No roadmap scope was expanded.
 	- Added `household_memory_identity_privacy_retention_separation_boundary` response surface for deterministic identity/privacy/retention separation metadata
 	- Added `household_memory_identity_privacy_retention_separation_boundary` activity refs for success/deny separation traceability
 	- Added diagnostics visibility surface `household_memory_identity_privacy_retention_separation_visibility`
+	- Added explicit diagnostics closure-evidence fields for #346 (`identity_separation_ref_count`, `latest_identity_separation_status`, `privacy_separation_ref_count`, `latest_privacy_separation_status`, `retention_separation_ref_count`, `latest_retention_separation_status`, `claims_household_truth_authority`) while preserving aggregate fields
 	- Added separation non-authority assertions preserving external identity/privacy/retention/source-of-truth authorities
 	- Local compile validation passed (`py_compile` and `compileall`)
 	- Targeted pytest hit known local environment blocker (`ModuleNotFoundError: No module named 'homeassistant.helpers'`)
 	- Local deployment executed via `scripts/deploy-to-ha.ps1` on 2026-07-19 with `robocopy` exit code `1` (successful sync)
 	- Runtime file SHA256 parity verified for `custom_components/concierge/services.py` and `custom_components/concierge/diagnostics.py`
 	- Closure recommendation: Provisional PASS pending runtime package execution and diagnostics export confirmation
+- #347 - Memory messaging/continuity/affinity/occupancy/restoration separation implementation evidence: `docs/governance/phase-3/issue-347-memory-messaging-continuity-affinity-occupancy-restoration-separation-evidence.md`
+	- Added `household_memory_messaging_continuity_affinity_occupancy_restoration_separation_boundary` response surface for deterministic cross-domain separation metadata
+	- Added `household_memory_messaging_continuity_affinity_occupancy_restoration_separation_boundary` activity refs for success/deny separation traceability
+	- Added diagnostics visibility surface `household_memory_messaging_continuity_affinity_occupancy_restoration_separation_visibility`
+	- Added explicit diagnostics separation visibility fields for messaging/continuity/affinity/occupancy/restoration ref counts and statuses
+	- Added non-authority assertions preserving external messaging/continuity/affinity/occupancy/restoration/source-of-truth authorities
+	- Local compile validation passed (`py_compile` and `compileall`)
+	- Targeted pytest hit known local environment blocker (`ModuleNotFoundError: No module named 'homeassistant.helpers'`)
+	- Local deployment executed via `scripts/deploy-to-ha.ps1` on 2026-07-19 with `robocopy` exit code `1` (successful sync)
+	- Runtime file SHA256 parity verified for `custom_components/concierge/services.py` and `custom_components/concierge/diagnostics.py`
+	- Closure recommendation: Provisional PASS pending runtime package execution and diagnostics export confirmation
+- #348 - Memory provenance/diagnostics/explainability implementation evidence: `docs/governance/phase-3/issue-348-memory-provenance-diagnostics-explainability-evidence.md`
+	- Added `household_memory_provenance_diagnostics_explainability_boundary` response surface for deterministic memory provenance, diagnostics, and explainability visibility
+	- Added `household_memory_provenance_diagnostics_explainability_boundary` activity refs for success/deny provenance and explainability traceability
+	- Added diagnostics visibility surface `household_memory_provenance_diagnostics_explainability_visibility`
+	- Added explicit diagnostics aggregation fields for governance, ownership, consumption, separation, and provenance status visibility
+	- Added non-authority assertions preserving external household-truth/identity/messaging/continuity/affinity/occupancy/privacy/retention/restoration/source-of-truth authorities
+	- Local compile validation passed (`py_compile`)
+	- Targeted pytest hit known local environment blocker (`ModuleNotFoundError: No module named 'homeassistant.helpers'`)
+	- Local deployment executed via `scripts/deploy-to-ha.ps1` on 2026-07-19 with `robocopy` exit code `1` (successful sync)
+	- Runtime file SHA256 parity verified for `custom_components/concierge/services.py` and `custom_components/concierge/diagnostics.py`
+	- Closure recommendation: PASS candidate pending runtime package execution and diagnostics export confirmation

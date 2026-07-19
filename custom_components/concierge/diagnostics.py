@@ -1080,6 +1080,24 @@ def _household_memory_governance_boundary_visibility(state) -> dict[str, Any]:
                 boundary_refs.append(dict(ref))
 
     latest_ref = boundary_refs[0] if boundary_refs else None
+    separation_ref_count = len(boundary_refs)
+    latest_boundary_status = latest_ref.get("boundary_status") if latest_ref is not None else None
+    latest_identity_separated = (
+        bool(latest_ref.get("identity_separated", False)) if latest_ref is not None else None
+    )
+    latest_privacy_separated = (
+        bool(latest_ref.get("privacy_separated", False)) if latest_ref is not None else None
+    )
+    latest_retention_separated = (
+        bool(latest_ref.get("retention_separated", False)) if latest_ref is not None else None
+    )
+
+    def _separation_status(separated: bool | None) -> str | None:
+        if separated is None:
+            return None
+        if separated:
+            return latest_boundary_status or "active"
+        return "inactive"
 
     return {
         "authority_visibility": {
@@ -1242,6 +1260,24 @@ def _household_memory_identity_privacy_retention_separation_visibility(state) ->
                 boundary_refs.append(dict(ref))
 
     latest_ref = boundary_refs[0] if boundary_refs else None
+    separation_ref_count = len(boundary_refs)
+    latest_boundary_status = latest_ref.get("boundary_status") if latest_ref is not None else None
+    latest_identity_separated = (
+        bool(latest_ref.get("identity_separated", False)) if latest_ref is not None else None
+    )
+    latest_privacy_separated = (
+        bool(latest_ref.get("privacy_separated", False)) if latest_ref is not None else None
+    )
+    latest_retention_separated = (
+        bool(latest_ref.get("retention_separated", False)) if latest_ref is not None else None
+    )
+
+    def _separation_status(separated: bool | None) -> str | None:
+        if separated is None:
+            return None
+        if separated:
+            return latest_boundary_status or "active"
+        return "inactive"
 
     return {
         "authority_visibility": {
@@ -1252,18 +1288,18 @@ def _household_memory_identity_privacy_retention_separation_visibility(state) ->
             "concierge_role": "bounded_consumer_orchestrator",
         },
         "separation_visibility": {
-            "separation_boundary_ref_count": len(boundary_refs),
+            "separation_boundary_ref_count": separation_ref_count,
+            "identity_separation_ref_count": separation_ref_count,
+            "privacy_separation_ref_count": separation_ref_count,
+            "retention_separation_ref_count": separation_ref_count,
             "latest_boundary_path": latest_ref.get("boundary_path") if latest_ref is not None else None,
-            "latest_boundary_status": latest_ref.get("boundary_status") if latest_ref is not None else None,
-            "latest_identity_separated": (
-                bool(latest_ref.get("identity_separated", False)) if latest_ref is not None else None
-            ),
-            "latest_privacy_separated": (
-                bool(latest_ref.get("privacy_separated", False)) if latest_ref is not None else None
-            ),
-            "latest_retention_separated": (
-                bool(latest_ref.get("retention_separated", False)) if latest_ref is not None else None
-            ),
+            "latest_boundary_status": latest_boundary_status,
+            "latest_identity_separated": latest_identity_separated,
+            "latest_privacy_separated": latest_privacy_separated,
+            "latest_retention_separated": latest_retention_separated,
+            "latest_identity_separation_status": _separation_status(latest_identity_separated),
+            "latest_privacy_separation_status": _separation_status(latest_privacy_separated),
+            "latest_retention_separation_status": _separation_status(latest_retention_separated),
             "latest_separation_permitted": (
                 bool(latest_ref.get("separation_permitted", False)) if latest_ref is not None else None
             ),
@@ -1287,9 +1323,245 @@ def _household_memory_identity_privacy_retention_separation_visibility(state) ->
             "separation_does_not_replace_retention": True,
         },
         "diagnostics_non_rights": {
+            "claims_household_truth_authority": False,
             "claims_identity_authority": False,
             "claims_privacy_authority": False,
             "claims_retention_authority": False,
+            "claims_source_of_truth_authority": False,
+        },
+    }
+
+
+def _household_memory_messaging_continuity_affinity_occupancy_restoration_separation_visibility(
+    state,
+) -> dict[str, Any]:
+    """Return bounded household-memory separation visibility for #347 domains."""
+    boundary_refs: list[dict[str, Any]] = []
+    activities = [
+        item
+        for item in state.activities.values()
+        if str(getattr(item, "intent_class", "")) == "push_person_message"
+    ]
+
+    for activity in sorted(
+        activities,
+        key=lambda item: str(getattr(item, "started_at", "")),
+        reverse=True,
+    ):
+        for ref in list(getattr(activity, "external_refs", [])):
+            if (
+                str(ref.get("ref_type", "") or "")
+                == "household_memory_messaging_continuity_affinity_occupancy_restoration_separation_boundary"
+            ):
+                boundary_refs.append(dict(ref))
+
+    latest_ref = boundary_refs[0] if boundary_refs else None
+    separation_ref_count = len(boundary_refs)
+    latest_boundary_status = latest_ref.get("boundary_status") if latest_ref is not None else None
+    latest_messaging_separated = (
+        bool(latest_ref.get("messaging_separated", False)) if latest_ref is not None else None
+    )
+    latest_continuity_separated = (
+        bool(latest_ref.get("continuity_separated", False)) if latest_ref is not None else None
+    )
+    latest_affinity_separated = (
+        bool(latest_ref.get("affinity_separated", False)) if latest_ref is not None else None
+    )
+    latest_occupancy_separated = (
+        bool(latest_ref.get("occupancy_separated", False)) if latest_ref is not None else None
+    )
+    latest_restoration_separated = (
+        bool(latest_ref.get("restoration_separated", False)) if latest_ref is not None else None
+    )
+
+    def _separation_status(separated: bool | None) -> str | None:
+        if separated is None:
+            return None
+        if separated:
+            return latest_boundary_status or "active"
+        return "inactive"
+
+    return {
+        "authority_visibility": {
+            "messaging_authority_external": True,
+            "continuity_authority_external": True,
+            "affinity_authority_external": True,
+            "occupancy_authority_external": True,
+            "restoration_authority_external": True,
+            "source_of_truth_authority_external": True,
+            "concierge_role": "bounded_consumer_orchestrator",
+        },
+        "separation_visibility": {
+            "separation_boundary_ref_count": separation_ref_count,
+            "messaging_separation_ref_count": separation_ref_count,
+            "continuity_separation_ref_count": separation_ref_count,
+            "affinity_separation_ref_count": separation_ref_count,
+            "occupancy_separation_ref_count": separation_ref_count,
+            "restoration_separation_ref_count": separation_ref_count,
+            "latest_boundary_path": latest_ref.get("boundary_path") if latest_ref is not None else None,
+            "latest_boundary_status": latest_boundary_status,
+            "latest_messaging_separated": latest_messaging_separated,
+            "latest_continuity_separated": latest_continuity_separated,
+            "latest_affinity_separated": latest_affinity_separated,
+            "latest_occupancy_separated": latest_occupancy_separated,
+            "latest_restoration_separated": latest_restoration_separated,
+            "latest_messaging_separation_status": _separation_status(latest_messaging_separated),
+            "latest_continuity_separation_status": _separation_status(latest_continuity_separated),
+            "latest_affinity_separation_status": _separation_status(latest_affinity_separated),
+            "latest_occupancy_separation_status": _separation_status(latest_occupancy_separated),
+            "latest_restoration_separation_status": _separation_status(latest_restoration_separated),
+            "latest_separation_permitted": (
+                bool(latest_ref.get("separation_permitted", False)) if latest_ref is not None else None
+            ),
+            "latest_separation_decision_reason": (
+                latest_ref.get("separation_decision_reason") if latest_ref is not None else None
+            ),
+            "latest_delivery_channel": latest_ref.get("delivery_channel") if latest_ref is not None else None,
+            "latest_selected_service": latest_ref.get("selected_service") if latest_ref is not None else None,
+            "latest_selected_target_id": (
+                latest_ref.get("selected_target_id") if latest_ref is not None else None
+            ),
+            "latest_routing_path": latest_ref.get("routing_path") if latest_ref is not None else None,
+        },
+        "separation_boundary_assertions": {
+            "memory_reference_is_not_messaging_authority": True,
+            "memory_reference_is_not_continuity_authority": True,
+            "memory_reference_is_not_affinity_authority": True,
+            "memory_reference_is_not_occupancy_authority": True,
+            "memory_reference_is_not_restoration_authority": True,
+            "separation_does_not_replace_source_of_truth": True,
+        },
+        "diagnostics_non_rights": {
+            "claims_household_truth_authority": False,
+            "claims_messaging_authority": False,
+            "claims_continuity_authority": False,
+            "claims_affinity_authority": False,
+            "claims_occupancy_authority": False,
+            "claims_restoration_authority": False,
+            "claims_source_of_truth_authority": False,
+        },
+    }
+
+
+def _household_memory_provenance_diagnostics_explainability_visibility(state) -> dict[str, Any]:
+    """Return bounded household-memory provenance/diagnostics/explainability visibility."""
+    provenance_diag_refs: list[dict[str, Any]] = []
+    governance_refs: list[dict[str, Any]] = []
+    ownership_refs: list[dict[str, Any]] = []
+    identity_privacy_retention_refs: list[dict[str, Any]] = []
+    messaging_continuity_affinity_occupancy_restoration_refs: list[dict[str, Any]] = []
+    messaging_provenance_refs: list[dict[str, Any]] = []
+    activities = [
+        item
+        for item in state.activities.values()
+        if str(getattr(item, "intent_class", "")) == "push_person_message"
+    ]
+
+    for activity in sorted(
+        activities,
+        key=lambda item: str(getattr(item, "started_at", "")),
+        reverse=True,
+    ):
+        for ref in list(getattr(activity, "external_refs", [])):
+            ref_type = str(ref.get("ref_type", "") or "")
+            if ref_type == "household_memory_provenance_diagnostics_explainability_boundary":
+                provenance_diag_refs.append(dict(ref))
+            elif ref_type == "household_memory_governance_boundary":
+                governance_refs.append(dict(ref))
+            elif ref_type == "household_memory_ownership_consumption_boundary":
+                ownership_refs.append(dict(ref))
+            elif ref_type == "household_memory_identity_privacy_retention_separation_boundary":
+                identity_privacy_retention_refs.append(dict(ref))
+            elif (
+                ref_type
+                == "household_memory_messaging_continuity_affinity_occupancy_restoration_separation_boundary"
+            ):
+                messaging_continuity_affinity_occupancy_restoration_refs.append(dict(ref))
+            elif ref_type == "messaging_provenance":
+                messaging_provenance_refs.append(dict(ref))
+
+    latest_ref = provenance_diag_refs[0] if provenance_diag_refs else None
+
+    return {
+        "authority_visibility": {
+            "household_memory_authority_external": True,
+            "provenance_authority_external": True,
+            "identity_authority_external": True,
+            "messaging_authority_external": True,
+            "occupancy_authority_external": True,
+            "privacy_authority_external": True,
+            "retention_authority_external": True,
+            "restoration_authority_external": True,
+            "source_of_truth_authority_external": True,
+            "concierge_role": "bounded_consumer_orchestrator",
+        },
+        "provenance_visibility": {
+            "provenance_diagnostics_boundary_ref_count": len(provenance_diag_refs),
+            "messaging_provenance_ref_count": len(messaging_provenance_refs),
+            "latest_boundary_path": latest_ref.get("boundary_path") if latest_ref is not None else None,
+            "latest_boundary_status": latest_ref.get("boundary_status") if latest_ref is not None else None,
+            "latest_provenance_id": latest_ref.get("provenance_id") if latest_ref is not None else None,
+            "latest_provenance_source_service": (
+                latest_ref.get("provenance_source_service") if latest_ref is not None else None
+            ),
+            "latest_provenance_created_in_room": (
+                latest_ref.get("provenance_created_in_room") if latest_ref is not None else None
+            ),
+            "latest_provenance_status": latest_ref.get("provenance_status") if latest_ref is not None else None,
+        },
+        "diagnostics_visibility": {
+            "governance_boundary_ref_count": len(governance_refs),
+            "ownership_boundary_ref_count": len(ownership_refs),
+            "consumption_boundary_ref_count": len(ownership_refs),
+            "identity_privacy_retention_separation_ref_count": len(identity_privacy_retention_refs),
+            "messaging_continuity_affinity_occupancy_restoration_separation_ref_count": len(
+                messaging_continuity_affinity_occupancy_restoration_refs
+            ),
+            "provenance_ref_count": len(messaging_provenance_refs),
+            "latest_governance_status": "active" if governance_refs else None,
+            "latest_ownership_status": "active" if ownership_refs else None,
+            "latest_consumption_status": "active" if ownership_refs else None,
+            "latest_identity_privacy_retention_separation_status": (
+                "active" if identity_privacy_retention_refs else None
+            ),
+            "latest_messaging_continuity_affinity_occupancy_restoration_separation_status": (
+                "active" if messaging_continuity_affinity_occupancy_restoration_refs else None
+            ),
+            "latest_provenance_status": "active" if messaging_provenance_refs else None,
+        },
+        "explainability_visibility": {
+            "what_happened_explainable": latest_ref is not None,
+            "why_it_happened_explainable": latest_ref is not None,
+            "which_boundary_applied_explainable": latest_ref is not None,
+            "which_authority_established_outcome_explainable": latest_ref is not None,
+            "which_authority_not_claimed_explainable": latest_ref is not None,
+            "latest_delivery_permitted": (
+                bool(latest_ref.get("delivery_permitted", False)) if latest_ref is not None else None
+            ),
+            "latest_decision_reason": latest_ref.get("decision_reason") if latest_ref is not None else None,
+            "latest_governance_boundary_involved": (
+                latest_ref.get("governance_boundary_involved") if latest_ref is not None else None
+            ),
+            "latest_delivery_channel": latest_ref.get("delivery_channel") if latest_ref is not None else None,
+            "latest_selected_service": latest_ref.get("selected_service") if latest_ref is not None else None,
+            "latest_selected_target_id": (
+                latest_ref.get("selected_target_id") if latest_ref is not None else None
+            ),
+            "latest_routing_path": latest_ref.get("routing_path") if latest_ref is not None else None,
+            "runtime_derived_only": True,
+            "generated_reasoning_used": False,
+            "probabilistic_reasoning_used": False,
+        },
+        "diagnostics_non_rights": {
+            "claims_household_truth_authority": False,
+            "claims_identity_authority": False,
+            "claims_messaging_authority": False,
+            "claims_continuity_authority": False,
+            "claims_affinity_authority": False,
+            "claims_occupancy_authority": False,
+            "claims_privacy_authority": False,
+            "claims_retention_authority": False,
+            "claims_restoration_authority": False,
             "claims_source_of_truth_authority": False,
         },
     }
@@ -2229,6 +2501,8 @@ async def async_get_config_entry_diagnostics(
         "household_memory_governance_boundary_visibility": _household_memory_governance_boundary_visibility(state),
         "household_memory_ownership_consumption_boundary_visibility": _household_memory_ownership_consumption_boundary_visibility(state),
         "household_memory_identity_privacy_retention_separation_visibility": _household_memory_identity_privacy_retention_separation_visibility(state),
+        "household_memory_messaging_continuity_affinity_occupancy_restoration_separation_visibility": _household_memory_messaging_continuity_affinity_occupancy_restoration_separation_visibility(state),
+        "household_memory_provenance_diagnostics_explainability_visibility": _household_memory_provenance_diagnostics_explainability_visibility(state),
         "continuity_affinity_diagnostics_explainability_visibility": _continuity_affinity_diagnostics_explainability_visibility(state),
         "occupancy_presence_diagnostics_explainability_visibility": _occupancy_presence_diagnostics_explainability_visibility(state),
         "restoration_diagnostics_explainability_visibility": _restoration_diagnostics_explainability_visibility(state),

@@ -10,6 +10,7 @@ from typing import Any
 from uuid import uuid4
 
 from homeassistant.core import callback
+from homeassistant.helpers import area_registry as ar
 from homeassistant.helpers.event import async_track_time_change
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
@@ -33,6 +34,7 @@ from .const import (
     SIGNAL_READY,
 )
 from .models import ActivityEvent
+from .services import _build_messaging_governance_boundary
 from .storage import ConciergeStorage
 
 _LOGGER = logging.getLogger(__name__)
@@ -376,6 +378,15 @@ class ConciergeCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
 
         state = await self._storage.async_load_state()
+        foundation_area_ids = {area.id for area in ar.async_get(self.hass).async_list_areas()}
+        configured_room_outside_foundation_count = sum(
+            1 for area_id in state.rooms if area_id not in foundation_area_ids
+        )
+        composites_with_missing_area_count = sum(
+            1
+            for composite in state.composites.values()
+            if any(area_id not in foundation_area_ids for area_id in composite.area_ids)
+        )
         services_by_domain = self.hass.services.async_services()
         integration_capabilities = {
             domain: sorted(domain_services.keys())
@@ -384,12 +395,171 @@ class ConciergeCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         }
 
         foundation_summary = {
+            "room_identity_source": "home_assistant_area_registry",
+            "concierge_role": "bounded_consumer_orchestrator",
+            "capability_projection_boundary": {
+                "projection_role": "governed_projection_consumer",
+                "projection_is_authority": False,
+                "deferred_release_2_owners": {
+                    "authoritative_input_consumption": "#314",
+                    "vocabulary_to_capability_handoff": "#315",
+                    "asset_intelligence_cp00_handoff": "#316",
+                    "capability_discovery": "#317",
+                    "capability_diagnostics_explainability": "#318",
+                },
+            },
+            "continuity_governance_boundary": {
+                "continuity_role": "governed_continuity_consumer",
+                "continuity_is_authority": False,
+                "privacy_boundary_preserved": True,
+                "continuity_diagnostics_explainability_enabled": True,
+                "deferred_release_3_owners": {
+                    "person_room_affinity_boundary": "#326",
+                    "privacy_household_memory_boundary": "#327",
+                    "continuity_affinity_diagnostics_explainability": "#328",
+                    "restoration_governance_boundary": "#329",
+                    "release_3_validation": "#338",
+                },
+            },
+            "person_room_affinity_boundary": {
+                "affinity_role": "governed_person_room_affinity_consumer",
+                "affinity_is_authority": False,
+                "guest_safe_boundary_preserved": True,
+                "privacy_boundary_preserved": True,
+                "affinity_diagnostics_explainability_enabled": True,
+                "deferred_release_3_owners": {
+                    "privacy_household_memory_boundary": "#327",
+                    "continuity_affinity_diagnostics_explainability": "#328",
+                    "restoration_governance_boundary": "#329",
+                    "release_3_validation": "#338",
+                },
+            },
+            "privacy_household_memory_boundary": {
+                "privacy_memory_role": "governed_privacy_household_memory_consumer",
+                "privacy_memory_is_authority": False,
+                "guest_safe_boundary_preserved": True,
+                "deferred_release_3_owners": {
+                    "continuity_affinity_diagnostics_explainability": "#328",
+                    "restoration_governance_boundary": "#329",
+                    "release_3_validation": "#338",
+                },
+            },
+            "messaging_governance_boundary": _build_messaging_governance_boundary(
+                route_scope="global",
+                context_area_id=None,
+                resolved_composite_id=None,
+                recipient_scope="household",
+                message_context_type="foundation",
+            ),
+            "occupancy_governance_boundary": {
+                "occupancy_role": "governed_occupancy_boundary_consumer",
+                "occupancy_is_authority": False,
+                "occupancy_authority_external": True,
+                "occupancy_policy_authority_external": True,
+                "occupancy_truth_authority_external": True,
+                "guest_safe_boundary_preserved": True,
+                "privacy_boundary_preserved": True,
+                "occupancy_decision_behavior_enabled": False,
+                "occupancy_execution_enabled": False,
+                "occupancy_inference_enabled": False,
+                "occupancy_diagnostics_behavior_enabled": False,
+                "deferred_release_3_owners": {
+                    "presence_governance_boundary": "#334",
+                    "guest_unknown_occupant_behavior": "#335",
+                    "multi_occupant_behavior": "#336",
+                    "occupancy_presence_diagnostics_explainability": "#337",
+                    "release_3_validation": "#338",
+                },
+            },
+            "presence_governance_boundary": {
+                "presence_role": "governed_presence_boundary_consumer",
+                "presence_is_authority": False,
+                "presence_authority_external": True,
+                "presence_policy_authority_external": True,
+                "presence_truth_authority_external": True,
+                "guest_safe_boundary_preserved": True,
+                "privacy_boundary_preserved": True,
+                "presence_detection_enabled": False,
+                "presence_inference_enabled": False,
+                "presence_attribution_enabled": False,
+                "presence_behavior_enabled": False,
+                "presence_diagnostics_behavior_enabled": False,
+                "deferred_release_3_owners": {
+                    "guest_unknown_occupant_behavior": "#335",
+                    "multi_occupant_behavior": "#336",
+                    "occupancy_presence_diagnostics_explainability": "#337",
+                    "release_3_validation": "#338",
+                },
+            },
+            "guest_unknown_occupant_behavior": {
+                "guest_unknown_behavior_role": "governed_guest_unknown_occupant_behavior_consumer",
+                "guest_unknown_behavior_is_authority": False,
+                "consumes_occupancy_governance_boundary": True,
+                "consumes_presence_governance_boundary": True,
+                "occupancy_authority_external": True,
+                "presence_authority_external": True,
+                "identity_authority_external": True,
+                "household_memory_authority_external": True,
+                "guest_safe_boundary_preserved": True,
+                "privacy_boundary_preserved": True,
+                "identity_attribution_enabled": False,
+                "occupancy_truth_modification_enabled": False,
+                "presence_truth_modification_enabled": False,
+                "behavior_enabled": True,
+                "deferred_release_3_owners": {
+                    "multi_occupant_behavior": "#336",
+                    "occupancy_presence_diagnostics_explainability": "#337",
+                    "release_3_validation": "#338",
+                },
+            },
+            "multi_occupant_behavior": {
+                "multi_occupant_behavior_role": "governed_multi_occupant_behavior_consumer",
+                "multi_occupant_behavior_is_authority": False,
+                "consumes_occupancy_governance_boundary": True,
+                "consumes_presence_governance_boundary": True,
+                "consumes_guest_unknown_behavior": True,
+                "occupancy_authority_external": True,
+                "presence_authority_external": True,
+                "identity_authority_external": True,
+                "household_memory_authority_external": True,
+                "guest_safe_boundary_preserved": True,
+                "privacy_boundary_preserved": True,
+                "identity_attribution_enabled": False,
+                "occupancy_truth_modification_enabled": False,
+                "presence_truth_modification_enabled": False,
+                "conflict_visibility_enabled": True,
+                "behavior_enabled": True,
+                "deferred_release_3_owners": {
+                    "occupancy_presence_diagnostics_explainability": "#337",
+                    "release_3_validation": "#338",
+                },
+            },
+            "restoration_governance_boundary": {
+                "restoration_role": "governed_restoration_boundary_consumer",
+                "restoration_is_authority": False,
+                "restoration_authority_external": True,
+                "restoration_policy_authority_external": True,
+                "restoration_execution_enabled": True,
+                "restoration_decision_behavior_enabled": True,
+                "e3a_preservation_alignment_enabled": True,
+                "restoration_diagnostics_behavior_enabled": True,
+                "deferred_release_3_owners": {
+                    "restoration_outcome_implementation": "#330",
+                    "e3a_preservation_alignment": "#331",
+                    "restoration_diagnostics_explainability": "#332",
+                    "release_3_validation": "#338",
+                },
+            },
+            "foundation_area_count": len(foundation_area_ids),
             "room_count": len(state.rooms),
+            "composite_count": len(state.composites),
             "interaction_count": len(state.interactions),
             "signal_count": len(state.signals),
             "context_source_count": len(state.contexts),
             "person_profile_count": len(state.person_profiles),
             "voice_profile_count": len(state.voice_profiles),
+            "configured_room_outside_foundation_count": configured_room_outside_foundation_count,
+            "composites_with_missing_area_count": composites_with_missing_area_count,
         }
         room_configs = {
             area_id: {

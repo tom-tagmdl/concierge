@@ -78,6 +78,8 @@ async def test_diagnostics_include_state_summary(
         "household_memory_governance_boundary_visibility",
         "household_memory_ownership_consumption_boundary_visibility",
         "household_memory_identity_privacy_retention_separation_visibility",
+        "household_memory_messaging_continuity_affinity_occupancy_restoration_separation_visibility",
+        "household_memory_provenance_diagnostics_explainability_visibility",
         "continuity_affinity_diagnostics_explainability_visibility",
         "occupancy_presence_diagnostics_explainability_visibility",
         "restoration_diagnostics_explainability_visibility",
@@ -842,6 +844,9 @@ async def test_diagnostics_expose_messaging_governance_boundary_visibility(
     assert identity_privacy_retention_diag["authority_visibility"]["retention_authority_external"] is True
     assert identity_privacy_retention_diag["authority_visibility"]["source_of_truth_authority_external"] is True
     assert identity_privacy_retention_diag["separation_visibility"]["separation_boundary_ref_count"] >= 1
+    assert identity_privacy_retention_diag["separation_visibility"]["identity_separation_ref_count"] >= 1
+    assert identity_privacy_retention_diag["separation_visibility"]["privacy_separation_ref_count"] >= 1
+    assert identity_privacy_retention_diag["separation_visibility"]["retention_separation_ref_count"] >= 1
     assert (
         identity_privacy_retention_diag["separation_visibility"]["latest_boundary_path"]
         == "governed_household_memory_identity_privacy_retention_separation_boundary"
@@ -850,6 +855,18 @@ async def test_diagnostics_expose_messaging_governance_boundary_visibility(
     assert identity_privacy_retention_diag["separation_visibility"]["latest_identity_separated"] is True
     assert identity_privacy_retention_diag["separation_visibility"]["latest_privacy_separated"] is True
     assert identity_privacy_retention_diag["separation_visibility"]["latest_retention_separated"] is True
+    assert (
+        identity_privacy_retention_diag["separation_visibility"]["latest_identity_separation_status"]
+        == "active"
+    )
+    assert (
+        identity_privacy_retention_diag["separation_visibility"]["latest_privacy_separation_status"]
+        == "active"
+    )
+    assert (
+        identity_privacy_retention_diag["separation_visibility"]["latest_retention_separation_status"]
+        == "active"
+    )
     assert identity_privacy_retention_diag["separation_visibility"]["latest_separation_permitted"] is True
     assert (
         identity_privacy_retention_diag["separation_visibility"]["latest_separation_decision_reason"]
@@ -897,11 +914,383 @@ async def test_diagnostics_expose_messaging_governance_boundary_visibility(
         ]
         is True
     )
+    assert (
+        identity_privacy_retention_diag["diagnostics_non_rights"]["claims_household_truth_authority"]
+        is False
+    )
     assert identity_privacy_retention_diag["diagnostics_non_rights"]["claims_identity_authority"] is False
     assert identity_privacy_retention_diag["diagnostics_non_rights"]["claims_privacy_authority"] is False
     assert identity_privacy_retention_diag["diagnostics_non_rights"]["claims_retention_authority"] is False
     assert (
         identity_privacy_retention_diag["diagnostics_non_rights"]["claims_source_of_truth_authority"]
+        is False
+    )
+    messaging_continuity_affinity_occupancy_restoration_diag = diagnostics[
+        "household_memory_messaging_continuity_affinity_occupancy_restoration_separation_visibility"
+    ]
+    assert (
+        messaging_continuity_affinity_occupancy_restoration_diag["authority_visibility"][
+            "messaging_authority_external"
+        ]
+        is True
+    )
+    assert (
+        messaging_continuity_affinity_occupancy_restoration_diag["authority_visibility"][
+            "continuity_authority_external"
+        ]
+        is True
+    )
+    assert (
+        messaging_continuity_affinity_occupancy_restoration_diag["authority_visibility"][
+            "affinity_authority_external"
+        ]
+        is True
+    )
+    assert (
+        messaging_continuity_affinity_occupancy_restoration_diag["authority_visibility"][
+            "occupancy_authority_external"
+        ]
+        is True
+    )
+    assert (
+        messaging_continuity_affinity_occupancy_restoration_diag["authority_visibility"][
+            "restoration_authority_external"
+        ]
+        is True
+    )
+    assert (
+        messaging_continuity_affinity_occupancy_restoration_diag["separation_visibility"][
+            "separation_boundary_ref_count"
+        ]
+        >= 1
+    )
+    assert (
+        messaging_continuity_affinity_occupancy_restoration_diag["separation_visibility"][
+            "messaging_separation_ref_count"
+        ]
+        >= 1
+    )
+    assert (
+        messaging_continuity_affinity_occupancy_restoration_diag["separation_visibility"][
+            "continuity_separation_ref_count"
+        ]
+        >= 1
+    )
+    assert (
+        messaging_continuity_affinity_occupancy_restoration_diag["separation_visibility"][
+            "affinity_separation_ref_count"
+        ]
+        >= 1
+    )
+    assert (
+        messaging_continuity_affinity_occupancy_restoration_diag["separation_visibility"][
+            "occupancy_separation_ref_count"
+        ]
+        >= 1
+    )
+    assert (
+        messaging_continuity_affinity_occupancy_restoration_diag["separation_visibility"][
+            "restoration_separation_ref_count"
+        ]
+        >= 1
+    )
+    assert (
+        messaging_continuity_affinity_occupancy_restoration_diag["separation_visibility"][
+            "latest_boundary_path"
+        ]
+        == "governed_household_memory_messaging_continuity_affinity_occupancy_restoration_separation_boundary"
+    )
+    assert (
+        messaging_continuity_affinity_occupancy_restoration_diag["separation_visibility"][
+            "latest_messaging_separation_status"
+        ]
+        == "active"
+    )
+    assert (
+        messaging_continuity_affinity_occupancy_restoration_diag["separation_visibility"][
+            "latest_continuity_separation_status"
+        ]
+        == "active"
+    )
+    assert (
+        messaging_continuity_affinity_occupancy_restoration_diag["separation_visibility"][
+            "latest_affinity_separation_status"
+        ]
+        == "active"
+    )
+    assert (
+        messaging_continuity_affinity_occupancy_restoration_diag["separation_visibility"][
+            "latest_occupancy_separation_status"
+        ]
+        == "active"
+    )
+    assert (
+        messaging_continuity_affinity_occupancy_restoration_diag["separation_visibility"][
+            "latest_restoration_separation_status"
+        ]
+        == "active"
+    )
+    assert (
+        messaging_continuity_affinity_occupancy_restoration_diag["separation_boundary_assertions"][
+            "memory_reference_is_not_messaging_authority"
+        ]
+        is True
+    )
+    assert (
+        messaging_continuity_affinity_occupancy_restoration_diag["separation_boundary_assertions"][
+            "memory_reference_is_not_occupancy_authority"
+        ]
+        is True
+    )
+    assert (
+        messaging_continuity_affinity_occupancy_restoration_diag["separation_boundary_assertions"][
+            "memory_reference_is_not_restoration_authority"
+        ]
+        is True
+    )
+    assert (
+        messaging_continuity_affinity_occupancy_restoration_diag["diagnostics_non_rights"][
+            "claims_household_truth_authority"
+        ]
+        is False
+    )
+    assert (
+        messaging_continuity_affinity_occupancy_restoration_diag["diagnostics_non_rights"][
+            "claims_messaging_authority"
+        ]
+        is False
+    )
+    assert (
+        messaging_continuity_affinity_occupancy_restoration_diag["diagnostics_non_rights"][
+            "claims_continuity_authority"
+        ]
+        is False
+    )
+    assert (
+        messaging_continuity_affinity_occupancy_restoration_diag["diagnostics_non_rights"][
+            "claims_affinity_authority"
+        ]
+        is False
+    )
+    assert (
+        messaging_continuity_affinity_occupancy_restoration_diag["diagnostics_non_rights"][
+            "claims_occupancy_authority"
+        ]
+        is False
+    )
+    assert (
+        messaging_continuity_affinity_occupancy_restoration_diag["diagnostics_non_rights"][
+            "claims_restoration_authority"
+        ]
+        is False
+    )
+    assert (
+        messaging_continuity_affinity_occupancy_restoration_diag["diagnostics_non_rights"][
+            "claims_source_of_truth_authority"
+        ]
+        is False
+    )
+    provenance_diagnostics_explainability_diag = diagnostics[
+        "household_memory_provenance_diagnostics_explainability_visibility"
+    ]
+    assert (
+        provenance_diagnostics_explainability_diag["authority_visibility"][
+            "household_memory_authority_external"
+        ]
+        is True
+    )
+    assert (
+        provenance_diagnostics_explainability_diag["authority_visibility"][
+            "provenance_authority_external"
+        ]
+        is True
+    )
+    assert (
+        provenance_diagnostics_explainability_diag["provenance_visibility"][
+            "provenance_diagnostics_boundary_ref_count"
+        ]
+        >= 1
+    )
+    assert (
+        provenance_diagnostics_explainability_diag["provenance_visibility"][
+            "messaging_provenance_ref_count"
+        ]
+        >= 1
+    )
+    assert (
+        provenance_diagnostics_explainability_diag["provenance_visibility"]["latest_boundary_path"]
+        == "governed_household_memory_provenance_diagnostics_explainability_boundary"
+    )
+    assert (
+        provenance_diagnostics_explainability_diag["provenance_visibility"]["latest_boundary_status"]
+        == "active"
+    )
+    assert (
+        provenance_diagnostics_explainability_diag["diagnostics_visibility"][
+            "governance_boundary_ref_count"
+        ]
+        >= 1
+    )
+    assert (
+        provenance_diagnostics_explainability_diag["diagnostics_visibility"][
+            "ownership_boundary_ref_count"
+        ]
+        >= 1
+    )
+    assert (
+        provenance_diagnostics_explainability_diag["diagnostics_visibility"][
+            "consumption_boundary_ref_count"
+        ]
+        >= 1
+    )
+    assert (
+        provenance_diagnostics_explainability_diag["diagnostics_visibility"][
+            "identity_privacy_retention_separation_ref_count"
+        ]
+        >= 1
+    )
+    assert (
+        provenance_diagnostics_explainability_diag["diagnostics_visibility"][
+            "messaging_continuity_affinity_occupancy_restoration_separation_ref_count"
+        ]
+        >= 1
+    )
+    assert (
+        provenance_diagnostics_explainability_diag["diagnostics_visibility"][
+            "provenance_ref_count"
+        ]
+        >= 1
+    )
+    assert (
+        provenance_diagnostics_explainability_diag["diagnostics_visibility"][
+            "latest_governance_status"
+        ]
+        == "active"
+    )
+    assert (
+        provenance_diagnostics_explainability_diag["diagnostics_visibility"][
+            "latest_ownership_status"
+        ]
+        == "active"
+    )
+    assert (
+        provenance_diagnostics_explainability_diag["diagnostics_visibility"][
+            "latest_consumption_status"
+        ]
+        == "active"
+    )
+    assert (
+        provenance_diagnostics_explainability_diag["diagnostics_visibility"][
+            "latest_identity_privacy_retention_separation_status"
+        ]
+        == "active"
+    )
+    assert (
+        provenance_diagnostics_explainability_diag["diagnostics_visibility"][
+            "latest_messaging_continuity_affinity_occupancy_restoration_separation_status"
+        ]
+        == "active"
+    )
+    assert (
+        provenance_diagnostics_explainability_diag["diagnostics_visibility"][
+            "latest_provenance_status"
+        ]
+        == "active"
+    )
+    assert (
+        provenance_diagnostics_explainability_diag["explainability_visibility"][
+            "what_happened_explainable"
+        ]
+        is True
+    )
+    assert (
+        provenance_diagnostics_explainability_diag["explainability_visibility"][
+            "why_it_happened_explainable"
+        ]
+        is True
+    )
+    assert (
+        provenance_diagnostics_explainability_diag["explainability_visibility"][
+            "latest_decision_reason"
+        ]
+        == "delivery_permitted"
+    )
+    assert (
+        provenance_diagnostics_explainability_diag["explainability_visibility"][
+            "latest_governance_boundary_involved"
+        ]
+        == "notification_delivery_boundary"
+    )
+    assert (
+        provenance_diagnostics_explainability_diag["explainability_visibility"][
+            "runtime_derived_only"
+        ]
+        is True
+    )
+    assert (
+        provenance_diagnostics_explainability_diag["explainability_visibility"][
+            "generated_reasoning_used"
+        ]
+        is False
+    )
+    assert (
+        provenance_diagnostics_explainability_diag["diagnostics_non_rights"][
+            "claims_household_truth_authority"
+        ]
+        is False
+    )
+    assert (
+        provenance_diagnostics_explainability_diag["diagnostics_non_rights"][
+            "claims_identity_authority"
+        ]
+        is False
+    )
+    assert (
+        provenance_diagnostics_explainability_diag["diagnostics_non_rights"][
+            "claims_messaging_authority"
+        ]
+        is False
+    )
+    assert (
+        provenance_diagnostics_explainability_diag["diagnostics_non_rights"][
+            "claims_continuity_authority"
+        ]
+        is False
+    )
+    assert (
+        provenance_diagnostics_explainability_diag["diagnostics_non_rights"][
+            "claims_affinity_authority"
+        ]
+        is False
+    )
+    assert (
+        provenance_diagnostics_explainability_diag["diagnostics_non_rights"][
+            "claims_occupancy_authority"
+        ]
+        is False
+    )
+    assert (
+        provenance_diagnostics_explainability_diag["diagnostics_non_rights"][
+            "claims_privacy_authority"
+        ]
+        is False
+    )
+    assert (
+        provenance_diagnostics_explainability_diag["diagnostics_non_rights"][
+            "claims_retention_authority"
+        ]
+        is False
+    )
+    assert (
+        provenance_diagnostics_explainability_diag["diagnostics_non_rights"][
+            "claims_restoration_authority"
+        ]
+        is False
+    )
+    assert (
+        provenance_diagnostics_explainability_diag["diagnostics_non_rights"][
+            "claims_source_of_truth_authority"
+        ]
         is False
     )
     assert notify_calls[0]["message"] == "Hello Tom"

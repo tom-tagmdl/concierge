@@ -551,6 +551,176 @@ async def test_push_person_message_reports_messaging_governance_boundary(
         identity_privacy_retention_boundary["non_authority_assertions"]["memory_is_not_source_of_truth"]
         is True
     )
+    messaging_continuity_affinity_occupancy_restoration_boundary = result[
+        "household_memory_messaging_continuity_affinity_occupancy_restoration_separation_boundary"
+    ]
+    assert (
+        messaging_continuity_affinity_occupancy_restoration_boundary["boundary_path"]
+        == "governed_household_memory_messaging_continuity_affinity_occupancy_restoration_separation_boundary"
+    )
+    assert messaging_continuity_affinity_occupancy_restoration_boundary["boundary_status"] == "active"
+    assert (
+        messaging_continuity_affinity_occupancy_restoration_boundary["messaging_separation"][
+            "messaging_separated"
+        ]
+        is True
+    )
+    assert (
+        messaging_continuity_affinity_occupancy_restoration_boundary["continuity_separation"][
+            "continuity_separated"
+        ]
+        is True
+    )
+    assert (
+        messaging_continuity_affinity_occupancy_restoration_boundary["affinity_separation"][
+            "affinity_separated"
+        ]
+        is True
+    )
+    assert (
+        messaging_continuity_affinity_occupancy_restoration_boundary["occupancy_separation"][
+            "occupancy_separated"
+        ]
+        is True
+    )
+    assert (
+        messaging_continuity_affinity_occupancy_restoration_boundary["restoration_separation"][
+            "restoration_separated"
+        ]
+        is True
+    )
+    assert (
+        messaging_continuity_affinity_occupancy_restoration_boundary["separation_explainability"][
+            "separation_permitted"
+        ]
+        is True
+    )
+    assert (
+        messaging_continuity_affinity_occupancy_restoration_boundary["authority_relationships"][
+            "redefines_messaging_authority"
+        ]
+        is False
+    )
+    assert (
+        messaging_continuity_affinity_occupancy_restoration_boundary["authority_relationships"][
+            "redefines_occupancy_authority"
+        ]
+        is False
+    )
+    assert (
+        messaging_continuity_affinity_occupancy_restoration_boundary["authority_relationships"][
+            "redefines_restoration_authority"
+        ]
+        is False
+    )
+    assert (
+        messaging_continuity_affinity_occupancy_restoration_boundary["authority_relationships"][
+            "replaces_source_of_truth_authority"
+        ]
+        is False
+    )
+    provenance_diagnostics_explainability_boundary = result[
+        "household_memory_provenance_diagnostics_explainability_boundary"
+    ]
+    assert (
+        provenance_diagnostics_explainability_boundary["boundary_path"]
+        == "governed_household_memory_provenance_diagnostics_explainability_boundary"
+    )
+    assert provenance_diagnostics_explainability_boundary["boundary_status"] == "active"
+    assert (
+        provenance_diagnostics_explainability_boundary["provenance_visibility"]["provenance_ref_count"]
+        == 1
+    )
+    assert (
+        provenance_diagnostics_explainability_boundary["provenance_visibility"]["provenance_status"]
+        == "active"
+    )
+    assert (
+        provenance_diagnostics_explainability_boundary["diagnostics_visibility"][
+            "governance_boundary_ref_count"
+        ]
+        == 1
+    )
+    assert (
+        provenance_diagnostics_explainability_boundary["diagnostics_visibility"][
+            "provenance_ref_count"
+        ]
+        == 1
+    )
+    assert (
+        provenance_diagnostics_explainability_boundary["governance_explainability"][
+            "delivery_permitted"
+        ]
+        is True
+    )
+    assert (
+        provenance_diagnostics_explainability_boundary["governance_explainability"]["decision_reason"]
+        == "delivery_permitted"
+    )
+    assert (
+        provenance_diagnostics_explainability_boundary["governance_explainability"][
+            "governance_boundary_involved"
+        ]
+        == "notification_delivery_boundary"
+    )
+    assert (
+        provenance_diagnostics_explainability_boundary["explainability_visibility"]["runtime_derived_only"]
+        is True
+    )
+    assert (
+        provenance_diagnostics_explainability_boundary["explainability_visibility"][
+            "generated_reasoning_used"
+        ]
+        is False
+    )
+    assert (
+        provenance_diagnostics_explainability_boundary["non_authority_assertions"][
+            "claims_household_truth_authority"
+        ]
+        is False
+    )
+    assert (
+        provenance_diagnostics_explainability_boundary["non_authority_assertions"][
+            "claims_identity_authority"
+        ]
+        is False
+    )
+    assert (
+        provenance_diagnostics_explainability_boundary["non_authority_assertions"][
+            "claims_messaging_authority"
+        ]
+        is False
+    )
+    assert (
+        provenance_diagnostics_explainability_boundary["non_authority_assertions"][
+            "claims_occupancy_authority"
+        ]
+        is False
+    )
+    assert (
+        provenance_diagnostics_explainability_boundary["non_authority_assertions"][
+            "claims_privacy_authority"
+        ]
+        is False
+    )
+    assert (
+        provenance_diagnostics_explainability_boundary["non_authority_assertions"][
+            "claims_retention_authority"
+        ]
+        is False
+    )
+    assert (
+        provenance_diagnostics_explainability_boundary["non_authority_assertions"][
+            "claims_restoration_authority"
+        ]
+        is False
+    )
+    assert (
+        provenance_diagnostics_explainability_boundary["non_authority_assertions"][
+            "claims_source_of_truth_authority"
+        ]
+        is False
+    )
     provenance = result["messaging_provenance"]
     assert provenance["created_by"]["actor_state"] == "system"
     assert provenance["delivered_to"]["destination_reference"]["target_id"] == "phone"
@@ -925,6 +1095,64 @@ async def test_push_person_message_denies_when_consent_is_required_but_absent(
     assert identity_privacy_retention_ref["claims_privacy_authority"] is False
     assert identity_privacy_retention_ref["claims_retention_authority"] is False
     assert identity_privacy_retention_ref["claims_source_of_truth_authority"] is False
+    messaging_continuity_affinity_occupancy_restoration_ref = next(
+        ref
+        for ref in latest.external_refs
+        if ref.get("ref_type")
+        == "household_memory_messaging_continuity_affinity_occupancy_restoration_separation_boundary"
+    )
+    assert (
+        messaging_continuity_affinity_occupancy_restoration_ref["boundary_path"]
+        == "governed_household_memory_messaging_continuity_affinity_occupancy_restoration_separation_boundary"
+    )
+    assert messaging_continuity_affinity_occupancy_restoration_ref["messaging_separated"] is True
+    assert messaging_continuity_affinity_occupancy_restoration_ref["continuity_separated"] is True
+    assert messaging_continuity_affinity_occupancy_restoration_ref["affinity_separated"] is True
+    assert messaging_continuity_affinity_occupancy_restoration_ref["occupancy_separated"] is True
+    assert messaging_continuity_affinity_occupancy_restoration_ref["restoration_separated"] is True
+    assert messaging_continuity_affinity_occupancy_restoration_ref["separation_permitted"] is False
+    assert (
+        messaging_continuity_affinity_occupancy_restoration_ref["separation_decision_reason"]
+        == "consent_required_not_granted"
+    )
+    assert messaging_continuity_affinity_occupancy_restoration_ref["claims_household_truth_authority"] is False
+    assert messaging_continuity_affinity_occupancy_restoration_ref["claims_messaging_authority"] is False
+    assert messaging_continuity_affinity_occupancy_restoration_ref["claims_continuity_authority"] is False
+    assert messaging_continuity_affinity_occupancy_restoration_ref["claims_affinity_authority"] is False
+    assert messaging_continuity_affinity_occupancy_restoration_ref["claims_occupancy_authority"] is False
+    assert messaging_continuity_affinity_occupancy_restoration_ref["claims_restoration_authority"] is False
+    assert messaging_continuity_affinity_occupancy_restoration_ref["claims_source_of_truth_authority"] is False
+    provenance_diagnostics_explainability_ref = next(
+        ref
+        for ref in latest.external_refs
+        if ref.get("ref_type")
+        == "household_memory_provenance_diagnostics_explainability_boundary"
+    )
+    assert (
+        provenance_diagnostics_explainability_ref["boundary_path"]
+        == "governed_household_memory_provenance_diagnostics_explainability_boundary"
+    )
+    assert provenance_diagnostics_explainability_ref["provenance_ref_count"] == 1
+    assert provenance_diagnostics_explainability_ref["provenance_status"] == "active"
+    assert provenance_diagnostics_explainability_ref["delivery_permitted"] is False
+    assert (
+        provenance_diagnostics_explainability_ref["decision_reason"]
+        == "consent_required_not_granted"
+    )
+    assert (
+        provenance_diagnostics_explainability_ref["governance_boundary_involved"]
+        == "recipient_consent_privacy_visibility_boundary"
+    )
+    assert provenance_diagnostics_explainability_ref["claims_household_truth_authority"] is False
+    assert provenance_diagnostics_explainability_ref["claims_identity_authority"] is False
+    assert provenance_diagnostics_explainability_ref["claims_messaging_authority"] is False
+    assert provenance_diagnostics_explainability_ref["claims_continuity_authority"] is False
+    assert provenance_diagnostics_explainability_ref["claims_affinity_authority"] is False
+    assert provenance_diagnostics_explainability_ref["claims_occupancy_authority"] is False
+    assert provenance_diagnostics_explainability_ref["claims_privacy_authority"] is False
+    assert provenance_diagnostics_explainability_ref["claims_retention_authority"] is False
+    assert provenance_diagnostics_explainability_ref["claims_restoration_authority"] is False
+    assert provenance_diagnostics_explainability_ref["claims_source_of_truth_authority"] is False
 
 
 async def test_push_person_message_denies_voice_delivery_for_private_only_mode(

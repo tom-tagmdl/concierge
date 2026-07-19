@@ -1072,7 +1072,7 @@ resolve_mobile_context:
 
 push_person_message:
   name: Push Person Message
-  description: Send a mobile app notification using person-scoped target filtering.
+  description: Send a person-scoped message to mobile, web UI, room voice assistant, or room speaker targets.
   fields:
     person_id:
       name: Person ID
