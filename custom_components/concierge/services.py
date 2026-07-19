@@ -11,6 +11,7 @@ from uuid import uuid4
 
 import voluptuous as vol
 
+from homeassistant.components.tts.const import DATA_COMPONENT as TTS_DATA_COMPONENT
 from homeassistant.helpers import area_registry as ar
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
@@ -472,11 +473,1305 @@ SERVICE_PUSH_PERSON_MESSAGE_SCHEMA = vol.Schema(
     }
 )
 
+_MESSAGE_WEB_UI_TARGETS = {"web_ui", "persistent_notification", "dashboard", "kiosk"}
+_MESSAGE_VOICE_ASSISTANT_TARGETS = {"assist_satellite", "satellite", "voice_assistant", "assistant"}
+_MESSAGE_TTS_TARGETS = {"speaker", "speakers", "tts", "media_player"}
+_MESSAGE_MOBILE_TARGET_PREFIXES = ("notify.",)
+
+
+def _normalize_message_target(target: str | None) -> str:
+    """Normalize a message target to a stable lower-case routing token."""
+    return str(target or "").strip().lower()
+
+
+def _room_entity_ids(room, field_name: str) -> list[str]:
+    """Return a room entity list filtered to non-empty string identifiers."""
+    values = getattr(room, field_name, []) if room is not None else []
+    return [entity_id for entity_id in values if isinstance(entity_id, str) and entity_id]
+
+
+def _resolve_tts_engine_entity_id(hass: HomeAssistant) -> tuple[str, str]:
+    """Resolve the configured TTS provider into a HA TTS engine entity id."""
+    entries = hass.config_entries.async_entries(DOMAIN)
+    if not entries:
+        raise vol.Invalid("Concierge is not configured")
+
+    entry = entries[0]
+    provider = str(
+        entry.options.get("tts_provider", entry.data.get("tts_provider", _PROVIDER_NONE))
+        or _PROVIDER_NONE
+    ).strip() or _PROVIDER_NONE
+    engine_entity_id = TTS_PROVIDER_ENTITY_IDS.get(provider)
+    if engine_entity_id is None:
+        raise vol.Invalid("tts_provider is not configured")
+    return provider, engine_entity_id
+
+
+def _preferred_assist_pipeline_tts_voice(hass: HomeAssistant) -> str:
+    """Return the preferred Assist pipeline voice when it is available."""
+    try:
+        from homeassistant.components.assist_pipeline import async_get_pipeline
+
+        pipeline = async_get_pipeline(hass, None)
+    except Exception:
+        return ""
+
+    for candidate in (
+        getattr(pipeline, "tts_voice", None),
+        getattr(pipeline, "voice", None),
+        getattr(pipeline, "conversation_voice", None),
+    ):
+        value = str(candidate or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _preferred_assist_pipeline_tts_language(hass: HomeAssistant) -> str:
+    """Return the preferred Assist pipeline language for room TTS fallbacks."""
+    try:
+        from homeassistant.components.assist_pipeline import async_get_pipeline
+
+        pipeline = async_get_pipeline(hass, None)
+    except Exception:
+        return ""
+
+    for candidate in (
+        getattr(pipeline, "tts_language", None),
+        getattr(pipeline, "language", None),
+        getattr(pipeline, "conversation_language", None),
+    ):
+        value = str(candidate or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _resolve_room_tts_settings(
+    hass: HomeAssistant,
+    *,
+    provider: str,
+    room,
+) -> dict[str, str]:
+    """Resolve room TTS settings using room, assistant, then provider defaults."""
+    language = str(getattr(room, "tts_language", "") or "").strip()
+    voice = str(getattr(room, "tts_voice", "") or "").strip()
+
+    if not language:
+        language = _preferred_assist_pipeline_tts_language(hass)
+
+    if not voice:
+        voice = _preferred_assist_pipeline_tts_voice(hass)
+
+    if not voice and provider:
+        entity_id = TTS_PROVIDER_ENTITY_IDS.get(provider)
+        if entity_id and TTS_DATA_COMPONENT in hass.data:
+            entity_component = hass.data[TTS_DATA_COMPONENT]
+            tts_entity = entity_component.get_entity(entity_id)
+            if tts_entity is not None:
+                if not language:
+                    default_language = str(getattr(tts_entity, "default_language", "") or "").strip()
+                    if default_language:
+                        language = default_language
+                if language:
+                    try:
+                        supported_voices = tts_entity.async_get_supported_voices(language)
+                    except Exception:
+                        supported_voices = None
+                    if supported_voices:
+                        first_voice = next(
+                            (
+                                str(getattr(voice_info, "voice_id", "") or "").strip()
+                                for voice_info in supported_voices
+                                if str(getattr(voice_info, "voice_id", "") or "").strip()
+                            ),
+                            "",
+                        )
+                        if first_voice:
+                            voice = first_voice
+
+    return {"language": language, "voice": voice}
+
+
+def _build_messaging_provenance(
+    *,
+    person_id: str,
+    linked_area_id: str | None,
+    requested_target: str,
+    requested_target_supplied: bool,
+    selected_target_id: str,
+    selected_service: str,
+    delivery_channel: str,
+    routing_path: str,
+    explicit_entity_target: bool,
+    messaging_governance_boundary: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Build bounded provenance metadata for person-scoped message routing."""
+    created_at = datetime.now(timezone.utc).isoformat()
+    provenance_id = f"msgprov_{uuid4().hex}"
+    room_state = "known" if linked_area_id else "unknown"
+    actor_reference = {"service": "concierge.push_person_message"}
+    destination_reference: dict[str, Any] = {
+        "target_id": selected_target_id,
+        "service": selected_service,
+        "delivery_channel": delivery_channel,
+    }
+    if explicit_entity_target:
+        destination_reference["entity_id"] = selected_target_id
+
+    provenance = {
+        "provenance_id": provenance_id,
+        "provenance_state": "known",
+        "created_at": created_at,
+        "created_by": {
+            "actor_reference": actor_reference,
+            "actor_state": "system",
+            "provenance_reference": f"provenance.created_by.{provenance_id}",
+        },
+        "delivered_to": {
+            "destination_reference": destination_reference,
+            "destination_state": "known",
+            "provenance_reference": f"provenance.delivered_to.{provenance_id}",
+        },
+        "created_in_room": {
+            "room_reference": ({"area_id": linked_area_id} if linked_area_id else {}),
+            "room_state": room_state,
+            "room_lineage_reference": (
+                f"provenance.room.{linked_area_id}.{provenance_id}" if linked_area_id else None
+            ),
+        },
+        "created_via": {
+            "method": "service",
+            "interaction_pathway": "person_push_message_service",
+            "attribution_pathway": "explicit_person_id",
+        },
+        "explanation_source": {
+            "source_reference": "concierge.push_person_message",
+            "lineage_reference": provenance_id,
+            "attribution_explanation_references": [
+                messaging_governance_boundary["boundary_path"],
+                routing_path,
+            ],
+        },
+        "routing_decision": {
+            "requested_target_id": requested_target or None,
+            "requested_target_supplied": requested_target_supplied,
+            "selected_target_id": selected_target_id,
+            "selected_service": selected_service,
+            "delivery_channel": delivery_channel,
+            "routing_path": routing_path,
+            "explicit_entity_target": explicit_entity_target,
+        },
+        "authority_boundary": {
+            "concierge_role": "bounded_consumer_orchestrator",
+            "message_authority_external": bool(
+                messaging_governance_boundary.get("message_authority_external", False)
+            ),
+            "provenance_authority_external": bool(
+                messaging_governance_boundary.get("provenance_authority_external", False)
+            ),
+            "household_memory_authority_external": bool(
+                messaging_governance_boundary.get("household_memory_authority_external", False)
+            ),
+            "claims_upstream_truth": False,
+            "claims_identity_authority": False,
+            "claims_household_memory_authority": False,
+        },
+    }
+
+    activity_ref = {
+        "ref_type": "messaging_provenance",
+        "provenance_id": provenance_id,
+        "created_at": created_at,
+        "source_service": "concierge.push_person_message",
+        "delivery_channel": delivery_channel,
+        "selected_service": selected_service,
+        "selected_target_id": selected_target_id,
+        "routing_path": routing_path,
+        "requested_target_supplied": requested_target_supplied,
+        "explicit_entity_target": explicit_entity_target,
+        "created_in_room": linked_area_id,
+        "boundary_path": messaging_governance_boundary["boundary_path"],
+        "message_authority_external": bool(
+            messaging_governance_boundary.get("message_authority_external", False)
+        ),
+        "provenance_authority_external": bool(
+            messaging_governance_boundary.get("provenance_authority_external", False)
+        ),
+        "household_memory_authority_external": bool(
+            messaging_governance_boundary.get("household_memory_authority_external", False)
+        ),
+        "claims_upstream_truth": False,
+        "claims_identity_authority": False,
+        "claims_household_memory_authority": False,
+        "person_id": person_id,
+    }
+    return provenance, activity_ref
+
+
+def _build_notification_delivery_boundary(
+    *,
+    route_scope: str,
+    context_area_id: str | None,
+    resolved_composite_id: str | None,
+    recipient_scope: str,
+    message_context_type: str,
+    delivery_channel: str,
+    selected_service: str,
+    selected_target_id: str,
+    routing_path: str,
+    explicit_entity_target: bool,
+) -> dict[str, Any]:
+    """Return #341-governed notification/delivery boundary metadata."""
+    return {
+        "notification_delivery_boundary_version": 1,
+        "applicable": True,
+        "boundary_path": "governed_notification_delivery_boundary",
+        "deterministic_boundary": True,
+        "concierge_role": "bounded_consumer_orchestrator",
+        "delivery_behavior_owned_by_concierge": True,
+        "delivery_authority_external": True,
+        "recipient_authority_external": True,
+        "consent_authority_external": True,
+        "visibility_authority_external": True,
+        "delivery_lifecycle_governed": True,
+        "delivery_execution_rules": {
+            "invoke_configured_home_assistant_service": True,
+            "record_execution_outcome": True,
+            "record_delivery_channel": True,
+            "record_delivery_target": True,
+            "derive_recipient_authority": False,
+            "derive_consent_authority": False,
+            "derive_visibility_authority": False,
+            "derive_truth_authority": False,
+        },
+        "governance_controls": {
+            "route_scope": route_scope,
+            "context_area_id": context_area_id,
+            "resolved_composite_id": resolved_composite_id,
+            "recipient_scope": recipient_scope,
+            "message_context_type": message_context_type,
+            "delivery_channel": delivery_channel,
+            "selected_service": selected_service,
+            "selected_target_id": selected_target_id,
+            "routing_path": routing_path,
+            "explicit_entity_target": explicit_entity_target,
+            "delivery_boundary_only": True,
+            "recipient_authorization_enabled": False,
+            "consent_adjudication_enabled": False,
+            "visibility_adjudication_enabled": False,
+        },
+        "ownership_boundaries": {
+            "governance_owner": "homes_that_behave_well",
+            "delivery_runtime_owner": "concierge",
+            "notification_runtime_owner": "concierge",
+            "recipient_authority_owner": "identity_and_presence_governance",
+            "consent_authority_owner": "privacy_and_consent_governance",
+            "visibility_authority_owner": "privacy_and_consent_governance",
+            "provenance_owner": "provenance_governance",
+        },
+        "diagnostics_and_explainability": {
+            "delivery_state_visible": True,
+            "delivery_success_state_visible": True,
+            "delivery_failure_state_visible": True,
+            "recipient_acknowledgement_claimed": False,
+            "recipient_seen_claimed": False,
+        },
+        "deferred_release_4_owners": {
+            "recipient_consent_privacy_visibility_boundary": "#342",
+            "messaging_diagnostics_explainability": "#343",
+            "release_4_validation": "#349",
+        },
+    }
+
+
+def _to_str_list(value: Any) -> list[str]:
+    """Return a normalized string list from optional config values."""
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
+
+
+def _build_recipient_consent_privacy_visibility_boundary(
+    *,
+    profile: PersonProfile,
+    requested_target: str,
+    selected_target_id: str,
+    selected_service: str,
+    delivery_channel: str,
+    routing_path: str,
+    explicit_entity_target: bool,
+    route_scope: str,
+    context_area_id: str | None,
+) -> tuple[dict[str, Any], dict[str, Any], bool, str]:
+    """Return #342-governed recipient/consent/privacy/visibility boundary metadata and decision."""
+    consent = profile.consent if isinstance(profile.consent, dict) else {}
+    recipient_eligible = bool(consent.get("recipient_eligible", True))
+    require_delivery_consent = bool(consent.get("require_delivery_consent", False))
+    consent_granted = bool(consent.get("delivery_consent_granted", False))
+    privacy_mode = str(consent.get("privacy_mode", "standard") or "standard").strip().lower()
+    visibility_mode = str(consent.get("visibility_mode", "standard") or "standard").strip().lower()
+    allowed_delivery_channels = {
+        item.lower() for item in _to_str_list(consent.get("allowed_delivery_channels"))
+    }
+    blocked_delivery_targets = {
+        item.lower() for item in _to_str_list(consent.get("blocked_delivery_targets"))
+    }
+    blocked_services = {item.lower() for item in _to_str_list(consent.get("blocked_services"))}
+    allowed_private_channels = {"mobile_notify", "web_ui"}
+
+    decision_allowed = True
+    decision_reason = "delivery_permitted"
+
+    if not recipient_eligible:
+        decision_allowed = False
+        decision_reason = "recipient_not_eligible"
+    elif require_delivery_consent and not consent_granted:
+        decision_allowed = False
+        decision_reason = "consent_required_not_granted"
+    elif (
+        requested_target.lower() in blocked_delivery_targets
+        or selected_target_id.lower() in blocked_delivery_targets
+        or selected_service.lower() in blocked_services
+    ):
+        decision_allowed = False
+        decision_reason = "delivery_target_blocked"
+    elif allowed_delivery_channels and delivery_channel.lower() not in allowed_delivery_channels:
+        decision_allowed = False
+        decision_reason = "delivery_channel_not_allowed"
+    elif privacy_mode == "private_only" and delivery_channel not in allowed_private_channels:
+        decision_allowed = False
+        decision_reason = "privacy_boundary_channel_restricted"
+    elif visibility_mode == "restricted" and delivery_channel in {"voice_assistant", "room_tts"}:
+        decision_allowed = False
+        decision_reason = "visibility_boundary_channel_restricted"
+
+    boundary = {
+        "recipient_consent_privacy_visibility_boundary_version": 1,
+        "applicable": True,
+        "boundary_path": "governed_recipient_consent_privacy_visibility_boundary",
+        "deterministic_boundary": True,
+        "concierge_role": "bounded_consumer_orchestrator",
+        "recipient_authority_external": True,
+        "consent_authority_external": True,
+        "privacy_authority_external": True,
+        "visibility_authority_external": True,
+        "recipient_boundary_enforced": True,
+        "consent_boundary_enforced": True,
+        "privacy_boundary_enforced": True,
+        "visibility_boundary_enforced": True,
+        "governance_controls": {
+            "route_scope": route_scope,
+            "context_area_id": context_area_id,
+            "recipient_scope": "person",
+            "message_context_type": "person_push",
+            "delivery_channel": delivery_channel,
+            "selected_service": selected_service,
+            "selected_target_id": selected_target_id,
+            "routing_path": routing_path,
+            "explicit_entity_target": explicit_entity_target,
+            "recipient_boundary_only": True,
+            "consent_boundary_only": True,
+            "privacy_boundary_only": True,
+            "visibility_boundary_only": True,
+        },
+        "eligibility_decision": {
+            "delivery_permitted": decision_allowed,
+            "decision_reason": decision_reason,
+            "recipient_eligible": recipient_eligible,
+            "require_delivery_consent": require_delivery_consent,
+            "delivery_consent_granted": consent_granted,
+            "privacy_mode": privacy_mode,
+            "visibility_mode": visibility_mode,
+        },
+        "ownership_boundaries": {
+            "governance_owner": "homes_that_behave_well",
+            "recipient_authority_owner": "identity_and_presence_governance",
+            "consent_authority_owner": "privacy_and_consent_governance",
+            "privacy_authority_owner": "privacy_and_consent_governance",
+            "visibility_authority_owner": "privacy_and_consent_governance",
+            "messaging_runtime_owner": "concierge",
+        },
+        "explainability": {
+            "eligibility_explainable": True,
+            "denial_explainable": not decision_allowed,
+            "recipient_authority_claimed": False,
+            "consent_authority_claimed": False,
+            "privacy_authority_claimed": False,
+            "visibility_authority_claimed": False,
+        },
+        "deferred_release_4_owners": {
+            "messaging_diagnostics_explainability": "#343",
+            "household_memory_boundary": "#344",
+            "release_4_validation": "#349",
+        },
+    }
+
+    activity_ref = {
+        "ref_type": "recipient_consent_privacy_visibility_boundary",
+        "boundary_path": boundary["boundary_path"],
+        "delivery_permitted": decision_allowed,
+        "decision_reason": decision_reason,
+        "recipient_eligible": recipient_eligible,
+        "require_delivery_consent": require_delivery_consent,
+        "delivery_consent_granted": consent_granted,
+        "privacy_mode": privacy_mode,
+        "visibility_mode": visibility_mode,
+        "delivery_channel": delivery_channel,
+        "selected_service": selected_service,
+        "selected_target_id": selected_target_id,
+        "routing_path": routing_path,
+        "explicit_entity_target": explicit_entity_target,
+    }
+    return boundary, activity_ref, decision_allowed, decision_reason
+
+
+def _build_messaging_diagnostics_explainability(
+    *,
+    route_scope: str,
+    context_area_id: str | None,
+    recipient_scope: str,
+    message_context_type: str,
+    delivery_permitted: bool,
+    decision_reason: str,
+    delivery_channel: str,
+    selected_service: str,
+    selected_target_id: str,
+    routing_path: str,
+    explicit_entity_target: bool,
+    requested_target_supplied: bool,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Return #343-governed messaging diagnostics and explainability metadata."""
+    governance_boundary_involved = (
+        "recipient_consent_privacy_visibility_boundary"
+        if not delivery_permitted
+        else "notification_delivery_boundary"
+    )
+
+    explainability = {
+        "messaging_diagnostics_explainability_version": 1,
+        "applicable": True,
+        "boundary_path": "governed_messaging_diagnostics_explainability",
+        "deterministic_explainability": True,
+        "concierge_role": "bounded_consumer_orchestrator",
+        "questions_answered": {
+            "what_happened_explainable": True,
+            "why_it_happened_explainable": True,
+            "why_delivery_occurred_explainable": delivery_permitted,
+            "why_delivery_denied_explainable": not delivery_permitted,
+            "governance_boundary_visible": True,
+            "routing_path_visible": True,
+            "delivery_channel_visible": True,
+            "decision_inputs_visible": True,
+        },
+        "decision_summary": {
+            "delivery_permitted": delivery_permitted,
+            "decision_reason": decision_reason,
+            "governance_boundary_involved": governance_boundary_involved,
+            "delivery_channel": delivery_channel,
+            "selected_service": selected_service,
+            "selected_target_id": selected_target_id,
+            "routing_path": routing_path,
+            "explicit_entity_target": explicit_entity_target,
+        },
+        "decision_inputs_used": {
+            "route_scope": route_scope,
+            "context_area_id": context_area_id,
+            "recipient_scope": recipient_scope,
+            "message_context_type": message_context_type,
+            "requested_target_supplied": requested_target_supplied,
+        },
+        "logging_strategy": {
+            "governance_policy_denied_level": "info",
+            "operational_delivery_failure_level": "error",
+            "unexpected_runtime_condition_level": "warning",
+            "normal_success_level": "debug",
+            "governance_outcome_is_operational_failure": False,
+        },
+        "authority_non_rights": {
+            "diagnostics_authority_external": True,
+            "explainability_authority_external": True,
+            "creates_authority": False,
+            "creates_truth": False,
+            "creates_memory": False,
+            "creates_identity": False,
+        },
+        "deferred_release_4_owners": {
+            "household_memory_boundary": "#344",
+            "release_4_validation": "#349",
+        },
+    }
+
+    activity_ref = {
+        "ref_type": "messaging_diagnostics_explainability",
+        "boundary_path": explainability["boundary_path"],
+        "delivery_permitted": delivery_permitted,
+        "decision_reason": decision_reason,
+        "governance_boundary_involved": governance_boundary_involved,
+        "delivery_channel": delivery_channel,
+        "selected_service": selected_service,
+        "selected_target_id": selected_target_id,
+        "routing_path": routing_path,
+        "explicit_entity_target": explicit_entity_target,
+        "requested_target_supplied": requested_target_supplied,
+    }
+    return explainability, activity_ref
+
+
+def _build_household_memory_governance_boundary(
+    *,
+    route_scope: str,
+    context_area_id: str | None,
+    resolved_composite_id: str | None,
+    recipient_scope: str,
+    message_context_type: str,
+    delivery_channel: str,
+    selected_service: str,
+    selected_target_id: str,
+    routing_path: str,
+    explicit_entity_target: bool,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Return #344-governed household-memory boundary metadata and activity ref."""
+    boundary = {
+        "household_memory_governance_boundary_version": 1,
+        "applicable": True,
+        "boundary_path": "governed_household_memory_boundary",
+        "deterministic_boundary": True,
+        "boundary_status": "active",
+        "concierge_role": "bounded_consumer_orchestrator",
+        "household_memory_role": "bounded_record_reference_consumer",
+        "permitted_role_description": "preserve bounded explainable governed context references only",
+        "prohibited_authority_claims": {
+            "claims_household_truth_authority": False,
+            "claims_identity_authority": False,
+            "claims_occupancy_authority": False,
+            "claims_messaging_authority": False,
+            "claims_consent_authority": False,
+            "claims_privacy_authority": False,
+            "claims_source_of_truth_authority": False,
+        },
+        "authority_source_relationships": {
+            "references_household_memory_governance": True,
+            "references_provenance_authority": True,
+            "references_messaging_authority": True,
+            "references_identity_authority": True,
+            "references_privacy_authority": True,
+            "references_retention_authority": True,
+            "references_occupancy_authority": True,
+            "replaces_any_authority": False,
+        },
+        "governance_controls": {
+            "route_scope": route_scope,
+            "context_area_id": context_area_id,
+            "resolved_composite_id": resolved_composite_id,
+            "recipient_scope": recipient_scope,
+            "message_context_type": message_context_type,
+            "delivery_channel": delivery_channel,
+            "selected_service": selected_service,
+            "selected_target_id": selected_target_id,
+            "routing_path": routing_path,
+            "explicit_entity_target": explicit_entity_target,
+            "household_memory_boundary_only": True,
+            "ownership_rules_enabled": False,
+            "consumption_rules_enabled": False,
+            "retention_rules_enabled": False,
+            "separation_rules_enabled": False,
+        },
+        "non_authority_assertions": {
+            "memory_is_not_truth": True,
+            "memory_is_not_identity": True,
+            "memory_is_not_consent": True,
+            "memory_is_not_privacy_policy": True,
+            "memory_is_not_occupancy": True,
+            "memory_is_not_messaging": True,
+            "memory_is_not_source_of_record": True,
+        },
+        "ownership_boundaries": {
+            "governance_owner": "homes_that_behave_well",
+            "household_memory_governance_owner": "homes_that_behave_well",
+            "household_memory_runtime_owner": "concierge",
+            "identity_authority_owner": "voice_identity",
+            "occupancy_authority_owner": "foundation",
+            "messaging_authority_owner": "messaging_systems",
+            "consent_authority_owner": "privacy_and_consent_governance",
+            "privacy_authority_owner": "privacy_and_consent_governance",
+            "provenance_owner": "provenance_governance",
+        },
+        "deferred_release_4_owners": {
+            "memory_ownership_and_consumption_boundary": "#345",
+            "memory_identity_privacy_retention_separation": "#346",
+            "memory_messaging_continuity_affinity_occupancy_restoration_separation": "#347",
+            "memory_provenance_diagnostics_explainability": "#348",
+            "release_4_validation": "#349",
+        },
+    }
+
+    ref = {
+        "ref_type": "household_memory_governance_boundary",
+        "boundary_path": boundary["boundary_path"],
+        "boundary_status": boundary["boundary_status"],
+        "household_memory_role": boundary["household_memory_role"],
+        "route_scope": route_scope,
+        "context_area_id": context_area_id,
+        "resolved_composite_id": resolved_composite_id,
+        "recipient_scope": recipient_scope,
+        "message_context_type": message_context_type,
+        "delivery_channel": delivery_channel,
+        "selected_service": selected_service,
+        "selected_target_id": selected_target_id,
+        "routing_path": routing_path,
+        "explicit_entity_target": explicit_entity_target,
+        "claims_household_truth_authority": False,
+        "claims_identity_authority": False,
+        "claims_occupancy_authority": False,
+        "claims_messaging_authority": False,
+        "claims_consent_authority": False,
+        "claims_privacy_authority": False,
+        "claims_source_of_truth_authority": False,
+    }
+    return boundary, ref
+
+
+def _build_household_memory_ownership_consumption_boundary(
+    *,
+    route_scope: str,
+    context_area_id: str | None,
+    resolved_composite_id: str | None,
+    recipient_scope: str,
+    message_context_type: str,
+    delivery_channel: str,
+    selected_service: str,
+    selected_target_id: str,
+    routing_path: str,
+    explicit_entity_target: bool,
+    consumption_permitted: bool,
+    consumption_decision_reason: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Return #345-governed household-memory ownership/consumption metadata and activity ref."""
+    boundary = {
+        "household_memory_ownership_consumption_boundary_version": 1,
+        "applicable": True,
+        "boundary_path": "governed_household_memory_ownership_consumption_boundary",
+        "deterministic_boundary": True,
+        "boundary_status": "active",
+        "concierge_role": "bounded_consumer_orchestrator",
+        "memory_ownership": {
+            "memory_owner": "household_memory_governance",
+            "memory_runtime_owner": "concierge",
+            "ownership_authority_source": "household_memory_contract",
+            "ownership_reason": "governed_household_memory_contract_boundary",
+            "ownership_scope": "bounded_memory_visibility_and_explainability_references",
+            "owner_may_create_memory_references": True,
+            "owner_may_create_authority": False,
+            "owner_may_replace_source_of_truth": False,
+        },
+        "memory_creation_boundary": {
+            "creation_allowed": True,
+            "created_by_role": "bounded_consumer_orchestrator",
+            "creation_source_requirements": {
+                "consume_governed_inputs_only": True,
+                "provenance_reference_required": True,
+                "event_reference_required": False,
+                "creates_authority": False,
+                "creates_source_of_truth": False,
+            },
+        },
+        "memory_consumption_boundary": {
+            "consumption_permitted": consumption_permitted,
+            "consumption_decision_reason": consumption_decision_reason,
+            "allowed_consumers": [
+                "concierge_orchestration_runtime",
+                "concierge_messaging_explainability_runtime",
+                "concierge_diagnostics_visibility_runtime",
+            ],
+            "prohibited_consumption_claims": {
+                "consumption_claims_identity_authority": False,
+                "consumption_claims_occupancy_authority": False,
+                "consumption_claims_messaging_authority": False,
+                "consumption_claims_consent_authority": False,
+                "consumption_claims_privacy_authority": False,
+                "consumption_claims_source_of_truth_authority": False,
+            },
+        },
+        "authority_relationships": {
+            "references_household_memory_contract_authority": True,
+            "references_household_memory_model_authority": True,
+            "references_provenance_authority": True,
+            "references_event_authority": True,
+            "references_signal_authority": True,
+            "redefines_identity_authority": False,
+            "redefines_occupancy_authority": False,
+            "redefines_messaging_authority": False,
+            "redefines_consent_authority": False,
+            "redefines_privacy_authority": False,
+            "replaces_source_of_truth_authority": False,
+        },
+        "governance_controls": {
+            "route_scope": route_scope,
+            "context_area_id": context_area_id,
+            "resolved_composite_id": resolved_composite_id,
+            "recipient_scope": recipient_scope,
+            "message_context_type": message_context_type,
+            "delivery_channel": delivery_channel,
+            "selected_service": selected_service,
+            "selected_target_id": selected_target_id,
+            "routing_path": routing_path,
+            "explicit_entity_target": explicit_entity_target,
+            "ownership_boundary_only": True,
+            "consumption_boundary_only": True,
+            "retention_rules_enabled": False,
+            "separation_rules_enabled": False,
+        },
+        "ownership_explainability": {
+            "ownership_explainable": True,
+            "ownership_authority_claimed": False,
+            "ownership_source_of_truth_claimed": False,
+        },
+        "consumption_explainability": {
+            "consumption_explainable": True,
+            "consumption_allowed": consumption_permitted,
+            "consumption_denied": not consumption_permitted,
+            "consumption_reason": consumption_decision_reason,
+            "consumption_authority_claimed": False,
+        },
+        "non_authority_assertions": {
+            "ownership_is_not_authority": True,
+            "consumption_is_not_authority": True,
+            "memory_is_not_identity": True,
+            "memory_is_not_occupancy": True,
+            "memory_is_not_messaging": True,
+            "memory_is_not_consent": True,
+            "memory_is_not_privacy_policy": True,
+            "memory_is_not_source_of_record": True,
+        },
+        "deferred_release_4_owners": {
+            "memory_identity_privacy_retention_separation": "#346",
+            "memory_messaging_continuity_affinity_occupancy_restoration_separation": "#347",
+            "memory_provenance_diagnostics_explainability": "#348",
+            "release_4_validation": "#349",
+        },
+    }
+
+    ref = {
+        "ref_type": "household_memory_ownership_consumption_boundary",
+        "boundary_path": boundary["boundary_path"],
+        "boundary_status": boundary["boundary_status"],
+        "memory_owner": boundary["memory_ownership"]["memory_owner"],
+        "memory_runtime_owner": boundary["memory_ownership"]["memory_runtime_owner"],
+        "consumption_permitted": consumption_permitted,
+        "consumption_decision_reason": consumption_decision_reason,
+        "route_scope": route_scope,
+        "context_area_id": context_area_id,
+        "resolved_composite_id": resolved_composite_id,
+        "recipient_scope": recipient_scope,
+        "message_context_type": message_context_type,
+        "delivery_channel": delivery_channel,
+        "selected_service": selected_service,
+        "selected_target_id": selected_target_id,
+        "routing_path": routing_path,
+        "explicit_entity_target": explicit_entity_target,
+        "claims_household_truth_authority": False,
+        "claims_identity_authority": False,
+        "claims_occupancy_authority": False,
+        "claims_messaging_authority": False,
+        "claims_consent_authority": False,
+        "claims_privacy_authority": False,
+        "claims_source_of_truth_authority": False,
+    }
+    return boundary, ref
+
+
+def _build_household_memory_identity_privacy_retention_separation_boundary(
+    *,
+    route_scope: str,
+    context_area_id: str | None,
+    resolved_composite_id: str | None,
+    recipient_scope: str,
+    message_context_type: str,
+    delivery_channel: str,
+    selected_service: str,
+    selected_target_id: str,
+    routing_path: str,
+    explicit_entity_target: bool,
+    separation_permitted: bool,
+    separation_decision_reason: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Return #346-governed household-memory identity/privacy/retention separation metadata."""
+    boundary = {
+        "household_memory_identity_privacy_retention_separation_boundary_version": 1,
+        "applicable": True,
+        "boundary_path": "governed_household_memory_identity_privacy_retention_separation_boundary",
+        "deterministic_boundary": True,
+        "boundary_status": "active",
+        "concierge_role": "bounded_consumer_orchestrator",
+        "identity_separation": {
+            "identity_separated": True,
+            "identity_reference_mode": "bounded_identity_context_reference_only",
+            "identity_relationship_reference": "voice_identity_authority_external",
+            "identity_authority_claimed": False,
+            "identity_truth_decision_enabled": False,
+            "identity_resolution_performed": False,
+        },
+        "privacy_separation": {
+            "privacy_separated": True,
+            "privacy_boundary_path": "governed_recipient_consent_privacy_visibility_boundary",
+            "privacy_reference_mode": "governed_boundary_consumption_only",
+            "privacy_authority_claimed": False,
+            "privacy_policy_decision_enabled": False,
+            "private_memory_content_exposed": False,
+        },
+        "retention_separation": {
+            "retention_separated": True,
+            "retention_boundary_mode": "metadata_only",
+            "retention_authority_relationship": "htbw_governed_retention_policy_external",
+            "retention_authority_claimed": False,
+            "retention_decision_enabled": False,
+            "retention_deletion_enabled": False,
+            "retention_expiration_scheduler_enabled": False,
+            "retention_archival_enabled": False,
+        },
+        "separation_boundary_assertions": {
+            "memory_does_not_claim_identity_authority": True,
+            "memory_does_not_claim_privacy_authority": True,
+            "memory_does_not_claim_retention_authority": True,
+            "memory_does_not_claim_source_of_truth_authority": True,
+            "memory_does_not_expose_identity_internals": True,
+            "memory_does_not_expose_private_memory_content": True,
+        },
+        "authority_relationships": {
+            "references_household_memory_contract_authority": True,
+            "references_household_memory_model_authority": True,
+            "references_provenance_authority": True,
+            "references_privacy_boundary_authority": True,
+            "references_identity_authority": True,
+            "references_retention_authority": True,
+            "redefines_identity_authority": False,
+            "redefines_privacy_authority": False,
+            "redefines_retention_authority": False,
+            "replaces_source_of_truth_authority": False,
+        },
+        "governance_controls": {
+            "route_scope": route_scope,
+            "context_area_id": context_area_id,
+            "resolved_composite_id": resolved_composite_id,
+            "recipient_scope": recipient_scope,
+            "message_context_type": message_context_type,
+            "delivery_channel": delivery_channel,
+            "selected_service": selected_service,
+            "selected_target_id": selected_target_id,
+            "routing_path": routing_path,
+            "explicit_entity_target": explicit_entity_target,
+            "identity_separation_boundary_only": True,
+            "privacy_separation_boundary_only": True,
+            "retention_separation_boundary_only": True,
+            "cross_domain_separation_enabled": False,
+        },
+        "separation_explainability": {
+            "separation_explainable": True,
+            "separation_permitted": separation_permitted,
+            "separation_decision_reason": separation_decision_reason,
+            "identity_behavior_not_performed": "identity_authority_or_resolution_not_performed",
+            "privacy_behavior_not_performed": "privacy_policy_authority_not_performed",
+            "retention_behavior_not_performed": "retention_policy_execution_not_performed",
+        },
+        "non_authority_assertions": {
+            "identity_reference_is_not_identity_authority": True,
+            "privacy_classification_is_not_privacy_authority": True,
+            "retention_metadata_is_not_retention_authority": True,
+            "memory_is_not_source_of_truth": True,
+        },
+        "deferred_release_4_owners": {
+            "memory_messaging_continuity_affinity_occupancy_restoration_separation": "#347",
+            "memory_provenance_diagnostics_explainability": "#348",
+            "release_4_validation": "#349",
+        },
+    }
+
+    ref = {
+        "ref_type": "household_memory_identity_privacy_retention_separation_boundary",
+        "boundary_path": boundary["boundary_path"],
+        "boundary_status": boundary["boundary_status"],
+        "identity_separated": True,
+        "privacy_separated": True,
+        "retention_separated": True,
+        "separation_permitted": separation_permitted,
+        "separation_decision_reason": separation_decision_reason,
+        "route_scope": route_scope,
+        "context_area_id": context_area_id,
+        "resolved_composite_id": resolved_composite_id,
+        "recipient_scope": recipient_scope,
+        "message_context_type": message_context_type,
+        "delivery_channel": delivery_channel,
+        "selected_service": selected_service,
+        "selected_target_id": selected_target_id,
+        "routing_path": routing_path,
+        "explicit_entity_target": explicit_entity_target,
+        "claims_identity_authority": False,
+        "claims_privacy_authority": False,
+        "claims_retention_authority": False,
+        "claims_source_of_truth_authority": False,
+    }
+    return boundary, ref
+
+
+async def _resolve_tts_media_id(
+    hass: HomeAssistant,
+    *,
+    provider: str,
+    message: str,
+    language: str,
+    voice: str,
+) -> str:
+    """Generate a TTS media identifier using the configured provider and voice settings."""
+    engine_entity_id = TTS_PROVIDER_ENTITY_IDS.get(provider)
+    if engine_entity_id is None:
+        return ""
+
+    payload: dict[str, Any] = {
+        "engine_id": engine_entity_id,
+        "message": message,
+        "cache": False,
+    }
+    if language:
+        payload["language"] = language
+    if voice:
+        payload["options"] = {"voice": voice}
+
+    try:
+        result = await hass.services.async_call(
+            "tts",
+            "get_url",
+            payload,
+            blocking=True,
+            return_response=True,
+        )
+    except Exception:
+        return ""
+
+    if not isinstance(result, dict):
+        return ""
+    media_id = str(result.get("path") or result.get("url") or "").strip()
+    return media_id
+
 def _resolve_target_from_alias(target: str, area_id: str | None, aliases: dict[str, str]) -> str:
     """Resolve execution alias to concrete target string if configured."""
     if area_id and target in aliases:
         return aliases[target]
     return target
+
+
+def _room_vocabulary_feature_options(state) -> dict[str, Any]:
+    """Return configured room vocabulary feature options when enabled."""
+    raw = state.global_features.get("room_vocabulary_registry", {})
+    if not isinstance(raw, dict):
+        return {}
+    if "enabled" in raw and not bool(raw.get("enabled", False)):
+        return {}
+    options = raw.get("options", {})
+    return options if isinstance(options, dict) else {}
+
+
+def _entry_term(entry: dict[str, Any]) -> str:
+    """Extract canonical vocabulary term from one registry entry."""
+    direct = str(entry.get("term", "") or "").strip()
+    if direct:
+        return direct
+    nested = entry.get("vocabulary_entry", {})
+    if isinstance(nested, dict):
+        return str(nested.get("term", "") or "").strip()
+    return ""
+
+
+def _entry_alias_terms(entry: dict[str, Any]) -> list[str]:
+    """Extract alias terms from one registry entry."""
+    values: list[str] = []
+    aliases = entry.get("aliases", [])
+    if isinstance(aliases, list):
+        for item in aliases:
+            if isinstance(item, str):
+                text = item.strip()
+                if text:
+                    values.append(text)
+            elif isinstance(item, dict):
+                text = str(item.get("alias_term", "") or "").strip()
+                if text:
+                    values.append(text)
+    return values
+
+
+def _entry_scope_ids(entry: dict[str, Any]) -> tuple[str | None, str | None]:
+    """Extract room/composite scope references from one registry entry."""
+    area_id = str(entry.get("area_id", "") or "").strip() or None
+    composite_id = str(entry.get("composite_id", "") or "").strip() or None
+    if area_id or composite_id:
+        return area_id, composite_id
+
+    room_refs = entry.get("room_references", [])
+    if isinstance(room_refs, list):
+        for ref in room_refs:
+            if not isinstance(ref, dict):
+                continue
+            area_id = str(ref.get("area_id", "") or "").strip() or None
+            composite_id = str(ref.get("composite_id", "") or "").strip() or None
+            if area_id or composite_id:
+                return area_id, composite_id
+    return None, None
+
+
+def _resolve_room_scope_from_vocabulary(
+    state,
+    term: str,
+) -> dict[str, Any] | None:
+    """Resolve one room/composite scope from authoritative room vocabulary outputs."""
+    options = _room_vocabulary_feature_options(state)
+    entries = options.get("entries", [])
+    if not isinstance(entries, list):
+        return None
+
+    probe = term.strip().lower()
+    if not probe:
+        return None
+
+    matches: list[dict[str, Any]] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        canonical = _entry_term(entry)
+        aliases = _entry_alias_terms(entry)
+        area_id, composite_id = _entry_scope_ids(entry)
+        if not area_id and not composite_id:
+            continue
+
+        terms = [canonical, *aliases]
+        normalized = [item.strip().lower() for item in terms if item.strip()]
+        if probe not in normalized:
+            continue
+        matches.append(
+            {
+                "matched_term": probe,
+                "canonical_term": canonical,
+                "area_id": area_id,
+                "composite_id": composite_id,
+                "source": "room_vocabulary_registry",
+            }
+        )
+
+    if not matches:
+        return None
+
+    unique_scopes = {(item.get("area_id"), item.get("composite_id")) for item in matches}
+    if len(unique_scopes) > 1:
+        raise vol.Invalid("room_vocabulary_ambiguous_scope")
+
+    return matches[0]
+
+
+def _device_entity_vocabulary_feature_options(state) -> dict[str, Any]:
+    """Return configured device/entity vocabulary feature options when enabled."""
+    raw = state.global_features.get("device_entity_vocabulary_registry", {})
+    if not isinstance(raw, dict):
+        return {}
+    if "enabled" in raw and not bool(raw.get("enabled", False)):
+        return {}
+    options = raw.get("options", {})
+    return options if isinstance(options, dict) else {}
+
+
+def _entry_entity_targets(entry: dict[str, Any]) -> list[str]:
+    """Extract candidate entity targets from one device/entity vocabulary entry."""
+    targets: list[str] = []
+    single = str(entry.get("entity_id", "") or "").strip()
+    if single:
+        targets.append(single)
+
+    multiple = entry.get("entity_ids", [])
+    if isinstance(multiple, list):
+        for item in multiple:
+            if not isinstance(item, str):
+                continue
+            value = item.strip()
+            if value:
+                targets.append(value)
+
+    return list(dict.fromkeys(targets))
+
+
+def _entry_matches_scope(
+    entry: dict[str, Any],
+    *,
+    area_id: str | None,
+    composite_id: str | None,
+) -> bool:
+    """Validate one vocabulary entry against resolved room/composite scope."""
+    entry_area_id, entry_composite_id = _entry_scope_ids(entry)
+
+    if composite_id:
+        if entry_composite_id:
+            return entry_composite_id == composite_id
+        return False
+
+    if area_id:
+        if entry_area_id:
+            return entry_area_id == area_id
+        return False
+
+    return not entry_area_id and not entry_composite_id
+
+
+def _resolve_entity_target_from_vocabulary(
+    state,
+    *,
+    term: str,
+    area_id: str | None,
+    composite_id: str | None,
+) -> dict[str, Any] | None:
+    """Resolve one device/entity target from authoritative vocabulary outputs."""
+    options = _device_entity_vocabulary_feature_options(state)
+    entries = options.get("entries", [])
+    if not isinstance(entries, list):
+        return None
+
+    probe = term.strip().lower()
+    if not probe:
+        return None
+
+    matches: list[dict[str, Any]] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        if not _entry_matches_scope(entry, area_id=area_id, composite_id=composite_id):
+            continue
+
+        canonical = _entry_term(entry)
+        aliases = _entry_alias_terms(entry)
+        terms = [canonical, *aliases]
+        normalized = [item.strip().lower() for item in terms if item.strip()]
+        if probe not in normalized:
+            continue
+
+        targets = _entry_entity_targets(entry)
+        if len(targets) == 0:
+            continue
+        if len(targets) > 1:
+            raise vol.Invalid("device_entity_vocabulary_ambiguous_target")
+
+        matches.append(
+            {
+                "matched_term": probe,
+                "canonical_term": canonical,
+                "entity_id": targets[0],
+                "area_id": area_id,
+                "composite_id": composite_id,
+                "source": "device_entity_vocabulary_registry",
+            }
+        )
+
+    if not matches:
+        return None
+
+    unique_entities = {item["entity_id"] for item in matches}
+    if len(unique_entities) > 1:
+        raise vol.Invalid("device_entity_vocabulary_ambiguous_target")
+
+    return matches[0]
+
+
+def _asset_vocabulary_feature_options(state) -> dict[str, Any]:
+    """Return configured asset vocabulary feature options when enabled."""
+    raw = state.global_features.get("asset_vocabulary_registry", {})
+    if not isinstance(raw, dict):
+        return {}
+    if "enabled" in raw and not bool(raw.get("enabled", False)):
+        return {}
+    options = raw.get("options", {})
+    return options if isinstance(options, dict) else {}
+
+
+def _entry_asset_targets(entry: dict[str, Any]) -> list[str]:
+    """Extract handed-off entity targets from one asset vocabulary entry."""
+    targets: list[str] = []
+
+    for field_name in (
+        "handoff_entity_id",
+        "target_entity_id",
+        "asset_entity_id",
+        "entity_id",
+    ):
+        value = str(entry.get(field_name, "") or "").strip()
+        if value:
+            targets.append(value)
+
+    for field_name in ("handoff_entity_ids", "target_entity_ids", "entity_ids"):
+        values = entry.get(field_name, [])
+        if not isinstance(values, list):
+            continue
+        for item in values:
+            if not isinstance(item, str):
+                continue
+            value = item.strip()
+            if value:
+                targets.append(value)
+
+    return list(dict.fromkeys(targets))
+
+
+def _resolve_asset_target_from_handoff(
+    state,
+    *,
+    term: str,
+    area_id: str | None,
+    composite_id: str | None,
+) -> dict[str, Any] | None:
+    """Resolve one handed-off entity target from authoritative asset vocabulary outputs."""
+    options = _asset_vocabulary_feature_options(state)
+    entries = options.get("entries", [])
+    if not isinstance(entries, list):
+        return None
+
+    probe = term.strip().lower()
+    if not probe:
+        return None
+
+    matches: list[dict[str, Any]] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        if not _entry_matches_scope(entry, area_id=area_id, composite_id=composite_id):
+            continue
+
+        canonical = _entry_term(entry)
+        aliases = _entry_alias_terms(entry)
+        terms = [canonical, *aliases]
+        normalized = [item.strip().lower() for item in terms if item.strip()]
+        if probe not in normalized:
+            continue
+
+        targets = _entry_asset_targets(entry)
+        if len(targets) == 0:
+            continue
+        if len(targets) > 1:
+            raise vol.Invalid("asset_vocabulary_ambiguous_target")
+
+        matches.append(
+            {
+                "matched_term": probe,
+                "canonical_term": canonical,
+                "asset_id": str(entry.get("asset_id", "") or "").strip() or None,
+                "entity_id": targets[0],
+                "area_id": area_id,
+                "composite_id": composite_id,
+                "source": "asset_intelligence_handoff",
+            }
+        )
+
+    if not matches:
+        return None
+
+    unique_entities = {item["entity_id"] for item in matches}
+    if len(unique_entities) > 1:
+        raise vol.Invalid("asset_vocabulary_ambiguous_target")
+
+    return matches[0]
 
 
 def _sanitize_request_summary(actor_class: str, request_summary: str) -> str:
@@ -505,6 +1800,2356 @@ def _area_name(hass: HomeAssistant, area_id: str | None) -> str:
     if area is None:
         return area_id
     return area.name or area_id
+
+
+def _require_known_area_id(hass: HomeAssistant, area_id: str, *, field_name: str = "area_id") -> None:
+    """Require room-scoped mutations to reference Foundation-owned area truth."""
+    if ar.async_get(hass).async_get_area(area_id) is None:
+        raise vol.Invalid(f"{field_name} does not exist in Home Assistant area registry: {area_id}")
+
+
+def _resolve_context_composite(
+    state,
+    *,
+    requested_area_id: str | None,
+    composite_id: str | None,
+):
+    """Resolve composite context deterministically from explicit or member area input."""
+    if composite_id:
+        composite = state.composites.get(composite_id)
+        if composite is None:
+            raise vol.Invalid(f"composite_id is not configured: {composite_id}")
+        if not composite.enabled:
+            raise vol.Invalid(f"composite_id is disabled: {composite_id}")
+        return composite
+
+    if not requested_area_id:
+        return None
+
+    for configured_id in sorted(state.composites):
+        composite = state.composites[configured_id]
+        if composite.enabled and requested_area_id in composite.area_ids:
+            return composite
+
+    return None
+
+
+def _select_context_entries(
+    state,
+    *,
+    room,
+) -> list[dict[str, Any]]:
+    """Return deterministic room-projected global context entries."""
+    selected: list[dict[str, Any]] = []
+    global_overlays = room.global_overlays if room is not None else {}
+
+    for context_type in sorted(state.contexts):
+        context = state.contexts[context_type]
+        usage = state.global_context_usage.get(context_type, {})
+        globally_enabled = bool(usage.get("enabled", context.available))
+        room_enabled = bool(global_overlays.get(context_type, True))
+        projection_enabled = globally_enabled and room_enabled and context.available
+        if not projection_enabled:
+            continue
+        selected.append(
+            {
+                "context_type": context.context_type,
+                "summary": context.summary,
+                "detail": context.detail,
+                "speakable": context.speakable,
+                "available": context.available,
+            }
+        )
+
+    return selected
+
+
+def _select_signal_entries(state) -> list[dict[str, Any]]:
+    """Return deterministic runtime signal entries."""
+    selected: list[dict[str, Any]] = []
+    for signal_type in sorted(state.signals):
+        signal = state.signals[signal_type]
+        if not signal.available:
+            continue
+        selected.append(
+            {
+                "signal_type": signal.signal_type,
+                "summary": signal.summary,
+                "state": signal.state,
+                "available": signal.available,
+            }
+        )
+    return selected
+
+
+def _assemble_foundation_context(
+    state,
+    *,
+    requested_area_id: str | None = None,
+    composite_id: str | None = None,
+    person_profile: PersonProfile | None = None,
+    include_context: bool = True,
+    include_signals: bool = True,
+) -> dict[str, Any]:
+    """Assemble a bounded runtime context envelope from existing authoritative inputs."""
+    composite = _resolve_context_composite(
+        state,
+        requested_area_id=requested_area_id,
+        composite_id=composite_id,
+    )
+    resolved_composite_id = composite.composite_id if composite is not None else None
+    context_area_id = requested_area_id
+    if composite is not None:
+        context_area_id = composite.primary_area or (composite.area_ids[0] if composite.area_ids else requested_area_id)
+
+    room = state.rooms.get(context_area_id) if context_area_id else None
+    if room is None and requested_area_id and requested_area_id != context_area_id:
+        room = state.rooms.get(requested_area_id)
+
+    contexts = _select_context_entries(state, room=room) if include_context else []
+    signals = _select_signal_entries(state) if include_signals else []
+
+    summary_parts: list[str] = []
+    summary_parts.extend(item["summary"] for item in contexts if item.get("summary"))
+    summary_parts.extend(item["summary"] for item in signals if item.get("summary"))
+
+    return {
+        "requested_area_id": requested_area_id,
+        "context_area_id": context_area_id,
+        "resolved_composite_id": resolved_composite_id,
+        "room": {
+            "area_id": room.area_id if room is not None else context_area_id,
+            "posture": room.posture if room is not None else None,
+            "global_overlays": dict(room.global_overlays) if room is not None else {},
+            "weather_source_entity_ids": list(room.weather_source_entity_ids) if room is not None else [],
+            "news_source_entity_ids": list(room.news_source_entity_ids) if room is not None else [],
+        },
+        "composite": (
+            {
+                "composite_id": composite.composite_id,
+                "name": composite.name,
+                "primary_area": composite.primary_area,
+                "area_ids": list(composite.area_ids),
+            }
+            if composite is not None
+            else None
+        ),
+        "person": (
+            {
+                "person_id": person_profile.person_id,
+                "linked_area_id": person_profile.linked_area_id,
+            }
+            if person_profile is not None
+            else None
+        ),
+        "contexts": contexts,
+        "signals": signals,
+        "summary": " | ".join(summary_parts),
+        "context_source_count": len(contexts),
+        "signal_count": len(signals),
+    }
+
+
+def _context_fallback_status(
+    state,
+    *,
+    requested_area_id: str | None,
+    assembled_context: dict[str, Any],
+) -> dict[str, Any]:
+    """Return bounded fallback-context status derived from existing assembled context."""
+    has_context_area = bool(assembled_context.get("context_area_id"))
+    has_global_context = bool(assembled_context.get("context_source_count", 0))
+    requested_room_known = bool(requested_area_id and requested_area_id in state.rooms)
+
+    fallback_reason: str | None = None
+    if not requested_area_id:
+        fallback_reason = "no_room_context"
+    elif not requested_room_known:
+        fallback_reason = "room_context_unavailable"
+    elif not has_context_area:
+        fallback_reason = "context_area_unresolved"
+
+    fallback_applied = bool(fallback_reason and has_global_context)
+    return {
+        "fallback_context_applied": fallback_applied,
+        "fallback_reason": fallback_reason if fallback_applied else None,
+        "global_context_continuity_available": has_global_context,
+    }
+
+
+def _resolve_execution_preference_scope_id(
+    state,
+    *,
+    requested_area_id: str | None,
+    assembled_context: dict[str, Any] | None,
+) -> str | None:
+    """Return the most specific configured execution-preference scope."""
+    candidates: list[str] = []
+    if assembled_context is not None:
+        resolved_composite_id = assembled_context.get("resolved_composite_id")
+        context_area_id = assembled_context.get("context_area_id")
+        if isinstance(resolved_composite_id, str) and resolved_composite_id:
+            candidates.append(resolved_composite_id)
+        if isinstance(context_area_id, str) and context_area_id:
+            candidates.append(context_area_id)
+    if requested_area_id and requested_area_id not in candidates:
+        candidates.append(requested_area_id)
+
+    for scope_id in candidates:
+        if scope_id in state.execution_preferences:
+            return scope_id
+    return None
+
+
+def _resolve_preserved_execution_target(
+    state,
+    *,
+    assembled_context: dict[str, Any],
+    requested_target: str,
+    default_resolved_target: str,
+) -> str:
+    """Preserve composite-room execution outcomes by honoring composite preferences."""
+    resolved_composite_id = assembled_context.get("resolved_composite_id")
+    if not isinstance(resolved_composite_id, str) or not resolved_composite_id:
+        return default_resolved_target
+
+    preferences = state.execution_preferences.get(resolved_composite_id, {})
+    if not isinstance(preferences, dict):
+        return default_resolved_target
+
+    preferred_target = str(preferences.get("target", "") or "").strip()
+    if not preferred_target:
+        return default_resolved_target
+
+    if preferred_target == requested_target:
+        return default_resolved_target
+
+    return preferred_target
+
+
+def _build_execute_envelope(
+    state,
+    *,
+    requested_area_id: str | None,
+    call: ServiceCall,
+    capabilities: dict[str, Any],
+    assembled_context: dict[str, Any],
+    resolved_target: str,
+    room_vocabulary_resolution: dict[str, Any] | None,
+    device_entity_vocabulary_resolution: dict[str, Any] | None,
+    asset_vocabulary_resolution: dict[str, Any] | None,
+    domain: str,
+    service: str,
+    data: dict[str, Any],
+) -> dict[str, Any]:
+    """Build a bounded execution envelope for orchestration requests."""
+    fallback_status = _context_fallback_status(
+        state,
+        requested_area_id=requested_area_id,
+        assembled_context=assembled_context,
+    )
+    preference_scope_id = _resolve_execution_preference_scope_id(
+        state,
+        requested_area_id=requested_area_id,
+        assembled_context=assembled_context,
+    )
+    preferences = (
+        dict(state.execution_preferences.get(preference_scope_id, {}))
+        if preference_scope_id is not None
+        else {}
+    )
+    route_scope = "global"
+    if assembled_context.get("resolved_composite_id"):
+        route_scope = "composite"
+    elif assembled_context.get("context_area_id"):
+        route_scope = "room"
+
+    if resolved_target.startswith("scene."):
+        plan_kind = "scene_turn_on"
+        target_type = "scene"
+    elif resolved_target.startswith("script."):
+        plan_kind = "script_turn_on"
+        target_type = "script"
+    else:
+        plan_kind = "entity_turn_on"
+        target_type = "entity"
+
+    capability_discovery = _build_capability_discovery(
+        capabilities=capabilities,
+        route_scope=route_scope,
+        context_area_id=assembled_context.get("context_area_id"),
+        resolved_composite_id=assembled_context.get("resolved_composite_id"),
+        room_vocabulary_resolution=room_vocabulary_resolution,
+        device_entity_vocabulary_resolution=device_entity_vocabulary_resolution,
+        asset_vocabulary_resolution=asset_vocabulary_resolution,
+    )
+    experience_governance_boundary = _build_experience_governance_boundary(
+        route_scope=route_scope,
+        context_area_id=assembled_context.get("context_area_id"),
+        resolved_composite_id=assembled_context.get("resolved_composite_id"),
+    )
+    continuity_governance_boundary = _build_continuity_governance_boundary(
+        execution_kind="orchestration",
+        route_scope=route_scope,
+        context_area_id=assembled_context.get("context_area_id"),
+        resolved_composite_id=assembled_context.get("resolved_composite_id"),
+    )
+    person_room_affinity_boundary = _build_person_room_affinity_boundary(
+        execution_kind="orchestration",
+        route_scope=route_scope,
+        context_area_id=assembled_context.get("context_area_id"),
+        resolved_composite_id=assembled_context.get("resolved_composite_id"),
+    )
+    privacy_household_memory_boundary = _build_privacy_household_memory_boundary(
+        execution_kind="orchestration",
+        route_scope=route_scope,
+        context_area_id=assembled_context.get("context_area_id"),
+        resolved_composite_id=assembled_context.get("resolved_composite_id"),
+    )
+    occupancy_governance_boundary = _build_occupancy_governance_boundary(
+        execution_kind="orchestration",
+        route_scope=route_scope,
+        context_area_id=assembled_context.get("context_area_id"),
+        resolved_composite_id=assembled_context.get("resolved_composite_id"),
+    )
+    presence_governance_boundary = _build_presence_governance_boundary(
+        execution_kind="orchestration",
+        route_scope=route_scope,
+        context_area_id=assembled_context.get("context_area_id"),
+        resolved_composite_id=assembled_context.get("resolved_composite_id"),
+    )
+    guest_unknown_occupant_behavior = _build_guest_unknown_occupant_behavior(
+        execution_kind="orchestration",
+        route_scope=route_scope,
+        context_area_id=assembled_context.get("context_area_id"),
+        resolved_composite_id=assembled_context.get("resolved_composite_id"),
+        person_id=call.data.get("person_id"),
+        context=call.data.get("context"),
+        occupancy_governance_boundary=occupancy_governance_boundary,
+        presence_governance_boundary=presence_governance_boundary,
+    )
+    multi_occupant_behavior = _build_multi_occupant_behavior(
+        execution_kind="orchestration",
+        route_scope=route_scope,
+        context_area_id=assembled_context.get("context_area_id"),
+        resolved_composite_id=assembled_context.get("resolved_composite_id"),
+        person_id=call.data.get("person_id"),
+        context=call.data.get("context"),
+        occupancy_governance_boundary=occupancy_governance_boundary,
+        presence_governance_boundary=presence_governance_boundary,
+        guest_unknown_occupant_behavior=guest_unknown_occupant_behavior,
+    )
+    capability_to_experience_handoff = _build_capability_to_experience_handoff(
+        capability_discovery=capability_discovery,
+        experience_governance_boundary=experience_governance_boundary,
+        execution_kind="orchestration",
+    )
+    experience_projection = _build_experience_projection(
+        capability_to_experience_handoff=capability_to_experience_handoff,
+        experience_governance_boundary=experience_governance_boundary,
+        execution_kind="orchestration",
+    )
+    experience_restoration_boundary = _build_experience_restoration_boundary(
+        experience_projection=experience_projection,
+        guest_unknown_occupant_behavior=guest_unknown_occupant_behavior,
+        multi_occupant_behavior=multi_occupant_behavior,
+        execution_kind="orchestration",
+        route_scope=route_scope,
+        context_area_id=assembled_context.get("context_area_id"),
+        resolved_composite_id=assembled_context.get("resolved_composite_id"),
+    )
+    experience_restoration_outcome = _build_experience_restoration_outcome(
+        experience_projection=experience_projection,
+        experience_restoration_boundary=experience_restoration_boundary,
+        guest_unknown_occupant_behavior=guest_unknown_occupant_behavior,
+        multi_occupant_behavior=multi_occupant_behavior,
+        execution_kind="orchestration",
+        route_scope=route_scope,
+        context_area_id=assembled_context.get("context_area_id"),
+        resolved_composite_id=assembled_context.get("resolved_composite_id"),
+    )
+    e3a_preservation_alignment = _build_e3a_preservation_alignment(
+        experience_restoration_boundary=experience_restoration_boundary,
+        experience_restoration_outcome=experience_restoration_outcome,
+        execution_kind="orchestration",
+        route_scope=route_scope,
+        context_area_id=assembled_context.get("context_area_id"),
+        resolved_composite_id=assembled_context.get("resolved_composite_id"),
+        requested_target=str(call.data["target"]),
+        resolved_target=resolved_target,
+    )
+    return {
+        "envelope_version": 1,
+        "execution_kind": "orchestration",
+        "intent_class": call.data.get("intent_class", "home_control"),
+        "capability_projection_boundary": _build_capability_projection_boundary(),
+        "authoritative_capability_input_consumption": _build_authoritative_capability_input_consumption(
+            capabilities
+        ),
+        "vocabulary_to_capability_handoff": _build_vocabulary_to_capability_handoff(
+            requested_target=str(call.data["target"]),
+            resolved_target=resolved_target,
+            room_vocabulary_resolution=room_vocabulary_resolution,
+            device_entity_vocabulary_resolution=device_entity_vocabulary_resolution,
+            asset_vocabulary_resolution=asset_vocabulary_resolution,
+        ),
+        "asset_intelligence_cp00_handoff": _build_asset_intelligence_cp00_handoff(
+            requested_target=str(call.data["target"]),
+            resolved_target=resolved_target,
+            asset_vocabulary_resolution=asset_vocabulary_resolution,
+        ),
+        "capability_discovery": capability_discovery,
+        "continuity_governance_boundary": continuity_governance_boundary,
+        "person_room_affinity_boundary": person_room_affinity_boundary,
+        "privacy_household_memory_boundary": privacy_household_memory_boundary,
+        "occupancy_governance_boundary": occupancy_governance_boundary,
+        "presence_governance_boundary": presence_governance_boundary,
+        "guest_unknown_occupant_behavior": guest_unknown_occupant_behavior,
+        "multi_occupant_behavior": multi_occupant_behavior,
+        "experience_governance_boundary": experience_governance_boundary,
+        "capability_to_experience_handoff": capability_to_experience_handoff,
+        "experience_projection": experience_projection,
+        "experience_restoration_boundary": experience_restoration_boundary,
+        "experience_restoration_outcome": experience_restoration_outcome,
+        "e3a_preservation_alignment": e3a_preservation_alignment,
+        "planning": {
+            "plan_kind": plan_kind,
+            "target_type": target_type,
+            "requested_target": call.data["target"],
+            "resolved_target": resolved_target,
+        },
+        "routing": {
+            "route_scope": route_scope,
+            "requested_area_id": requested_area_id,
+            "context_area_id": assembled_context.get("context_area_id"),
+            "resolved_composite_id": assembled_context.get("resolved_composite_id"),
+            "execution_preference_scope_id": preference_scope_id,
+            "execution_preference_present": bool(preferences),
+        },
+        "context": {
+            "requested_area_id": assembled_context.get("requested_area_id"),
+            "context_area_id": assembled_context.get("context_area_id"),
+            "resolved_composite_id": assembled_context.get("resolved_composite_id"),
+            "summary": assembled_context.get("summary", ""),
+            "context_source_count": assembled_context.get("context_source_count", 0),
+            "signal_count": assembled_context.get("signal_count", 0),
+            "fallback_context_applied": fallback_status["fallback_context_applied"],
+            "fallback_reason": fallback_status["fallback_reason"],
+            "global_context_continuity_available": fallback_status["global_context_continuity_available"],
+        },
+        "execution": {
+            "domain": domain,
+            "service": service,
+            "service_data": dict(data),
+        },
+    }
+
+
+def _build_execute_direct_envelope(
+    *,
+    call: ServiceCall,
+    capabilities: dict[str, Any],
+    domain: str,
+    service: str,
+    data: dict[str, Any],
+) -> dict[str, Any]:
+    """Build a bounded execution envelope for direct execution requests."""
+    capability_discovery = {
+        "discovery_version": 1,
+        "applicable": False,
+        "discovery_path": "not_applicable_direct_execution",
+        "concierge_role": "bounded_consumer_orchestrator",
+        "capability_authority_external": True,
+        "deferred_release_2_owners": {
+            "capability_diagnostics_explainability": "#318",
+            "experience_implementation": "#319+",
+        },
+    }
+    experience_governance_boundary = _build_experience_governance_boundary(
+        route_scope="direct",
+        context_area_id=None,
+        resolved_composite_id=None,
+    )
+    continuity_governance_boundary = _build_continuity_governance_boundary(
+        execution_kind="direct",
+        route_scope="direct",
+        context_area_id=None,
+        resolved_composite_id=None,
+    )
+    person_room_affinity_boundary = _build_person_room_affinity_boundary(
+        execution_kind="direct",
+        route_scope="direct",
+        context_area_id=None,
+        resolved_composite_id=None,
+    )
+    privacy_household_memory_boundary = _build_privacy_household_memory_boundary(
+        execution_kind="direct",
+        route_scope="direct",
+        context_area_id=None,
+        resolved_composite_id=None,
+    )
+    occupancy_governance_boundary = _build_occupancy_governance_boundary(
+        execution_kind="direct",
+        route_scope="direct",
+        context_area_id=None,
+        resolved_composite_id=None,
+    )
+    presence_governance_boundary = _build_presence_governance_boundary(
+        execution_kind="direct",
+        route_scope="direct",
+        context_area_id=None,
+        resolved_composite_id=None,
+    )
+    guest_unknown_occupant_behavior = _build_guest_unknown_occupant_behavior(
+        execution_kind="direct",
+        route_scope="direct",
+        context_area_id=None,
+        resolved_composite_id=None,
+        person_id=call.data.get("person_id"),
+        context=None,
+        occupancy_governance_boundary=occupancy_governance_boundary,
+        presence_governance_boundary=presence_governance_boundary,
+    )
+    multi_occupant_behavior = _build_multi_occupant_behavior(
+        execution_kind="direct",
+        route_scope="direct",
+        context_area_id=None,
+        resolved_composite_id=None,
+        person_id=call.data.get("person_id"),
+        context=None,
+        occupancy_governance_boundary=occupancy_governance_boundary,
+        presence_governance_boundary=presence_governance_boundary,
+        guest_unknown_occupant_behavior=guest_unknown_occupant_behavior,
+    )
+    capability_to_experience_handoff = _build_capability_to_experience_handoff(
+        capability_discovery=capability_discovery,
+        experience_governance_boundary=experience_governance_boundary,
+        execution_kind="direct",
+    )
+    experience_projection = _build_experience_projection(
+        capability_to_experience_handoff=capability_to_experience_handoff,
+        experience_governance_boundary=experience_governance_boundary,
+        execution_kind="direct",
+    )
+    experience_restoration_boundary = _build_experience_restoration_boundary(
+        experience_projection=experience_projection,
+        guest_unknown_occupant_behavior=guest_unknown_occupant_behavior,
+        multi_occupant_behavior=multi_occupant_behavior,
+        execution_kind="direct",
+        route_scope="direct",
+        context_area_id=None,
+        resolved_composite_id=None,
+    )
+    experience_restoration_outcome = _build_experience_restoration_outcome(
+        experience_projection=experience_projection,
+        experience_restoration_boundary=experience_restoration_boundary,
+        guest_unknown_occupant_behavior=guest_unknown_occupant_behavior,
+        multi_occupant_behavior=multi_occupant_behavior,
+        execution_kind="direct",
+        route_scope="direct",
+        context_area_id=None,
+        resolved_composite_id=None,
+    )
+    e3a_preservation_alignment = _build_e3a_preservation_alignment(
+        experience_restoration_boundary=experience_restoration_boundary,
+        experience_restoration_outcome=experience_restoration_outcome,
+        execution_kind="direct",
+        route_scope="direct",
+        context_area_id=None,
+        resolved_composite_id=None,
+        requested_target=call.data.get("entity_id"),
+        resolved_target=call.data.get("entity_id"),
+    )
+    return {
+        "envelope_version": 1,
+        "execution_kind": "direct",
+        "intent_class": call.data.get("intent_class", "home_control"),
+        "capability_projection_boundary": _build_capability_projection_boundary(),
+        "authoritative_capability_input_consumption": _build_authoritative_capability_input_consumption(
+            capabilities
+        ),
+        "vocabulary_to_capability_handoff": {
+            "handoff_version": 1,
+            "applicable": False,
+            "handoff_path": "not_applicable_direct_execution",
+            "deferred_release_2_owners": {
+                "asset_intelligence_cp00_handoff": "#316",
+                "capability_discovery": "#317",
+                "capability_diagnostics_explainability": "#318",
+                "experience_implementation": "#319+",
+            },
+        },
+        "asset_intelligence_cp00_handoff": {
+            "handoff_version": 1,
+            "applicable": False,
+            "handoff_path": "not_applicable_direct_execution",
+            "concierge_role": "bounded_consumer_orchestrator",
+            "asset_intelligence_authority_preserved": True,
+            "authority_chain": [
+                "asset_intelligence_authority",
+                "asset_intelligence_output",
+                "concierge_handoff_consumption",
+                "capability_consumption",
+            ],
+            "deferred_release_2_owners": {
+                "capability_discovery": "#317",
+                "capability_diagnostics_explainability": "#318",
+                "experience_implementation": "#319+",
+            },
+        },
+        "capability_discovery": capability_discovery,
+        "continuity_governance_boundary": continuity_governance_boundary,
+        "person_room_affinity_boundary": person_room_affinity_boundary,
+        "privacy_household_memory_boundary": privacy_household_memory_boundary,
+        "occupancy_governance_boundary": occupancy_governance_boundary,
+        "presence_governance_boundary": presence_governance_boundary,
+        "guest_unknown_occupant_behavior": guest_unknown_occupant_behavior,
+        "multi_occupant_behavior": multi_occupant_behavior,
+        "experience_governance_boundary": experience_governance_boundary,
+        "capability_to_experience_handoff": capability_to_experience_handoff,
+        "experience_projection": experience_projection,
+        "experience_restoration_boundary": experience_restoration_boundary,
+        "experience_restoration_outcome": experience_restoration_outcome,
+        "e3a_preservation_alignment": e3a_preservation_alignment,
+        "planning": {
+            "plan_kind": "direct_service_call",
+            "requested_service": call.data["service"],
+            "requested_entity_id": call.data["entity_id"],
+        },
+        "routing": {
+            "route_scope": "direct",
+            "requested_area_id": None,
+            "context_area_id": None,
+            "resolved_composite_id": None,
+            "execution_preference_scope_id": None,
+            "execution_preference_present": False,
+        },
+        "context": None,
+        "execution": {
+            "domain": domain,
+            "service": service,
+            "service_data": dict(data),
+        },
+    }
+
+
+def _build_capability_projection_boundary() -> dict[str, Any]:
+    """Return the #313-governed capability projection boundary declaration."""
+    return {
+        "boundary_version": 1,
+        "projection_role": "governed_projection_consumer",
+        "projection_is_authority": False,
+        "coordinator_role": "bounded_consumer_orchestrator",
+        "authority_order": [
+            "adr",
+            "contract",
+            "model",
+            "existing_implementation",
+            "github_issue",
+        ],
+        "ownership_boundaries": {
+            "governance_owner": "homes_that_behave_well",
+            "room_truth_owner": "foundation",
+            "identity_confidence_owner": "voice_identity",
+            "asset_evaluation_owner": "asset_intelligence",
+        },
+        "deferred_release_2_owners": {
+            "authoritative_input_consumption": "#314",
+            "vocabulary_to_capability_handoff": "#315",
+            "asset_intelligence_cp00_handoff": "#316",
+            "capability_discovery": "#317",
+            "capability_diagnostics_explainability": "#318",
+            "experience_implementation": "#319+",
+        },
+    }
+
+
+def _build_authoritative_capability_input_consumption(capabilities: dict[str, Any]) -> dict[str, Any]:
+    """Return #314-governed authoritative capability input consumption metadata."""
+    snapshot = dict(capabilities.get("input_snapshot", {}))
+    return {
+        "consumption_version": 1,
+        "deterministic_consumption": True,
+        "concierge_role": "bounded_consumer_orchestrator",
+        "capability_authority_origin": "htbw_governed_contracts_and_models",
+        "input_origin_owners": {
+            "concierge_config_entry": "home_assistant_config_entry",
+            "voice_identity_status": "voice_identity",
+        },
+        "consumed_inputs": snapshot,
+        "derived_capability_flags": {
+            "cap_ai": bool(capabilities.get("cap_ai", False)),
+            "cap_tts": bool(capabilities.get("cap_tts", False)),
+            "cap_persona": bool(capabilities.get("cap_persona", False)),
+            "cap_assets": bool(capabilities.get("cap_assets", False)),
+            "cap_voice_enrollment": bool(capabilities.get("cap_voice_enrollment", False)),
+            "cap_extended_history": bool(capabilities.get("cap_extended_history", False)),
+        },
+        "deferred_release_2_owners": {
+            "vocabulary_to_capability_handoff": "#315",
+            "asset_intelligence_cp00_handoff": "#316",
+            "capability_discovery": "#317",
+            "capability_diagnostics_explainability": "#318",
+            "experience_implementation": "#319+",
+        },
+    }
+
+
+def _build_vocabulary_to_capability_handoff(
+    *,
+    requested_target: str,
+    resolved_target: str,
+    room_vocabulary_resolution: dict[str, Any] | None,
+    device_entity_vocabulary_resolution: dict[str, Any] | None,
+    asset_vocabulary_resolution: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Return #315-governed vocabulary-to-capability handoff metadata."""
+    return {
+        "handoff_version": 1,
+        "applicable": True,
+        "deterministic_resolution": True,
+        "ambiguity_policy": "reject_on_ambiguous_authoritative_vocabulary",
+        "vocabulary_authority_external": True,
+        "concierge_role": "bounded_consumer_orchestrator",
+        "room_vocabulary_consumed": room_vocabulary_resolution is not None,
+        "device_entity_vocabulary_consumed": device_entity_vocabulary_resolution is not None,
+        "asset_handoff_consumed": asset_vocabulary_resolution is not None,
+        "asset_handoff_deferred_owner": "#316",
+        "requested_target": requested_target,
+        "resolved_target": resolved_target,
+        "room_scope": (
+            {
+                "matched_term": room_vocabulary_resolution.get("matched_term"),
+                "canonical_term": room_vocabulary_resolution.get("canonical_term"),
+                "area_id": room_vocabulary_resolution.get("area_id"),
+                "composite_id": room_vocabulary_resolution.get("composite_id"),
+                "source": room_vocabulary_resolution.get("source", "room_vocabulary_registry"),
+            }
+            if room_vocabulary_resolution is not None
+            else None
+        ),
+        "capability_target_handoff": (
+            {
+                "matched_term": device_entity_vocabulary_resolution.get("matched_term"),
+                "canonical_term": device_entity_vocabulary_resolution.get("canonical_term"),
+                "entity_id": device_entity_vocabulary_resolution.get("entity_id"),
+                "area_id": device_entity_vocabulary_resolution.get("area_id"),
+                "composite_id": device_entity_vocabulary_resolution.get("composite_id"),
+                "source": device_entity_vocabulary_resolution.get(
+                    "source",
+                    "device_entity_vocabulary_registry",
+                ),
+            }
+            if device_entity_vocabulary_resolution is not None
+            else None
+        ),
+        "handoff_path": "vocabulary_to_capability_consumption",
+        "deferred_release_2_owners": {
+            "asset_intelligence_cp00_handoff": "#316",
+            "capability_discovery": "#317",
+            "capability_diagnostics_explainability": "#318",
+            "experience_implementation": "#319+",
+        },
+    }
+
+
+def _build_asset_intelligence_cp00_handoff(
+    *,
+    requested_target: str,
+    resolved_target: str,
+    asset_vocabulary_resolution: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Return #316-governed Asset Intelligence CP00 handoff metadata."""
+    return {
+        "handoff_version": 1,
+        "applicable": asset_vocabulary_resolution is not None,
+        "deterministic_consumption": True,
+        "concierge_role": "bounded_consumer_orchestrator",
+        "asset_intelligence_authority_preserved": True,
+        "authority_chain": [
+            "asset_intelligence_authority",
+            "asset_intelligence_output",
+            "concierge_handoff_consumption",
+            "capability_consumption",
+        ],
+        "authoritative_origin": {
+            "authority_owner": "asset_intelligence",
+            "handoff_source": (
+                asset_vocabulary_resolution.get("source", "asset_intelligence_handoff")
+                if asset_vocabulary_resolution is not None
+                else None
+            ),
+            "concierge_non_rights": [
+                "no_asset_evaluation",
+                "no_asset_scoring",
+                "no_significance_determination",
+                "no_asset_lifecycle_ownership",
+                "no_recreation_of_asset_intelligence_reasoning",
+            ],
+        },
+        "consumed_handoff_output": (
+            {
+                "matched_term": asset_vocabulary_resolution.get("matched_term"),
+                "canonical_term": asset_vocabulary_resolution.get("canonical_term"),
+                "asset_id": asset_vocabulary_resolution.get("asset_id"),
+                "handed_off_entity_id": asset_vocabulary_resolution.get("entity_id"),
+                "area_id": asset_vocabulary_resolution.get("area_id"),
+                "composite_id": asset_vocabulary_resolution.get("composite_id"),
+                "requested_target": requested_target,
+                "resolved_target": resolved_target,
+            }
+            if asset_vocabulary_resolution is not None
+            else None
+        ),
+        "deferred_release_2_owners": {
+            "capability_discovery": "#317",
+            "capability_diagnostics_explainability": "#318",
+            "experience_implementation": "#319+",
+        },
+    }
+
+
+def _discoverable_capability_entries(capabilities: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return deterministic discovery entries assembled from authoritative capability inputs."""
+    mapping = [
+        ("ai_actions", "cap_ai", "concierge_config_entry.action_provider"),
+        ("tts", "cap_tts", "concierge_config_entry.tts_provider"),
+        ("persona", "cap_persona", "derived_from_ai_or_tts"),
+        ("asset_handoff_consumption", "cap_assets", "concierge_config_entry.asset_intelligence_provider"),
+        ("voice_enrollment", "cap_voice_enrollment", "voice_identity_readiness_plus_archive"),
+        ("extended_history", "cap_extended_history", "concierge_archive_options"),
+    ]
+    discovered: list[dict[str, Any]] = []
+    for capability_id, flag_key, source_key in mapping:
+        discovered.append(
+            {
+                "capability_id": capability_id,
+                "discoverable": bool(capabilities.get(flag_key, False)),
+                "source_input": source_key,
+            }
+        )
+    return discovered
+
+
+def _build_capability_discovery(
+    *,
+    capabilities: dict[str, Any],
+    route_scope: str,
+    context_area_id: str | None,
+    resolved_composite_id: str | None,
+    room_vocabulary_resolution: dict[str, Any] | None,
+    device_entity_vocabulary_resolution: dict[str, Any] | None,
+    asset_vocabulary_resolution: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Return #317-governed capability discovery assembly metadata."""
+    discovered = _discoverable_capability_entries(capabilities)
+    discoverable_ids = [
+        item["capability_id"]
+        for item in discovered
+        if bool(item.get("discoverable", False))
+    ]
+    return {
+        "discovery_version": 1,
+        "applicable": True,
+        "deterministic_discovery": True,
+        "concierge_role": "bounded_consumer_orchestrator",
+        "capability_authority_external": True,
+        "discovery_path": "capability_consumption_to_discovery",
+        "route_scope": route_scope,
+        "context_area_id": context_area_id,
+        "resolved_composite_id": resolved_composite_id,
+        "upstream_handoff_consumption": {
+            "room_vocabulary_consumed": room_vocabulary_resolution is not None,
+            "device_entity_vocabulary_consumed": device_entity_vocabulary_resolution is not None,
+            "asset_intelligence_cp00_handoff_consumed": asset_vocabulary_resolution is not None,
+        },
+        "authority_traceability": {
+            "authority_order": [
+                "adr",
+                "contract",
+                "model",
+                "existing_implementation",
+                "github_issue",
+            ],
+            "capability_authority_origin": "htbw_governed_contracts_and_models",
+            "vocabulary_authority_origin": "vocabulary_registry_external",
+            "asset_intelligence_authority_origin": "asset_intelligence",
+        },
+        "discovered_capabilities": discovered,
+        "discoverable_capability_ids": discoverable_ids,
+        "discoverable_count": len(discoverable_ids),
+        "deferred_release_2_owners": {
+            "capability_diagnostics_explainability": "#318",
+            "experience_implementation": "#319+",
+        },
+    }
+
+
+def _build_experience_governance_boundary(
+    *,
+    route_scope: str,
+    context_area_id: str | None,
+    resolved_composite_id: str | None,
+) -> dict[str, Any]:
+    """Return #319-governed experience boundary declarations without experience execution behavior."""
+    return {
+        "governance_version": 1,
+        "applicable": True,
+        "governance_path": "capability_consumption_to_experience_governance",
+        "concierge_role": "bounded_consumer_orchestrator",
+        "experience_role": "governance_boundary_enforcer",
+        "experience_authority_external": True,
+        "experience_consumes_capability_outputs": True,
+        "experience_redefines_capability_outputs": False,
+        "authority_preservation": {
+            "capability_authority_external": True,
+            "vocabulary_authority_external": True,
+            "asset_intelligence_authority_external": True,
+        },
+        "ownership_boundaries": {
+            "governance_owner": "homes_that_behave_well",
+            "experience_runtime_owner": "concierge",
+            "capability_authority_owner": "homes_that_behave_well",
+            "vocabulary_authority_owner": "vocabulary_registry_external",
+            "asset_intelligence_authority_owner": "asset_intelligence",
+        },
+        "consumption_boundary_rules": {
+            "consume_capability_outputs_only": True,
+            "consume_authoritative_inputs_directly": False,
+            "derive_new_capability_authority": False,
+            "derive_new_vocabulary_authority": False,
+            "derive_new_asset_authority": False,
+        },
+        "orchestration_constraints": {
+            "route_scope": route_scope,
+            "context_area_id": context_area_id,
+            "resolved_composite_id": resolved_composite_id,
+            "experience_projection_enabled": False,
+            "experience_execution_enabled": False,
+            "experience_restoration_enabled": False,
+            "experience_diagnostics_enabled": False,
+            "governance_boundary_only": True,
+        },
+        "deferred_release_2_owners": {
+            "capability_to_experience_handoff": "#320",
+            "experience_projection": "#321",
+            "experience_restoration_boundary": "#322",
+            "experience_diagnostics_explainability": "#323",
+            "release_2_validation": "#324",
+        },
+    }
+
+
+def _build_continuity_governance_boundary(
+    *,
+    execution_kind: str,
+    route_scope: str,
+    context_area_id: str | None,
+    resolved_composite_id: str | None,
+) -> dict[str, Any]:
+    """Return #325-governed continuity boundary metadata without downstream continuity behavior."""
+    if execution_kind == "direct":
+        return {
+            "continuity_boundary_version": 1,
+            "applicable": False,
+            "continuity_path": "not_applicable_direct_execution",
+            "deterministic_boundary": True,
+            "concierge_role": "bounded_consumer_orchestrator",
+            "continuity_authority_external": True,
+            "continuity_consumption_mode": "bounded_context_consumption",
+            "continuity_owns_identity": False,
+            "continuity_owns_occupancy": False,
+            "continuity_owns_memory": False,
+            "privacy_boundary_preserved": True,
+            "deferred_release_3_owners": {
+                "person_room_affinity_boundary": "#326",
+                "privacy_household_memory_boundary": "#327",
+                "continuity_affinity_diagnostics_explainability": "#328",
+                "restoration_governance_boundary": "#329",
+                "release_3_validation": "#338",
+            },
+        }
+
+    return {
+        "continuity_boundary_version": 1,
+        "applicable": True,
+        "continuity_path": "governed_continuity_boundary",
+        "deterministic_boundary": True,
+        "concierge_role": "bounded_consumer_orchestrator",
+        "continuity_authority_external": True,
+        "continuity_consumption_mode": "bounded_context_consumption",
+        "continuity_owns_identity": False,
+        "continuity_owns_occupancy": False,
+        "continuity_owns_memory": False,
+        "privacy_boundary_preserved": True,
+        "ownership_boundaries": {
+            "governance_owner": "homes_that_behave_well",
+            "identity_owner": "voice_identity",
+            "occupancy_owner": "foundation",
+            "memory_owner": "household_memory_governance",
+            "continuity_runtime_owner": "concierge",
+        },
+        "consumption_boundary_rules": {
+            "consume_identity_confidence_as_input_only": True,
+            "consume_occupancy_context_as_input_only": True,
+            "consume_memory_context_as_input_only": True,
+            "derive_identity_authority": False,
+            "derive_occupancy_authority": False,
+            "derive_memory_authority": False,
+        },
+        "orchestration_constraints": {
+            "route_scope": route_scope,
+            "context_area_id": context_area_id,
+            "resolved_composite_id": resolved_composite_id,
+            "continuity_boundary_only": True,
+            "affinity_behavior_enabled": True,
+            "diagnostics_behavior_enabled": True,
+            "restoration_behavior_enabled": False,
+            "occupancy_behavior_enabled": False,
+        },
+        "deferred_release_3_owners": {
+            "person_room_affinity_boundary": "#326",
+            "privacy_household_memory_boundary": "#327",
+            "continuity_affinity_diagnostics_explainability": "#328",
+            "restoration_governance_boundary": "#329",
+            "release_3_validation": "#338",
+        },
+    }
+
+
+def _build_person_room_affinity_boundary(
+    *,
+    execution_kind: str,
+    route_scope: str,
+    context_area_id: str | None,
+    resolved_composite_id: str | None,
+) -> dict[str, Any]:
+    """Return #326-governed person-room affinity boundary metadata without downstream affinity behavior."""
+    if execution_kind == "direct":
+        return {
+            "affinity_boundary_version": 1,
+            "applicable": False,
+            "affinity_path": "not_applicable_direct_execution",
+            "deterministic_boundary": True,
+            "concierge_role": "bounded_consumer_orchestrator",
+            "affinity_authority_external": True,
+            "affinity_consumption_mode": "bounded_context_consumption",
+            "affinity_owns_identity": False,
+            "affinity_owns_room_truth": False,
+            "affinity_owns_occupancy": False,
+            "affinity_owns_memory": False,
+            "guest_safe_boundary_preserved": True,
+            "privacy_boundary_preserved": True,
+            "deferred_release_3_owners": {
+                "privacy_household_memory_boundary": "#327",
+                "continuity_affinity_diagnostics_explainability": "#328",
+                "restoration_governance_boundary": "#329",
+                "release_3_validation": "#338",
+            },
+        }
+
+    return {
+        "affinity_boundary_version": 1,
+        "applicable": True,
+        "affinity_path": "governed_person_room_affinity_boundary",
+        "deterministic_boundary": True,
+        "concierge_role": "bounded_consumer_orchestrator",
+        "affinity_authority_external": True,
+        "affinity_consumption_mode": "bounded_context_consumption",
+        "affinity_owns_identity": False,
+        "affinity_owns_room_truth": False,
+        "affinity_owns_occupancy": False,
+        "affinity_owns_memory": False,
+        "guest_safe_boundary_preserved": True,
+        "privacy_boundary_preserved": True,
+        "ownership_boundaries": {
+            "governance_owner": "homes_that_behave_well",
+            "identity_owner": "voice_identity",
+            "room_truth_owner": "foundation",
+            "occupancy_owner": "foundation",
+            "memory_owner": "household_memory_governance",
+            "affinity_runtime_owner": "concierge",
+        },
+        "consumption_boundary_rules": {
+            "consume_identity_confidence_as_input_only": True,
+            "consume_room_truth_as_input_only": True,
+            "consume_occupancy_context_as_input_only": True,
+            "consume_profile_context_as_input_only": True,
+            "derive_identity_authority": False,
+            "derive_room_truth_authority": False,
+            "derive_occupancy_authority": False,
+            "derive_memory_authority": False,
+        },
+        "orchestration_constraints": {
+            "route_scope": route_scope,
+            "context_area_id": context_area_id,
+            "resolved_composite_id": resolved_composite_id,
+            "affinity_boundary_only": True,
+            "affinity_learning_enabled": False,
+            "diagnostics_behavior_enabled": True,
+            "restoration_behavior_enabled": False,
+            "privacy_memory_behavior_enabled": False,
+        },
+        "deferred_release_3_owners": {
+            "privacy_household_memory_boundary": "#327",
+            "continuity_affinity_diagnostics_explainability": "#328",
+            "restoration_governance_boundary": "#329",
+            "release_3_validation": "#338",
+        },
+    }
+
+
+def _build_privacy_household_memory_boundary(
+    *,
+    execution_kind: str,
+    route_scope: str,
+    context_area_id: str | None,
+    resolved_composite_id: str | None,
+) -> dict[str, Any]:
+    """Return #327-governed privacy/household-memory boundary metadata without downstream memory behavior."""
+    if execution_kind == "direct":
+        return {
+            "privacy_household_memory_boundary_version": 1,
+            "applicable": False,
+            "boundary_path": "not_applicable_direct_execution",
+            "deterministic_boundary": True,
+            "concierge_role": "bounded_consumer_orchestrator",
+            "privacy_authority_external": True,
+            "household_memory_authority_external": True,
+            "privacy_enforcement_mode": "governed_policy_consumption",
+            "memory_consumption_mode": "bounded_context_consumption",
+            "memory_owns_identity": False,
+            "memory_owns_retention_policy": False,
+            "memory_owns_storage": False,
+            "memory_owns_provenance": False,
+            "guest_safe_boundary_preserved": True,
+            "deferred_release_3_owners": {
+                "continuity_affinity_diagnostics_explainability": "#328",
+                "restoration_governance_boundary": "#329",
+                "release_3_validation": "#338",
+            },
+        }
+
+    return {
+        "privacy_household_memory_boundary_version": 1,
+        "applicable": True,
+        "boundary_path": "governed_privacy_household_memory_boundary",
+        "deterministic_boundary": True,
+        "concierge_role": "bounded_consumer_orchestrator",
+        "privacy_authority_external": True,
+        "household_memory_authority_external": True,
+        "privacy_enforcement_mode": "governed_policy_consumption",
+        "memory_consumption_mode": "bounded_context_consumption",
+        "memory_owns_identity": False,
+        "memory_owns_retention_policy": False,
+        "memory_owns_storage": False,
+        "memory_owns_provenance": False,
+        "guest_safe_boundary_preserved": True,
+        "ownership_boundaries": {
+            "governance_owner": "homes_that_behave_well",
+            "identity_owner": "voice_identity",
+            "occupancy_owner": "foundation",
+            "household_memory_owner": "household_memory_governance",
+            "privacy_policy_owner": "homes_that_behave_well",
+            "retention_policy_owner": "homes_that_behave_well",
+            "concierge_runtime_owner": "concierge",
+        },
+        "consumption_boundary_rules": {
+            "consume_memory_context_as_input_only": True,
+            "consume_identity_context_as_input_only": True,
+            "consume_occupancy_context_as_input_only": True,
+            "derive_memory_authority": False,
+            "derive_retention_authority": False,
+            "derive_identity_authority": False,
+            "derive_occupancy_authority": False,
+        },
+        "orchestration_constraints": {
+            "route_scope": route_scope,
+            "context_area_id": context_area_id,
+            "resolved_composite_id": resolved_composite_id,
+            "privacy_household_memory_boundary_only": True,
+            "household_memory_diagnostics_enabled": False,
+            "restoration_behavior_enabled": False,
+            "occupancy_behavior_enabled": False,
+        },
+        "deferred_release_3_owners": {
+            "continuity_affinity_diagnostics_explainability": "#328",
+            "restoration_governance_boundary": "#329",
+            "release_3_validation": "#338",
+        },
+    }
+
+
+def _build_messaging_governance_boundary(
+    *,
+    route_scope: str,
+    context_area_id: str | None,
+    resolved_composite_id: str | None,
+    recipient_scope: str,
+    message_context_type: str,
+) -> dict[str, Any]:
+    """Return #339-governed messaging boundary metadata without downstream messaging authority."""
+    return {
+        "messaging_boundary_version": 1,
+        "applicable": True,
+        "boundary_path": "governed_messaging_boundary",
+        "deterministic_boundary": True,
+        "concierge_role": "bounded_consumer_orchestrator",
+        "messaging_authority_external": True,
+        "message_authority_external": True,
+        "provenance_authority_external": True,
+        "household_memory_authority_external": True,
+        "message_creation_governed": True,
+        "message_lifecycle_governed": True,
+        "message_creation_rules": {
+            "consume_authoritative_inputs_only": True,
+            "determine_truth": False,
+            "establish_truth": False,
+            "override_truth": False,
+            "become_source_of_record": False,
+        },
+        "authority_protection": {
+            "messaging_owns_truth": False,
+            "messaging_owns_provenance": False,
+            "messaging_owns_memory": False,
+            "messaging_owns_identity": False,
+        },
+        "consumption_boundary_rules": {
+            "consume_provenance_as_input_only": True,
+            "consume_memory_as_input_only": True,
+            "consume_identity_outputs_as_input_only": True,
+            "consume_occupancy_presence_outputs_as_input_only": True,
+            "derive_message_authority": False,
+            "derive_truth_authority": False,
+        },
+        "lifecycle_governance": {
+            "creation_governed": True,
+            "delivery_governed": True,
+            "acknowledgement_governed": True,
+            "retention_governed": True,
+        },
+        "governance_controls": {
+            "route_scope": route_scope,
+            "context_area_id": context_area_id,
+            "resolved_composite_id": resolved_composite_id,
+            "recipient_scope": recipient_scope,
+            "message_context_type": message_context_type,
+            "message_boundary_only": True,
+            "truth_determination_enabled": False,
+            "source_of_record_enabled": False,
+        },
+        "ownership_boundaries": {
+            "governance_owner": "homes_that_behave_well",
+            "messaging_runtime_owner": "concierge",
+            "message_authority_owner": "messaging_systems",
+            "provenance_owner": "provenance_governance",
+            "household_memory_owner": "household_memory_governance",
+            "identity_owner": "voice_identity",
+        },
+        "deferred_release_4_owners": {
+            "messaging_provenance": "#340",
+            "notification_and_delivery_boundary": "#341",
+            "recipient_consent_privacy_visibility_boundary": "#342",
+            "messaging_diagnostics_explainability": "#343",
+            "household_memory_boundary": "#344",
+            "release_4_validation": "#349",
+        },
+    }
+
+
+def _build_occupancy_governance_boundary(
+    *,
+    execution_kind: str,
+    route_scope: str,
+    context_area_id: str | None,
+    resolved_composite_id: str | None,
+) -> dict[str, Any]:
+    """Return #333-governed occupancy boundary metadata without occupancy behavior."""
+    if execution_kind == "direct":
+        return {
+            "occupancy_boundary_version": 1,
+            "applicable": False,
+            "occupancy_path": "not_applicable_direct_execution",
+            "deterministic_boundary": True,
+            "concierge_role": "bounded_consumer_orchestrator",
+            "occupancy_authority_external": True,
+            "occupancy_policy_authority_external": True,
+            "occupancy_truth_authority_external": True,
+            "occupancy_consumption_mode": "bounded_context_consumption",
+            "occupancy_owns_room_truth": False,
+            "occupancy_owns_identity": False,
+            "occupancy_owns_household_memory": False,
+            "occupancy_owns_restoration": False,
+            "guest_safe_boundary_preserved": True,
+            "privacy_boundary_preserved": True,
+            "orchestration_constraints": {
+                "route_scope": "direct",
+                "context_area_id": None,
+                "resolved_composite_id": None,
+                "occupancy_boundary_only": True,
+                "occupancy_decision_behavior_enabled": False,
+                "occupancy_execution_enabled": False,
+                "occupancy_inference_enabled": False,
+                "occupancy_diagnostics_behavior_enabled": False,
+            },
+            "explainability_visibility": {
+                "occupancy_visibility_enabled": True,
+                "authority_visibility_enabled": True,
+                "traceability_visibility_enabled": True,
+            },
+            "deferred_release_3_owners": {
+                "presence_governance_boundary": "#334",
+                "guest_unknown_occupant_behavior": "#335",
+                "multi_occupant_behavior": "#336",
+                "occupancy_presence_diagnostics_explainability": "#337",
+                "release_3_validation": "#338",
+            },
+        }
+
+    return {
+        "occupancy_boundary_version": 1,
+        "applicable": True,
+        "occupancy_path": "governed_occupancy_boundary",
+        "deterministic_boundary": True,
+        "concierge_role": "bounded_consumer_orchestrator",
+        "occupancy_authority_external": True,
+        "occupancy_policy_authority_external": True,
+        "occupancy_truth_authority_external": True,
+        "occupancy_consumption_mode": "bounded_context_consumption",
+        "occupancy_owns_room_truth": False,
+        "occupancy_owns_identity": False,
+        "occupancy_owns_household_memory": False,
+        "occupancy_owns_restoration": False,
+        "guest_safe_boundary_preserved": True,
+        "privacy_boundary_preserved": True,
+        "ownership_boundaries": {
+            "governance_owner": "homes_that_behave_well",
+            "occupancy_truth_owner": "foundation",
+            "presence_truth_owner": "foundation",
+            "room_truth_owner": "foundation",
+            "identity_owner": "voice_identity",
+            "household_memory_owner": "household_memory_governance",
+            "restoration_owner": "experience_restoration_governance",
+            "occupancy_runtime_owner": "concierge",
+        },
+        "consumption_boundary_rules": {
+            "consume_room_truth_as_input_only": True,
+            "consume_identity_confidence_as_input_only": True,
+            "consume_presence_context_as_input_only": True,
+            "consume_memory_context_as_input_only": True,
+            "consume_restoration_context_as_input_only": True,
+            "derive_occupancy_authority": False,
+            "derive_occupancy_policy_authority": False,
+            "derive_room_truth_authority": False,
+            "derive_identity_authority": False,
+            "derive_household_memory_authority": False,
+            "derive_restoration_authority": False,
+        },
+        "orchestration_constraints": {
+            "route_scope": route_scope,
+            "context_area_id": context_area_id,
+            "resolved_composite_id": resolved_composite_id,
+            "occupancy_boundary_only": True,
+            "occupancy_decision_behavior_enabled": False,
+            "occupancy_execution_enabled": False,
+            "occupancy_inference_enabled": False,
+            "occupancy_diagnostics_behavior_enabled": False,
+        },
+        "explainability_visibility": {
+            "occupancy_visibility_enabled": True,
+            "authority_visibility_enabled": True,
+            "traceability_visibility_enabled": True,
+        },
+        "deferred_release_3_owners": {
+            "presence_governance_boundary": "#334",
+            "guest_unknown_occupant_behavior": "#335",
+            "multi_occupant_behavior": "#336",
+            "occupancy_presence_diagnostics_explainability": "#337",
+            "release_3_validation": "#338",
+        },
+    }
+
+
+def _build_presence_governance_boundary(
+    *,
+    execution_kind: str,
+    route_scope: str,
+    context_area_id: str | None,
+    resolved_composite_id: str | None,
+) -> dict[str, Any]:
+    """Return #334-governed presence boundary metadata without presence behavior."""
+    if execution_kind == "direct":
+        return {
+            "presence_boundary_version": 1,
+            "applicable": False,
+            "presence_path": "not_applicable_direct_execution",
+            "deterministic_boundary": True,
+            "concierge_role": "bounded_consumer_orchestrator",
+            "presence_authority_external": True,
+            "presence_policy_authority_external": True,
+            "presence_truth_authority_external": True,
+            "presence_consumption_mode": "bounded_context_consumption",
+            "presence_owns_occupancy": False,
+            "presence_owns_room_truth": False,
+            "presence_owns_identity": False,
+            "presence_owns_household_memory": False,
+            "presence_owns_restoration": False,
+            "guest_safe_boundary_preserved": True,
+            "privacy_boundary_preserved": True,
+            "consumes_occupancy_governance_visibility": True,
+            "orchestration_constraints": {
+                "route_scope": "direct",
+                "context_area_id": None,
+                "resolved_composite_id": None,
+                "presence_boundary_only": True,
+                "presence_detection_enabled": False,
+                "presence_inference_enabled": False,
+                "presence_attribution_enabled": False,
+                "presence_behavior_enabled": False,
+                "presence_diagnostics_behavior_enabled": False,
+            },
+            "explainability_visibility": {
+                "presence_visibility_enabled": True,
+                "authority_visibility_enabled": True,
+                "traceability_visibility_enabled": True,
+            },
+            "deferred_release_3_owners": {
+                "guest_unknown_occupant_behavior": "#335",
+                "multi_occupant_behavior": "#336",
+                "occupancy_presence_diagnostics_explainability": "#337",
+                "release_3_validation": "#338",
+            },
+        }
+
+    return {
+        "presence_boundary_version": 1,
+        "applicable": True,
+        "presence_path": "governed_presence_boundary",
+        "deterministic_boundary": True,
+        "concierge_role": "bounded_consumer_orchestrator",
+        "presence_authority_external": True,
+        "presence_policy_authority_external": True,
+        "presence_truth_authority_external": True,
+        "presence_consumption_mode": "bounded_context_consumption",
+        "presence_owns_occupancy": False,
+        "presence_owns_room_truth": False,
+        "presence_owns_identity": False,
+        "presence_owns_household_memory": False,
+        "presence_owns_restoration": False,
+        "guest_safe_boundary_preserved": True,
+        "privacy_boundary_preserved": True,
+        "consumes_occupancy_governance_visibility": True,
+        "ownership_boundaries": {
+            "governance_owner": "homes_that_behave_well",
+            "presence_truth_owner": "foundation",
+            "occupancy_truth_owner": "foundation",
+            "room_truth_owner": "foundation",
+            "identity_owner": "voice_identity",
+            "household_memory_owner": "household_memory_governance",
+            "restoration_owner": "experience_restoration_governance",
+            "presence_runtime_owner": "concierge",
+        },
+        "consumption_boundary_rules": {
+            "consume_presence_context_as_input_only": True,
+            "consume_occupancy_context_as_input_only": True,
+            "consume_room_truth_as_input_only": True,
+            "consume_identity_confidence_as_input_only": True,
+            "consume_memory_context_as_input_only": True,
+            "consume_restoration_context_as_input_only": True,
+            "derive_presence_authority": False,
+            "derive_presence_policy_authority": False,
+            "derive_presence_truth_authority": False,
+            "derive_occupancy_authority": False,
+            "derive_room_truth_authority": False,
+            "derive_identity_authority": False,
+            "derive_household_memory_authority": False,
+            "derive_restoration_authority": False,
+        },
+        "orchestration_constraints": {
+            "route_scope": route_scope,
+            "context_area_id": context_area_id,
+            "resolved_composite_id": resolved_composite_id,
+            "presence_boundary_only": True,
+            "presence_detection_enabled": False,
+            "presence_inference_enabled": False,
+            "presence_attribution_enabled": False,
+            "presence_behavior_enabled": False,
+            "presence_diagnostics_behavior_enabled": False,
+        },
+        "explainability_visibility": {
+            "presence_visibility_enabled": True,
+            "authority_visibility_enabled": True,
+            "traceability_visibility_enabled": True,
+        },
+        "deferred_release_3_owners": {
+            "guest_unknown_occupant_behavior": "#335",
+            "multi_occupant_behavior": "#336",
+            "occupancy_presence_diagnostics_explainability": "#337",
+            "release_3_validation": "#338",
+        },
+    }
+
+
+def _build_guest_unknown_occupant_behavior(
+    *,
+    execution_kind: str,
+    route_scope: str,
+    context_area_id: str | None,
+    resolved_composite_id: str | None,
+    person_id: str | None,
+    context: dict[str, Any] | None,
+    occupancy_governance_boundary: dict[str, Any],
+    presence_governance_boundary: dict[str, Any],
+) -> dict[str, Any]:
+    """Return #335-governed guest-safe and unknown-occupant behavior metadata."""
+    context_payload = context if isinstance(context, dict) else {}
+    actor_class = str(context_payload.get("actor_class", "") or "").strip().lower()
+    occupant_state_hint = str(
+        context_payload.get("occupant_state", context_payload.get("occupancy_state", "")) or ""
+    ).strip().lower()
+    raw_occupant_states = context_payload.get("occupant_states", [])
+    if isinstance(raw_occupant_states, list):
+        occupant_states = {str(item).strip().lower() for item in raw_occupant_states if str(item).strip()}
+    else:
+        occupant_states = set()
+    guest_safe_hint = bool(context_payload.get("guest_safe", False) or context_payload.get("guest_mode", False))
+
+    if (
+        actor_class == "guest"
+        or occupant_state_hint in {"guest", "guest_occupant", "guest-occupant"}
+        or bool(occupant_states & {"guest", "guest_occupant", "guest-occupant"})
+        or guest_safe_hint
+    ):
+        occupant_state = "guest_occupant"
+    elif occupant_state_hint in {"known", "known_occupant", "resident", "household_member"} or bool(
+        occupant_states & {"known", "known_occupant", "resident", "household_member"}
+    ):
+        occupant_state = "known_occupant"
+    elif occupant_state_hint in {"unknown", "unknown_occupant", "unattributed", "unattributed_occupant"} or bool(
+        occupant_states & {"unknown", "unknown_occupant", "unattributed", "unattributed_occupant"}
+    ):
+        occupant_state = "unknown_occupant"
+    elif person_id:
+        occupant_state = "known_occupant"
+    else:
+        occupant_state = "unknown_occupant"
+
+    guest_safe_mode_active = occupant_state == "guest_occupant"
+    unknown_occupant_mode_active = occupant_state == "unknown_occupant"
+    conservative_behavior_required = guest_safe_mode_active or unknown_occupant_mode_active
+    behavior_applicable = execution_kind != "direct"
+    restoration_eligibility_allowed = bool(behavior_applicable and not conservative_behavior_required)
+
+    return {
+        "guest_unknown_behavior_version": 1,
+        "applicable": behavior_applicable,
+        "behavior_path": (
+            "governed_guest_unknown_occupant_behavior"
+            if behavior_applicable
+            else "not_applicable_direct_execution"
+        ),
+        "deterministic_behavior": True,
+        "concierge_role": "bounded_consumer_orchestrator",
+        "consumes_occupancy_governance_boundary": True,
+        "consumes_presence_governance_boundary": True,
+        "occupancy_authority_external": bool(
+            occupancy_governance_boundary.get("occupancy_authority_external", False)
+        ),
+        "presence_authority_external": bool(
+            presence_governance_boundary.get("presence_authority_external", False)
+        ),
+        "identity_authority_external": True,
+        "household_memory_authority_external": True,
+        "occupancy_truth_authority_external": bool(
+            occupancy_governance_boundary.get("occupancy_truth_authority_external", False)
+        ),
+        "presence_truth_authority_external": bool(
+            presence_governance_boundary.get("presence_truth_authority_external", False)
+        ),
+        "occupant_state": occupant_state,
+        "guest_safe_mode_active": guest_safe_mode_active,
+        "unknown_occupant_mode_active": unknown_occupant_mode_active,
+        "conservative_behavior_required": conservative_behavior_required,
+        "private_personalization_blocked": conservative_behavior_required,
+        "private_memory_inheritance_blocked": conservative_behavior_required,
+        "protected_experience_inheritance_blocked": conservative_behavior_required,
+        "identity_attribution_enabled": False,
+        "occupancy_truth_modification_enabled": False,
+        "presence_truth_modification_enabled": False,
+        "restoration_eligibility_allowed": restoration_eligibility_allowed,
+        "messaging_eligibility_influence": (
+            "restricted_influence"
+            if conservative_behavior_required
+            else "standard_governed_influence"
+        ),
+        "notification_eligibility_influence": (
+            "restricted_influence"
+            if conservative_behavior_required
+            else "standard_governed_influence"
+        ),
+        "privacy_boundary_preserved": True,
+        "guest_safe_boundary_preserved": True,
+        "explainability_visibility": {
+            "occupant_state_visibility_enabled": True,
+            "authority_visibility_enabled": True,
+            "restriction_visibility_enabled": True,
+            "traceability_visibility_enabled": True,
+        },
+        "governance_controls": {
+            "route_scope": route_scope,
+            "context_area_id": context_area_id,
+            "resolved_composite_id": resolved_composite_id,
+            "behavior_enabled": behavior_applicable,
+            "conservative_behavior_required": conservative_behavior_required,
+            "restoration_eligibility_allowed": restoration_eligibility_allowed,
+            "identity_attribution_enabled": False,
+            "occupancy_truth_modification_enabled": False,
+            "presence_truth_modification_enabled": False,
+        },
+        "deferred_release_3_owners": {
+            "multi_occupant_behavior": "#336",
+            "occupancy_presence_diagnostics_explainability": "#337",
+            "release_3_validation": "#338",
+        },
+    }
+
+
+def _build_multi_occupant_behavior(
+    *,
+    execution_kind: str,
+    route_scope: str,
+    context_area_id: str | None,
+    resolved_composite_id: str | None,
+    person_id: str | None,
+    context: dict[str, Any] | None,
+    occupancy_governance_boundary: dict[str, Any],
+    presence_governance_boundary: dict[str, Any],
+    guest_unknown_occupant_behavior: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Return #336-governed multi-occupant behavior metadata."""
+    context_payload = context if isinstance(context, dict) else {}
+
+    raw_states = context_payload.get("occupant_states", [])
+    if isinstance(raw_states, list):
+        occupant_states = [str(item).strip().lower() for item in raw_states if str(item).strip()]
+    else:
+        occupant_states = []
+
+    raw_people = context_payload.get("person_ids", [])
+    if isinstance(raw_people, list):
+        person_ids = [str(item).strip() for item in raw_people if str(item).strip()]
+    else:
+        person_ids = []
+
+    occupant_count_value = context_payload.get("occupant_count")
+    try:
+        occupant_count = int(occupant_count_value) if occupant_count_value is not None else 0
+    except (TypeError, ValueError):
+        occupant_count = 0
+
+    multi_hint = bool(
+        context_payload.get("multi_occupant", False)
+        or context_payload.get("multiple_occupants", False)
+        or context_payload.get("conflicting_occupants", False)
+        or context_payload.get("mixed_attribution_states", False)
+        or occupant_count > 1
+        or len(occupant_states) > 1
+        or len(person_ids) > 1
+    )
+
+    known_like = {"known", "known_occupant", "resident", "household_member"}
+    guest_like = {"guest", "guest_occupant", "guest-occupant"}
+    unknown_like = {"unknown", "unknown_occupant", "unattributed", "unattributed_occupant"}
+    state_set = set(occupant_states)
+
+    if multi_hint:
+        if state_set & guest_like and state_set & known_like:
+            occupant_state = "known_guest_mix"
+        elif state_set & unknown_like and state_set & known_like:
+            occupant_state = "mixed_attribution_states"
+        elif state_set & guest_like and state_set & unknown_like:
+            occupant_state = "guest_unknown_mix"
+        elif len(state_set) > 1:
+            occupant_state = "multiple_known_occupants" if state_set <= known_like else "multiple_occupants"
+        elif occupant_count > 1 or len(person_ids) > 1:
+            occupant_state = "multiple_occupants"
+        elif context_payload.get("conflicting_occupants", False):
+            occupant_state = "conflicting_occupants"
+        else:
+            occupant_state = "multiple_occupants"
+    else:
+        occupant_state = "single_occupant"
+
+    guest_unknown = dict(guest_unknown_occupant_behavior or {})
+    guest_restriction_active = bool(guest_unknown.get("conservative_behavior_required", False))
+    multi_occupant_mode_active = multi_hint
+    conflict_aware_behavior_required = bool(
+        multi_occupant_mode_active
+        and (
+            occupant_state != "multiple_known_occupants"
+            or guest_restriction_active
+            or occupant_state in {"known_guest_mix", "mixed_attribution_states", "guest_unknown_mix", "conflicting_occupants"}
+        )
+    )
+    behavior_applicable = execution_kind != "direct"
+    restoration_eligibility_allowed = bool(
+        behavior_applicable and multi_occupant_mode_active and not guest_restriction_active
+    )
+    behavior_enabled = behavior_applicable and multi_occupant_mode_active
+    influence_mode = (
+        "conflict_aware_influence" if multi_occupant_mode_active else "neutral_influence"
+    )
+
+    return {
+        "multi_occupant_behavior_version": 1,
+        "applicable": behavior_applicable,
+        "behavior_path": (
+            "governed_multi_occupant_behavior"
+            if behavior_applicable
+            else "not_applicable_direct_execution"
+        ),
+        "deterministic_behavior": True,
+        "concierge_role": "bounded_consumer_orchestrator",
+        "consumes_occupancy_governance_boundary": True,
+        "consumes_presence_governance_boundary": True,
+        "consumes_guest_unknown_behavior": bool(guest_unknown),
+        "occupancy_authority_external": bool(
+            occupancy_governance_boundary.get("occupancy_authority_external", False)
+        ),
+        "presence_authority_external": bool(
+            presence_governance_boundary.get("presence_authority_external", False)
+        ),
+        "identity_authority_external": True,
+        "household_memory_authority_external": True,
+        "occupancy_truth_authority_external": bool(
+            occupancy_governance_boundary.get("occupancy_truth_authority_external", False)
+        ),
+        "presence_truth_authority_external": bool(
+            presence_governance_boundary.get("presence_truth_authority_external", False)
+        ),
+        "occupant_state": occupant_state,
+        "multi_occupant_mode_active": multi_occupant_mode_active,
+        "conflict_aware_behavior_required": conflict_aware_behavior_required,
+        "guest_safe_boundary_preserved": True,
+        "privacy_boundary_preserved": True,
+        "guest_safe_mode_preserved": not multi_occupant_mode_active or guest_restriction_active,
+        "unknown_occupant_mode_preserved": not multi_occupant_mode_active or bool(
+            guest_unknown.get("unknown_occupant_mode_active", False)
+        ),
+        "multiple_occupants_visible": multi_occupant_mode_active,
+        "conflict_visibility_enabled": multi_occupant_mode_active,
+        "restoration_eligibility_allowed": restoration_eligibility_allowed,
+        "messaging_eligibility_influence": influence_mode,
+        "notification_eligibility_influence": influence_mode,
+        "personalization_eligibility_influence": influence_mode,
+        "identity_attribution_enabled": False,
+        "occupancy_truth_modification_enabled": False,
+        "presence_truth_modification_enabled": False,
+        "explainability_visibility": {
+            "occupant_state_visibility_enabled": True,
+            "authority_visibility_enabled": True,
+            "conflict_visibility_enabled": True,
+            "traceability_visibility_enabled": True,
+        },
+        "governance_controls": {
+            "route_scope": route_scope,
+            "context_area_id": context_area_id,
+            "resolved_composite_id": resolved_composite_id,
+            "behavior_enabled": behavior_enabled,
+            "multi_occupant_mode_active": multi_occupant_mode_active,
+            "conflict_aware_behavior_required": conflict_aware_behavior_required,
+            "restoration_eligibility_allowed": restoration_eligibility_allowed,
+            "identity_attribution_enabled": False,
+            "occupancy_truth_modification_enabled": False,
+            "presence_truth_modification_enabled": False,
+        },
+        "multi_occupant_visibility": {
+            "occupant_count": occupant_count if occupant_count > 0 else len(person_ids),
+            "occupant_states": occupant_states,
+            "person_ids_present": len(person_ids),
+        },
+        "deferred_release_3_owners": {
+            "occupancy_presence_diagnostics_explainability": "#337",
+            "release_3_validation": "#338",
+        },
+    }
+
+
+def _build_capability_to_experience_handoff(
+    *,
+    capability_discovery: dict[str, Any],
+    experience_governance_boundary: dict[str, Any],
+    execution_kind: str,
+) -> dict[str, Any]:
+    """Return #320-governed capability-to-experience handoff metadata."""
+    authority_traceability = dict(capability_discovery.get("authority_traceability", {}))
+    discovered_capabilities = list(capability_discovery.get("discovered_capabilities", []))
+    discoverable_outputs = [
+        {
+            "capability_id": item.get("capability_id"),
+            "source_input": item.get("source_input"),
+        }
+        for item in discovered_capabilities
+        if bool(item.get("discoverable", False))
+    ]
+    orchestration_constraints = dict(experience_governance_boundary.get("orchestration_constraints", {}))
+
+    if execution_kind == "direct":
+        return {
+            "handoff_version": 1,
+            "applicable": False,
+            "handoff_path": "not_applicable_direct_execution",
+            "deterministic_handoff": True,
+            "concierge_role": "bounded_consumer_orchestrator",
+            "handoff_transfers_authority": False,
+            "experience_consumption_ready": False,
+            "deferred_release_2_owners": {
+                "experience_projection": "#321",
+                "experience_restoration_boundary": "#322",
+                "experience_diagnostics_explainability": "#323",
+                "release_2_validation": "#324",
+            },
+        }
+
+    return {
+        "handoff_version": 1,
+        "applicable": True,
+        "handoff_path": "capability_to_experience_consumption",
+        "deterministic_handoff": True,
+        "concierge_role": "bounded_consumer_orchestrator",
+        "handoff_transfers_authority": False,
+        "experience_consumption_ready": True,
+        "authority_attribution": {
+            "capability_authority_origin": authority_traceability.get("capability_authority_origin"),
+            "vocabulary_authority_origin": authority_traceability.get("vocabulary_authority_origin"),
+            "asset_intelligence_authority_origin": authority_traceability.get("asset_intelligence_authority_origin"),
+            "experience_governance_owner": (
+                dict(experience_governance_boundary.get("ownership_boundaries", {})).get("governance_owner")
+            ),
+        },
+        "capability_source_traceability": {
+            "discoverable_capability_ids": list(capability_discovery.get("discoverable_capability_ids", [])),
+            "discoverable_count": int(capability_discovery.get("discoverable_count", 0) or 0),
+            "discovery_path": capability_discovery.get("discovery_path"),
+            "route_scope": orchestration_constraints.get("route_scope"),
+            "context_area_id": orchestration_constraints.get("context_area_id"),
+            "resolved_composite_id": orchestration_constraints.get("resolved_composite_id"),
+        },
+        "experience_consumable_capability_outputs": discoverable_outputs,
+        "ownership_preservation": {
+            "capability_authority_external": True,
+            "experience_authority_external": True,
+            "vocabulary_authority_external": True,
+            "asset_intelligence_authority_external": True,
+            "experience_redefines_capability_outputs": False,
+        },
+        "deferred_release_2_owners": {
+            "experience_projection": "#321",
+            "experience_restoration_boundary": "#322",
+            "experience_diagnostics_explainability": "#323",
+            "release_2_validation": "#324",
+        },
+    }
+
+
+def _build_experience_projection(
+    *,
+    capability_to_experience_handoff: dict[str, Any],
+    experience_governance_boundary: dict[str, Any],
+    execution_kind: str,
+) -> dict[str, Any]:
+    """Return #321-governed deterministic experience projection metadata."""
+    if execution_kind == "direct":
+        return {
+            "projection_version": 1,
+            "applicable": False,
+            "projection_path": "not_applicable_direct_execution",
+            "deterministic_projection": True,
+            "concierge_role": "bounded_consumer_orchestrator",
+            "projection_is_authority": False,
+            "deferred_release_2_owners": {
+                "experience_restoration_boundary": "#322",
+                "experience_diagnostics_explainability": "#323",
+                "release_2_validation": "#324",
+            },
+        }
+
+    capability_outputs = list(
+        capability_to_experience_handoff.get("experience_consumable_capability_outputs", [])
+    )
+    projected_experiences = [
+        {
+            "experience_id": f"exp_{item.get('capability_id')}",
+            "source_capability_id": item.get("capability_id"),
+            "source_input": item.get("source_input"),
+            "projection_mode": "capability_consumption_projection",
+        }
+        for item in capability_outputs
+    ]
+    ownership_boundaries = dict(experience_governance_boundary.get("ownership_boundaries", {}))
+    authority_attribution = dict(capability_to_experience_handoff.get("authority_attribution", {}))
+    source_traceability = dict(capability_to_experience_handoff.get("capability_source_traceability", {}))
+    return {
+        "projection_version": 1,
+        "applicable": bool(capability_to_experience_handoff.get("applicable", False)),
+        "projection_path": "experience_projection_from_capability_handoff",
+        "deterministic_projection": True,
+        "concierge_role": "bounded_consumer_orchestrator",
+        "experience_role": "governed_projector",
+        "projection_is_authority": False,
+        "projection_source": {
+            "handoff_path": capability_to_experience_handoff.get("handoff_path"),
+            "discoverable_capability_ids": list(source_traceability.get("discoverable_capability_ids", [])),
+            "route_scope": source_traceability.get("route_scope"),
+            "context_area_id": source_traceability.get("context_area_id"),
+            "resolved_composite_id": source_traceability.get("resolved_composite_id"),
+        },
+        "authority_attribution": {
+            "capability_authority_origin": authority_attribution.get("capability_authority_origin"),
+            "vocabulary_authority_origin": authority_attribution.get("vocabulary_authority_origin"),
+            "asset_intelligence_authority_origin": authority_attribution.get("asset_intelligence_authority_origin"),
+            "experience_governance_owner": ownership_boundaries.get("governance_owner"),
+        },
+        "projected_experiences": projected_experiences,
+        "projected_experience_count": len(projected_experiences),
+        "ownership_preservation": {
+            "capability_authority_external": True,
+            "experience_authority_external": True,
+            "vocabulary_authority_external": True,
+            "asset_intelligence_authority_external": True,
+            "projection_redefines_inputs": False,
+        },
+        "deferred_release_2_owners": {
+            "experience_restoration_boundary": "#322",
+            "experience_diagnostics_explainability": "#323",
+            "release_2_validation": "#324",
+        },
+    }
+
+
+def _build_experience_restoration_boundary(
+    *,
+    experience_projection: dict[str, Any],
+    guest_unknown_occupant_behavior: dict[str, Any] | None,
+    multi_occupant_behavior: dict[str, Any] | None,
+    execution_kind: str,
+    route_scope: str,
+    context_area_id: str | None,
+    resolved_composite_id: str | None,
+) -> dict[str, Any]:
+    """Return #322/#329/#330-governed restoration boundary metadata."""
+    if execution_kind == "direct":
+        return {
+            "restoration_boundary_version": 1,
+            "restoration_governance_version": 1,
+            "applicable": False,
+            "restoration_path": "not_applicable_direct_execution",
+            "restoration_governance_path": "not_applicable_direct_execution",
+            "deterministic_boundary": True,
+            "concierge_role": "bounded_consumer_orchestrator",
+            "restoration_authority_external": True,
+            "restoration_policy_authority_external": True,
+            "restoration_consumption_mode": "governed_boundary_consumption",
+            "restoration_authority_transferred": False,
+            "restoration_eligible": False,
+            "guest_unknown_behavior_consumed": bool(guest_unknown_occupant_behavior),
+            "multi_occupant_behavior_consumed": bool(multi_occupant_behavior),
+            "restoration_owns_identity": False,
+            "restoration_owns_occupancy": False,
+            "restoration_owns_continuity": False,
+            "restoration_owns_affinity": False,
+            "restoration_owns_household_memory": False,
+            "privacy_boundary_preserved": True,
+            "guest_safe_boundary_preserved": True,
+            "governance_controls": {
+                "route_scope": "direct",
+                "context_area_id": None,
+                "resolved_composite_id": None,
+                "restoration_boundary_only": True,
+                "restoration_execution_enabled": False,
+                "restoration_decision_behavior_enabled": False,
+                "restoration_diagnostics_behavior_enabled": True,
+                "restoration_validation_behavior_enabled": False,
+            },
+            "deferred_release_2_owners": {
+                "experience_diagnostics_explainability": "#323",
+                "release_2_validation": "#324",
+            },
+            "deferred_release_3_owners": {
+                "restoration_outcome_implementation": "#330",
+                "e3a_preservation_alignment": "#331",
+                "restoration_diagnostics_explainability": "#332",
+                "release_3_validation": "#338",
+            },
+        }
+
+    projection_source = dict(experience_projection.get("projection_source", {}))
+    authority_attribution = dict(experience_projection.get("authority_attribution", {}))
+    projected_count = int(experience_projection.get("projected_experience_count", 0) or 0)
+    guest_behavior = dict(guest_unknown_occupant_behavior or {})
+    multi_behavior = dict(multi_occupant_behavior or {})
+    restoration_allowed_by_guest_behavior = bool(
+        guest_behavior.get("restoration_eligibility_allowed", True)
+    )
+    restoration_allowed_by_multi_behavior = bool(
+        multi_behavior.get("restoration_eligibility_allowed", True)
+    )
+    restoration_eligible = bool(
+        projected_count > 0
+        and restoration_allowed_by_guest_behavior
+        and restoration_allowed_by_multi_behavior
+    )
+    restoration_decision_behavior_enabled = execution_kind in {"summary", "orchestration"}
+    restoration_execution_enabled = execution_kind == "orchestration"
+    return {
+        "restoration_boundary_version": 1,
+        "restoration_governance_version": 1,
+        "applicable": bool(experience_projection.get("applicable", False)),
+        "restoration_path": "experience_projection_to_restoration_boundary",
+        "restoration_governance_path": "governed_restoration_boundary",
+        "deterministic_boundary": True,
+        "concierge_role": "bounded_consumer_orchestrator",
+        "restoration_authority_external": True,
+        "restoration_policy_authority_external": True,
+        "restoration_consumption_mode": "governed_boundary_consumption",
+        "restoration_authority_transferred": False,
+        "restoration_eligible": restoration_eligible,
+        "guest_unknown_behavior_consumed": bool(guest_behavior),
+        "multi_occupant_behavior_consumed": bool(multi_behavior),
+        "restoration_owns_identity": False,
+        "restoration_owns_occupancy": False,
+        "restoration_owns_continuity": False,
+        "restoration_owns_affinity": False,
+        "restoration_owns_household_memory": False,
+        "privacy_boundary_preserved": True,
+        "guest_safe_boundary_preserved": True,
+        "restoration_eligibility_visibility": {
+            "projected_experience_count": projected_count,
+            "projection_path": experience_projection.get("projection_path"),
+            "eligible_when_projected_experiences_present": True,
+            "restricted_by_guest_unknown_behavior": not restoration_allowed_by_guest_behavior,
+            "guest_unknown_occupant_state": guest_behavior.get("occupant_state"),
+            "restricted_by_multi_occupant_behavior": not restoration_allowed_by_multi_behavior,
+            "multi_occupant_state": multi_behavior.get("occupant_state"),
+        },
+        "authority_attribution": {
+            "capability_authority_origin": authority_attribution.get("capability_authority_origin"),
+            "vocabulary_authority_origin": authority_attribution.get("vocabulary_authority_origin"),
+            "asset_intelligence_authority_origin": authority_attribution.get("asset_intelligence_authority_origin"),
+            "experience_governance_owner": authority_attribution.get("experience_governance_owner"),
+        },
+        "restoration_traceability": {
+            "projection_source_path": projection_source.get("handoff_path"),
+            "projection_route_scope": projection_source.get("route_scope"),
+            "context_area_id": projection_source.get("context_area_id"),
+            "resolved_composite_id": projection_source.get("resolved_composite_id"),
+        },
+        "governance_controls": {
+            "route_scope": route_scope,
+            "context_area_id": context_area_id,
+            "resolved_composite_id": resolved_composite_id,
+            "restoration_boundary_only": True,
+            "restoration_execution_enabled": restoration_execution_enabled,
+            "restoration_decision_behavior_enabled": restoration_decision_behavior_enabled,
+            "restoration_diagnostics_behavior_enabled": True,
+            "restoration_validation_behavior_enabled": False,
+            "guest_unknown_behavior_enabled": bool(
+                guest_behavior.get("governance_controls", {}).get("behavior_enabled", False)
+            ),
+            "multi_occupant_behavior_enabled": bool(
+                multi_behavior.get("governance_controls", {}).get("behavior_enabled", False)
+            ),
+        },
+        "ownership_visibility": {
+            "capability_authority_external": True,
+            "experience_authority_external": True,
+            "vocabulary_authority_external": True,
+            "asset_intelligence_authority_external": True,
+            "restoration_redefines_projection": False,
+        },
+        "guardrails": {
+            "diagnostics_in_scope": True,
+            "validation_in_scope": False,
+            "authority_transfer_allowed": False,
+        },
+        "deferred_release_2_owners": {
+            "experience_diagnostics_explainability": "#323",
+            "release_2_validation": "#324",
+        },
+        "deferred_release_3_owners": {
+            "restoration_outcome_implementation": "#330",
+            "e3a_preservation_alignment": "#331",
+            "restoration_diagnostics_explainability": "#332",
+            "release_3_validation": "#338",
+        },
+    }
+
+
+def _build_experience_restoration_outcome(
+    *,
+    experience_projection: dict[str, Any],
+    experience_restoration_boundary: dict[str, Any],
+    guest_unknown_occupant_behavior: dict[str, Any] | None,
+    multi_occupant_behavior: dict[str, Any] | None,
+    execution_kind: str,
+    route_scope: str,
+    context_area_id: str | None,
+    resolved_composite_id: str | None,
+) -> dict[str, Any]:
+    """Return #330-governed outcome restoration consumption metadata."""
+    if execution_kind == "direct":
+        return {
+            "outcome_version": 1,
+            "applicable": False,
+            "outcome_path": "not_applicable_direct_execution",
+            "deterministic_outcome": True,
+            "concierge_role": "bounded_consumer_orchestrator",
+            "outcome_is_authority": False,
+            "restoration_applied": False,
+            "restoration_execution_handoff_ready": False,
+            "restoration_outcome_reason": "direct_execution_not_eligible",
+            "selected_outcome": None,
+            "fallback_applied": True,
+            "ownership_preservation": {
+                "restoration_authority_external": True,
+                "restoration_policy_authority_external": True,
+                "restoration_decision_authority_transferred": False,
+                "restoration_redefines_governance": False,
+            },
+            "governance_controls": {
+                "route_scope": "direct",
+                "context_area_id": None,
+                "resolved_composite_id": None,
+                "restoration_decision_behavior_enabled": False,
+                "restoration_execution_enabled": False,
+                "restoration_diagnostics_behavior_enabled": True,
+                "guest_unknown_behavior_enabled": False,
+                "multi_occupant_behavior_enabled": False,
+            },
+            "deferred_release_3_owners": {
+                "e3a_preservation_alignment": "#331",
+                "restoration_diagnostics_explainability": "#332",
+                "release_3_validation": "#338",
+            },
+        }
+
+    projected_experiences = list(experience_projection.get("projected_experiences", []))
+    projected_count = int(experience_projection.get("projected_experience_count", 0) or 0)
+    guest_behavior = dict(guest_unknown_occupant_behavior or {})
+    multi_behavior = dict(multi_occupant_behavior or {})
+    restoration_allowed_by_guest_behavior = bool(
+        guest_behavior.get("restoration_eligibility_allowed", True)
+    )
+    restoration_allowed_by_multi_behavior = bool(
+        multi_behavior.get("restoration_eligibility_allowed", True)
+    )
+    selected_outcome = projected_experiences[0] if projected_experiences else None
+    restoration_applied = bool(
+        experience_restoration_boundary.get("applicable", False)
+        and experience_restoration_boundary.get("restoration_eligible", False)
+        and selected_outcome is not None
+    )
+    restoration_execution_handoff_ready = bool(restoration_applied and execution_kind == "orchestration")
+    return {
+        "outcome_version": 1,
+        "applicable": bool(experience_restoration_boundary.get("applicable", False)),
+        "outcome_path": "experience_projection_to_restoration_outcome",
+        "deterministic_outcome": True,
+        "concierge_role": "bounded_consumer_orchestrator",
+        "outcome_is_authority": False,
+        "restoration_applied": restoration_applied,
+        "restoration_execution_handoff_ready": restoration_execution_handoff_ready,
+        "restoration_outcome_reason": (
+            "projected_experience_selected"
+            if restoration_applied
+            else (
+                "guest_unknown_occupant_restriction"
+                if bool(experience_restoration_boundary.get("applicable", False))
+                and not restoration_allowed_by_guest_behavior
+                else (
+                    "multi_occupant_conflict_aware_restriction"
+                    if bool(experience_restoration_boundary.get("applicable", False))
+                    and not restoration_allowed_by_multi_behavior
+                    else "no_projected_experiences"
+                )
+            )
+        ),
+        "selected_outcome": {
+            "experience_id": selected_outcome.get("experience_id"),
+            "source_capability_id": selected_outcome.get("source_capability_id"),
+            "projection_mode": selected_outcome.get("projection_mode"),
+        }
+        if selected_outcome is not None
+        else None,
+        "fallback_applied": not restoration_applied,
+        "lineage_references": {
+            "projection_path": experience_projection.get("projection_path"),
+            "projected_experience_count": projected_count,
+            "route_scope": route_scope,
+            "context_area_id": context_area_id,
+            "resolved_composite_id": resolved_composite_id,
+            "guest_unknown_occupant_state": guest_behavior.get("occupant_state"),
+            "multi_occupant_state": multi_behavior.get("occupant_state"),
+        },
+        "ownership_preservation": {
+            "restoration_authority_external": True,
+            "restoration_policy_authority_external": True,
+            "restoration_decision_authority_transferred": False,
+            "restoration_redefines_governance": False,
+        },
+        "governance_controls": {
+            "route_scope": route_scope,
+            "context_area_id": context_area_id,
+            "resolved_composite_id": resolved_composite_id,
+            "restoration_decision_behavior_enabled": True,
+            "restoration_execution_enabled": execution_kind == "orchestration",
+            "restoration_diagnostics_behavior_enabled": True,
+            "guest_unknown_behavior_enabled": bool(
+                guest_behavior.get("governance_controls", {}).get("behavior_enabled", False)
+            ),
+            "multi_occupant_behavior_enabled": bool(
+                multi_behavior.get("governance_controls", {}).get("behavior_enabled", False)
+            ),
+        },
+        "deferred_release_3_owners": {
+            "e3a_preservation_alignment": "#331",
+            "restoration_diagnostics_explainability": "#332",
+            "release_3_validation": "#338",
+        },
+    }
+
+
+def _build_e3a_preservation_alignment(
+    *,
+    experience_restoration_boundary: dict[str, Any],
+    experience_restoration_outcome: dict[str, Any],
+    execution_kind: str,
+    route_scope: str,
+    context_area_id: str | None,
+    resolved_composite_id: str | None,
+    requested_target: str | None,
+    resolved_target: str | None,
+) -> dict[str, Any]:
+    """Return #331-governed preservation alignment metadata consuming restoration outcomes."""
+    if execution_kind == "direct":
+        return {
+            "alignment_version": 1,
+            "applicable": False,
+            "alignment_path": "not_applicable_direct_execution",
+            "deterministic_alignment": True,
+            "concierge_role": "bounded_consumer_orchestrator",
+            "consumes_restoration_outcomes": True,
+            "preservation_governance_source": "adr_013_outcome_preservation",
+            "preservation_mode": "household_facing_outcomes",
+            "preservation_eligible": False,
+            "alignment_reason": "direct_execution_not_eligible",
+            "preserved_outcome_clusters": {
+                "composite_room_execution": False,
+                "execution_hierarchy": True,
+                "global_context_provider_parity": False,
+            },
+            "restoration_linkage": {
+                "restoration_outcome_path": experience_restoration_outcome.get("outcome_path"),
+                "restoration_applied": bool(experience_restoration_outcome.get("restoration_applied", False)),
+                "restoration_outcome_reason": experience_restoration_outcome.get("restoration_outcome_reason"),
+            },
+            "governance_controls": {
+                "route_scope": "direct",
+                "context_area_id": None,
+                "resolved_composite_id": None,
+                "alignment_behavior_enabled": False,
+                "restoration_decision_behavior_enabled": False,
+                "restoration_execution_enabled": False,
+            },
+            "ownership_preservation": {
+                "restoration_authority_external": True,
+                "restoration_policy_authority_external": True,
+                "preservation_creates_authority": False,
+                "preservation_redefines_outcomes": False,
+                "preservation_redefines_eligibility": False,
+            },
+            "deferred_release_3_owners": {
+                "restoration_diagnostics_explainability": "#332",
+                "release_3_validation": "#338",
+            },
+        }
+
+    selected_outcome = experience_restoration_outcome.get("selected_outcome")
+    selected_outcome_dict = selected_outcome if isinstance(selected_outcome, dict) else {}
+    restoration_applied = bool(experience_restoration_outcome.get("restoration_applied", False))
+    preservation_eligible = bool(
+        experience_restoration_boundary.get("applicable", False)
+        and restoration_applied
+    )
+    return {
+        "alignment_version": 1,
+        "applicable": bool(experience_restoration_outcome.get("applicable", False)),
+        "alignment_path": "restoration_outcome_to_e3a_preservation_alignment",
+        "deterministic_alignment": True,
+        "concierge_role": "bounded_consumer_orchestrator",
+        "consumes_restoration_outcomes": True,
+        "preservation_governance_source": "adr_013_outcome_preservation",
+        "preservation_mode": "household_facing_outcomes",
+        "preservation_eligible": preservation_eligible,
+        "alignment_reason": (
+            "restoration_outcome_aligned"
+            if preservation_eligible
+            else "restoration_outcome_not_applied"
+        ),
+        "preserved_outcome_clusters": {
+            "composite_room_execution": bool(
+                route_scope == "composite"
+                and requested_target is not None
+                and resolved_target is not None
+                and requested_target != resolved_target
+            ),
+            "execution_hierarchy": True,
+            "global_context_provider_parity": bool(route_scope == "global"),
+        },
+        "preservation_traceability": {
+            "requested_target": requested_target,
+            "resolved_target": resolved_target,
+            "route_scope": route_scope,
+            "context_area_id": context_area_id,
+            "resolved_composite_id": resolved_composite_id,
+        },
+        "restoration_linkage": {
+            "restoration_path": experience_restoration_boundary.get("restoration_path"),
+            "restoration_outcome_path": experience_restoration_outcome.get("outcome_path"),
+            "restoration_applied": restoration_applied,
+            "restoration_outcome_reason": experience_restoration_outcome.get("restoration_outcome_reason"),
+            "selected_experience_id": selected_outcome_dict.get("experience_id"),
+        },
+        "governance_controls": {
+            "route_scope": route_scope,
+            "context_area_id": context_area_id,
+            "resolved_composite_id": resolved_composite_id,
+            "alignment_behavior_enabled": True,
+            "restoration_decision_behavior_enabled": bool(
+                experience_restoration_boundary.get("governance_controls", {}).get(
+                    "restoration_decision_behavior_enabled",
+                    False,
+                )
+            ),
+            "restoration_execution_enabled": bool(
+                experience_restoration_boundary.get("governance_controls", {}).get(
+                    "restoration_execution_enabled",
+                    False,
+                )
+            ),
+        },
+        "ownership_preservation": {
+            "restoration_authority_external": True,
+            "restoration_policy_authority_external": True,
+            "preservation_creates_authority": False,
+            "preservation_redefines_outcomes": False,
+            "preservation_redefines_eligibility": False,
+        },
+        "deferred_release_3_owners": {
+            "restoration_diagnostics_explainability": "#332",
+            "release_3_validation": "#338",
+        },
+    }
 
 
 async def _async_with_activity(
@@ -571,6 +4216,20 @@ async def _async_with_activity(
         )
         raise
 
+    response = result
+    if isinstance(result, dict):
+        response = dict(result)
+        activity_request_summary = str(response.pop("activity_request_summary", "")).strip()
+        activity_external_refs = response.pop("activity_external_refs", [])
+        if activity_request_summary or activity_external_refs:
+            activity = (await storage.async_load_state()).activities.get(activity_id)
+            if activity is not None:
+                if activity_request_summary:
+                    activity.request_summary = _sanitize_request_summary(actor_class, activity_request_summary)
+                if isinstance(activity_external_refs, list) and activity_external_refs:
+                    activity.external_refs = list(activity.external_refs) + list(activity_external_refs)
+                await storage.async_record_activity_event(activity)
+
     await storage.async_close_activity_event(
         activity_id=activity_id,
         ended_at=datetime.now(timezone.utc).isoformat(),
@@ -579,7 +4238,334 @@ async def _async_with_activity(
         actions_taken=[action_name],
         policy_gates=list(policy_gates or []),
     )
-    return result
+    return response
+
+
+def _build_context_assembly_ref(assembled_context: dict[str, Any]) -> dict[str, Any]:
+    """Return non-sensitive context assembly explainability metadata."""
+    return {
+        "ref_type": "context_assembly",
+        "requested_area_id": assembled_context.get("requested_area_id"),
+        "context_area_id": assembled_context.get("context_area_id"),
+        "resolved_composite_id": assembled_context.get("resolved_composite_id"),
+        "context_source_count": assembled_context.get("context_source_count", 0),
+        "signal_count": assembled_context.get("signal_count", 0),
+    }
+
+
+def _build_routing_decision_ref(execution_envelope: dict[str, Any]) -> dict[str, Any]:
+    """Return non-sensitive routing explainability metadata."""
+    routing = dict(execution_envelope.get("routing", {}))
+    return {
+        "ref_type": "routing_decision",
+        "route_scope": routing.get("route_scope"),
+        "requested_area_id": routing.get("requested_area_id"),
+        "context_area_id": routing.get("context_area_id"),
+        "resolved_composite_id": routing.get("resolved_composite_id"),
+        "execution_preference_scope_id": routing.get("execution_preference_scope_id"),
+        "execution_preference_present": bool(routing.get("execution_preference_present", False)),
+    }
+
+
+def _build_execution_envelope_ref(execution_envelope: dict[str, Any]) -> dict[str, Any]:
+    """Return non-sensitive execution-envelope explainability metadata."""
+    planning = dict(execution_envelope.get("planning", {}))
+    execution = dict(execution_envelope.get("execution", {}))
+    authoritative_inputs = dict(execution_envelope.get("authoritative_capability_input_consumption", {}))
+    vocabulary_handoff = dict(execution_envelope.get("vocabulary_to_capability_handoff", {}))
+    asset_handoff = dict(execution_envelope.get("asset_intelligence_cp00_handoff", {}))
+    discovery = dict(execution_envelope.get("capability_discovery", {}))
+    continuity = dict(execution_envelope.get("continuity_governance_boundary", {}))
+    affinity = dict(execution_envelope.get("person_room_affinity_boundary", {}))
+    privacy_memory = dict(execution_envelope.get("privacy_household_memory_boundary", {}))
+    occupancy = dict(execution_envelope.get("occupancy_governance_boundary", {}))
+    presence = dict(execution_envelope.get("presence_governance_boundary", {}))
+    guest_unknown = dict(execution_envelope.get("guest_unknown_occupant_behavior", {}))
+    multi_occupant = dict(execution_envelope.get("multi_occupant_behavior", {}))
+    experience = dict(execution_envelope.get("experience_governance_boundary", {}))
+    handoff = dict(execution_envelope.get("capability_to_experience_handoff", {}))
+    projection = dict(execution_envelope.get("experience_projection", {}))
+    restoration = dict(execution_envelope.get("experience_restoration_boundary", {}))
+    restoration_outcome = dict(execution_envelope.get("experience_restoration_outcome", {}))
+    preservation_alignment = dict(execution_envelope.get("e3a_preservation_alignment", {}))
+    restoration_controls = dict(restoration.get("governance_controls", {}))
+    selected_outcome_raw = restoration_outcome.get("selected_outcome", {})
+    selected_outcome = selected_outcome_raw if isinstance(selected_outcome_raw, dict) else {}
+    continuity_constraints = dict(continuity.get("orchestration_constraints", {}))
+    affinity_constraints = dict(affinity.get("orchestration_constraints", {}))
+    occupancy_constraints = dict(occupancy.get("orchestration_constraints", {}))
+    presence_constraints = dict(presence.get("orchestration_constraints", {}))
+    guest_unknown_controls = dict(guest_unknown.get("governance_controls", {}))
+    multi_occupant_controls = dict(multi_occupant.get("governance_controls", {}))
+    experience_constraints = dict(experience.get("orchestration_constraints", {}))
+    return {
+        "ref_type": "execution_envelope",
+        "envelope_version": execution_envelope.get("envelope_version"),
+        "execution_kind": execution_envelope.get("execution_kind"),
+        "intent_class": execution_envelope.get("intent_class"),
+        "plan_kind": planning.get("plan_kind"),
+        "target_type": planning.get("target_type"),
+        "requested_target": planning.get("requested_target"),
+        "resolved_target": planning.get("resolved_target"),
+        "requested_service": planning.get("requested_service"),
+        "requested_entity_id": planning.get("requested_entity_id"),
+        "execution_domain": execution.get("domain"),
+        "execution_service": execution.get("service"),
+        "capability_authority_origin": authoritative_inputs.get("capability_authority_origin"),
+        "vocabulary_room_consumed": bool(vocabulary_handoff.get("room_vocabulary_consumed", False)),
+        "vocabulary_device_consumed": bool(vocabulary_handoff.get("device_entity_vocabulary_consumed", False)),
+        "asset_cp00_handoff_applicable": bool(asset_handoff.get("applicable", False)),
+        "asset_cp00_authority_preserved": bool(
+            asset_handoff.get("asset_intelligence_authority_preserved", False)
+        ),
+        "capability_discovery_applicable": bool(discovery.get("applicable", False)),
+        "discoverable_capability_ids": list(discovery.get("discoverable_capability_ids", [])),
+        "discoverable_count": int(discovery.get("discoverable_count", 0) or 0),
+        "capability_discovery_path": discovery.get("discovery_path"),
+        "continuity_governance_applicable": bool(continuity.get("applicable", False)),
+        "continuity_governance_path": continuity.get("continuity_path"),
+        "continuity_diagnostics_behavior_enabled": bool(
+            continuity_constraints.get("diagnostics_behavior_enabled", False)
+        ),
+        "continuity_owns_identity": bool(continuity.get("continuity_owns_identity", False)),
+        "continuity_owns_occupancy": bool(continuity.get("continuity_owns_occupancy", False)),
+        "continuity_owns_memory": bool(continuity.get("continuity_owns_memory", False)),
+        "continuity_privacy_boundary_preserved": bool(
+            continuity.get("privacy_boundary_preserved", False)
+        ),
+        "affinity_governance_applicable": bool(affinity.get("applicable", False)),
+        "affinity_governance_path": affinity.get("affinity_path"),
+        "affinity_diagnostics_behavior_enabled": bool(
+            affinity_constraints.get("diagnostics_behavior_enabled", False)
+        ),
+        "affinity_owns_identity": bool(affinity.get("affinity_owns_identity", False)),
+        "affinity_owns_room_truth": bool(affinity.get("affinity_owns_room_truth", False)),
+        "affinity_owns_occupancy": bool(affinity.get("affinity_owns_occupancy", False)),
+        "affinity_owns_memory": bool(affinity.get("affinity_owns_memory", False)),
+        "affinity_guest_safe_boundary_preserved": bool(
+            affinity.get("guest_safe_boundary_preserved", False)
+        ),
+        "affinity_privacy_boundary_preserved": bool(
+            affinity.get("privacy_boundary_preserved", False)
+        ),
+        "privacy_household_memory_boundary_applicable": bool(
+            privacy_memory.get("applicable", False)
+        ),
+        "privacy_household_memory_boundary_path": privacy_memory.get("boundary_path"),
+        "memory_owns_identity": bool(privacy_memory.get("memory_owns_identity", False)),
+        "memory_owns_retention_policy": bool(
+            privacy_memory.get("memory_owns_retention_policy", False)
+        ),
+        "memory_owns_storage": bool(privacy_memory.get("memory_owns_storage", False)),
+        "memory_owns_provenance": bool(privacy_memory.get("memory_owns_provenance", False)),
+        "privacy_memory_guest_safe_boundary_preserved": bool(
+            privacy_memory.get("guest_safe_boundary_preserved", False)
+        ),
+        "occupancy_governance_applicable": bool(occupancy.get("applicable", False)),
+        "occupancy_governance_path": occupancy.get("occupancy_path"),
+        "occupancy_authority_external": bool(occupancy.get("occupancy_authority_external", False)),
+        "occupancy_policy_authority_external": bool(
+            occupancy.get("occupancy_policy_authority_external", False)
+        ),
+        "occupancy_truth_authority_external": bool(
+            occupancy.get("occupancy_truth_authority_external", False)
+        ),
+        "occupancy_owns_room_truth": bool(occupancy.get("occupancy_owns_room_truth", False)),
+        "occupancy_owns_identity": bool(occupancy.get("occupancy_owns_identity", False)),
+        "occupancy_owns_household_memory": bool(
+            occupancy.get("occupancy_owns_household_memory", False)
+        ),
+        "occupancy_owns_restoration": bool(occupancy.get("occupancy_owns_restoration", False)),
+        "occupancy_guest_safe_boundary_preserved": bool(
+            occupancy.get("guest_safe_boundary_preserved", False)
+        ),
+        "occupancy_privacy_boundary_preserved": bool(
+            occupancy.get("privacy_boundary_preserved", False)
+        ),
+        "occupancy_decision_behavior_enabled": bool(
+            occupancy_constraints.get("occupancy_decision_behavior_enabled", False)
+        ),
+        "occupancy_execution_enabled": bool(
+            occupancy_constraints.get("occupancy_execution_enabled", False)
+        ),
+        "occupancy_inference_enabled": bool(
+            occupancy_constraints.get("occupancy_inference_enabled", False)
+        ),
+        "occupancy_diagnostics_behavior_enabled": bool(
+            occupancy_constraints.get("occupancy_diagnostics_behavior_enabled", False)
+        ),
+        "presence_governance_applicable": bool(presence.get("applicable", False)),
+        "presence_governance_path": presence.get("presence_path"),
+        "presence_authority_external": bool(presence.get("presence_authority_external", False)),
+        "presence_policy_authority_external": bool(
+            presence.get("presence_policy_authority_external", False)
+        ),
+        "presence_truth_authority_external": bool(
+            presence.get("presence_truth_authority_external", False)
+        ),
+        "presence_owns_occupancy": bool(presence.get("presence_owns_occupancy", False)),
+        "presence_owns_room_truth": bool(presence.get("presence_owns_room_truth", False)),
+        "presence_owns_identity": bool(presence.get("presence_owns_identity", False)),
+        "presence_owns_household_memory": bool(
+            presence.get("presence_owns_household_memory", False)
+        ),
+        "presence_owns_restoration": bool(presence.get("presence_owns_restoration", False)),
+        "presence_guest_safe_boundary_preserved": bool(
+            presence.get("guest_safe_boundary_preserved", False)
+        ),
+        "presence_privacy_boundary_preserved": bool(
+            presence.get("privacy_boundary_preserved", False)
+        ),
+        "presence_consumes_occupancy_governance_visibility": bool(
+            presence.get("consumes_occupancy_governance_visibility", False)
+        ),
+        "presence_detection_enabled": bool(
+            presence_constraints.get("presence_detection_enabled", False)
+        ),
+        "presence_inference_enabled": bool(
+            presence_constraints.get("presence_inference_enabled", False)
+        ),
+        "presence_attribution_enabled": bool(
+            presence_constraints.get("presence_attribution_enabled", False)
+        ),
+        "presence_behavior_enabled": bool(
+            presence_constraints.get("presence_behavior_enabled", False)
+        ),
+        "presence_diagnostics_behavior_enabled": bool(
+            presence_constraints.get("presence_diagnostics_behavior_enabled", False)
+        ),
+        "guest_unknown_behavior_applicable": bool(guest_unknown.get("applicable", False)),
+        "guest_unknown_behavior_path": guest_unknown.get("behavior_path"),
+        "guest_unknown_occupant_state": guest_unknown.get("occupant_state"),
+        "guest_unknown_guest_safe_mode_active": bool(
+            guest_unknown.get("guest_safe_mode_active", False)
+        ),
+        "guest_unknown_unknown_occupant_mode_active": bool(
+            guest_unknown.get("unknown_occupant_mode_active", False)
+        ),
+        "guest_unknown_conservative_behavior_required": bool(
+            guest_unknown.get("conservative_behavior_required", False)
+        ),
+        "guest_unknown_private_personalization_blocked": bool(
+            guest_unknown.get("private_personalization_blocked", False)
+        ),
+        "guest_unknown_private_memory_inheritance_blocked": bool(
+            guest_unknown.get("private_memory_inheritance_blocked", False)
+        ),
+        "guest_unknown_restoration_eligibility_allowed": bool(
+            guest_unknown.get("restoration_eligibility_allowed", False)
+        ),
+        "guest_unknown_messaging_eligibility_influence": guest_unknown.get(
+            "messaging_eligibility_influence"
+        ),
+        "guest_unknown_notification_eligibility_influence": guest_unknown.get(
+            "notification_eligibility_influence"
+        ),
+        "guest_unknown_identity_attribution_enabled": bool(
+            guest_unknown.get("identity_attribution_enabled", False)
+        ),
+        "guest_unknown_behavior_enabled": bool(
+            guest_unknown_controls.get("behavior_enabled", False)
+        ),
+        "multi_occupant_behavior_applicable": bool(multi_occupant.get("applicable", False)),
+        "multi_occupant_behavior_path": multi_occupant.get("behavior_path"),
+        "multi_occupant_occupant_state": multi_occupant.get("occupant_state"),
+        "multi_occupant_mode_active": bool(multi_occupant.get("multi_occupant_mode_active", False)),
+        "multi_occupant_conflict_aware_behavior_required": bool(
+            multi_occupant.get("conflict_aware_behavior_required", False)
+        ),
+        "multi_occupant_restoration_eligibility_allowed": bool(
+            multi_occupant.get("restoration_eligibility_allowed", False)
+        ),
+        "multi_occupant_conflict_visibility_enabled": bool(
+            multi_occupant.get("conflict_visibility_enabled", False)
+        ),
+        "multi_occupant_behavior_enabled": bool(
+            multi_occupant_controls.get("behavior_enabled", False)
+        ),
+        "experience_governance_applicable": bool(experience.get("applicable", False)),
+        "experience_governance_path": experience.get("governance_path"),
+        "experience_consumes_capability_outputs": bool(
+            experience.get("experience_consumes_capability_outputs", False)
+        ),
+        "experience_redefines_capability_outputs": bool(
+            experience.get("experience_redefines_capability_outputs", False)
+        ),
+        "experience_execution_enabled": bool(experience_constraints.get("experience_execution_enabled", False)),
+        "capability_to_experience_handoff_applicable": bool(handoff.get("applicable", False)),
+        "capability_to_experience_handoff_path": handoff.get("handoff_path"),
+        "experience_consumption_ready": bool(handoff.get("experience_consumption_ready", False)),
+        "handoff_transfers_authority": bool(handoff.get("handoff_transfers_authority", False)),
+        "experience_projection_applicable": bool(projection.get("applicable", False)),
+        "experience_projection_path": projection.get("projection_path"),
+        "projected_experience_count": int(projection.get("projected_experience_count", 0) or 0),
+        "projection_is_authority": bool(projection.get("projection_is_authority", False)),
+        "experience_restoration_boundary_applicable": bool(restoration.get("applicable", False)),
+        "experience_restoration_path": restoration.get("restoration_path"),
+        "restoration_governance_path": restoration.get("restoration_governance_path"),
+        "restoration_eligible": bool(restoration.get("restoration_eligible", False)),
+        "restoration_authority_external": bool(restoration.get("restoration_authority_external", False)),
+        "restoration_policy_authority_external": bool(
+            restoration.get("restoration_policy_authority_external", False)
+        ),
+        "restoration_owns_identity": bool(restoration.get("restoration_owns_identity", False)),
+        "restoration_owns_occupancy": bool(restoration.get("restoration_owns_occupancy", False)),
+        "restoration_owns_continuity": bool(restoration.get("restoration_owns_continuity", False)),
+        "restoration_owns_affinity": bool(restoration.get("restoration_owns_affinity", False)),
+        "restoration_owns_household_memory": bool(
+            restoration.get("restoration_owns_household_memory", False)
+        ),
+        "restoration_execution_enabled": bool(
+            restoration_controls.get("restoration_execution_enabled", False)
+        ),
+        "restoration_decision_behavior_enabled": bool(
+            restoration_controls.get("restoration_decision_behavior_enabled", False)
+        ),
+        "restoration_diagnostics_behavior_enabled": bool(
+            restoration_controls.get("restoration_diagnostics_behavior_enabled", False)
+        ),
+        "restoration_authority_transferred": bool(restoration.get("restoration_authority_transferred", False)),
+        "restoration_privacy_boundary_preserved": bool(
+            restoration.get("privacy_boundary_preserved", False)
+        ),
+        "restoration_guest_safe_boundary_preserved": bool(
+            restoration.get("guest_safe_boundary_preserved", False)
+        ),
+        "experience_restoration_outcome_applicable": bool(restoration_outcome.get("applicable", False)),
+        "experience_restoration_outcome_path": restoration_outcome.get("outcome_path"),
+        "restoration_applied": bool(restoration_outcome.get("restoration_applied", False)),
+        "restoration_execution_handoff_ready": bool(
+            restoration_outcome.get("restoration_execution_handoff_ready", False)
+        ),
+        "restoration_outcome_reason": restoration_outcome.get("restoration_outcome_reason"),
+        "restoration_selected_experience_id": selected_outcome.get("experience_id"),
+        "e3a_preservation_alignment_applicable": bool(
+            preservation_alignment.get("applicable", False)
+        ),
+        "e3a_preservation_alignment_path": preservation_alignment.get("alignment_path"),
+        "e3a_preservation_eligible": bool(preservation_alignment.get("preservation_eligible", False)),
+        "e3a_preservation_alignment_reason": preservation_alignment.get("alignment_reason"),
+        "e3a_preservation_consumes_restoration_outcomes": bool(
+            preservation_alignment.get("consumes_restoration_outcomes", False)
+        ),
+    }
+
+
+def _build_preservation_alignment_ref(execution_envelope: dict[str, Any]) -> dict[str, Any]:
+    """Return bounded preservation-alignment traceability metadata."""
+    alignment = dict(execution_envelope.get("e3a_preservation_alignment", {}))
+    restoration_linkage = dict(alignment.get("restoration_linkage", {}))
+    return {
+        "ref_type": "preservation_alignment",
+        "alignment_path": alignment.get("alignment_path"),
+        "applicable": bool(alignment.get("applicable", False)),
+        "preservation_eligible": bool(alignment.get("preservation_eligible", False)),
+        "alignment_reason": alignment.get("alignment_reason"),
+        "route_scope": alignment.get("governance_controls", {}).get("route_scope"),
+        "restoration_outcome_path": restoration_linkage.get("restoration_outcome_path"),
+        "restoration_applied": bool(restoration_linkage.get("restoration_applied", False)),
+        "selected_experience_id": restoration_linkage.get("selected_experience_id"),
+    }
 
 
 ROOM_CONFIG_LIST_FIELDS: tuple[str, ...] = (
@@ -964,6 +4950,16 @@ async def _async_resolve_integration_capabilities(hass: HomeAssistant) -> dict[s
             "archive_ready": False,
             "voice_enrollment_reason_code": "concierge_not_configured",
             "voice_enrollment_status_summary": "Voice enrollment requires Concierge to be configured.",
+            "input_snapshot": {
+                "ai_enabled": False,
+                "action_provider": _PROVIDER_NONE,
+                "tts_enabled": False,
+                "tts_provider": _PROVIDER_NONE,
+                "asset_intelligence_provider": _PROVIDER_NONE,
+                "archive_ready": False,
+                "voice_identity_ready": False,
+                "voice_enrollment_reason_code": "concierge_not_configured",
+            },
         }
 
     entry = entries[0]
@@ -1028,6 +5024,16 @@ async def _async_resolve_integration_capabilities(hass: HomeAssistant) -> dict[s
         "archive_ready": archive_ready,
         "voice_enrollment_reason_code": reason_code,
         "voice_enrollment_status_summary": status_summary,
+        "input_snapshot": {
+            "ai_enabled": ai_enabled,
+            "action_provider": action_provider,
+            "tts_enabled": tts_enabled,
+            "tts_provider": tts_provider,
+            "asset_intelligence_provider": asset_intelligence_provider,
+            "archive_ready": archive_ready,
+            "voice_identity_ready": voice_identity_ready,
+            "voice_enrollment_reason_code": reason_code,
+        },
     }
 
 
@@ -1071,13 +5077,82 @@ async def _async_handle_execute(hass: HomeAssistant, call: ServiceCall) -> dict[
     """Execute an orchestration target using deterministic hierarchy."""
     storage = ConciergeStorage(hass)
     state = await storage.async_load_state()
+    capabilities = await _async_resolve_integration_capabilities(hass)
 
     area_id = call.data.get("area_id")
+    composite_id = call.data.get("composite_id")
+    room_vocabulary_resolution: dict[str, Any] | None = None
+    device_entity_vocabulary_resolution: dict[str, Any] | None = None
+    asset_vocabulary_resolution: dict[str, Any] | None = None
+
+    if area_id and not composite_id:
+        known_configured_area = area_id in state.rooms or any(
+            area_id in composite.area_ids for composite in state.composites.values()
+        )
+        if not known_configured_area:
+            room_vocabulary_resolution = _resolve_room_scope_from_vocabulary(state, area_id)
+            if room_vocabulary_resolution is not None:
+                if room_vocabulary_resolution.get("composite_id"):
+                    composite_id = room_vocabulary_resolution["composite_id"]
+                    resolved_composite = state.composites.get(composite_id)
+                    if resolved_composite is None:
+                        raise vol.Invalid(f"composite_id is not configured: {composite_id}")
+                    if not resolved_composite.enabled:
+                        raise vol.Invalid(f"composite_id is disabled: {composite_id}")
+                    area_id = resolved_composite.primary_area or (
+                        resolved_composite.area_ids[0] if resolved_composite.area_ids else area_id
+                    )
+                elif room_vocabulary_resolution.get("area_id"):
+                    area_id = room_vocabulary_resolution["area_id"]
+
+    if area_id and room_vocabulary_resolution is not None:
+        _require_known_area_id(hass, area_id, field_name="room_vocabulary area")
+
+    assembled_context = _assemble_foundation_context(
+        state,
+        requested_area_id=area_id,
+        composite_id=composite_id,
+        include_context=True,
+        include_signals=True,
+    )
+
+    if "." not in str(call.data["target"]):
+        device_entity_vocabulary_resolution = _resolve_entity_target_from_vocabulary(
+            state,
+            term=call.data["target"],
+            area_id=area_id,
+            composite_id=composite_id,
+        )
+
+    if "." not in str(call.data["target"]) and device_entity_vocabulary_resolution is None:
+        asset_vocabulary_resolution = _resolve_asset_target_from_handoff(
+            state,
+            term=call.data["target"],
+            area_id=area_id,
+            composite_id=composite_id,
+        )
+
+    vocabulary_resolved_target = (
+        device_entity_vocabulary_resolution["entity_id"]
+        if device_entity_vocabulary_resolution is not None
+        else (
+            asset_vocabulary_resolution["entity_id"]
+            if asset_vocabulary_resolution is not None
+            else call.data["target"]
+        )
+    )
+
     room = state.rooms.get(area_id) if area_id else None
-    resolved_target = _resolve_target_from_alias(
-        call.data["target"],
+    alias_resolved_target = _resolve_target_from_alias(
+        vocabulary_resolved_target,
         area_id,
         room.aliases if room else {},
+    )
+    resolved_target = _resolve_preserved_execution_target(
+        state,
+        assembled_context=assembled_context,
+        requested_target=call.data["target"],
+        default_resolved_target=alias_resolved_target,
     )
 
     async def _runner() -> dict[str, Any]:
@@ -1100,17 +5175,109 @@ async def _async_handle_execute(hass: HomeAssistant, call: ServiceCall) -> dict[
             service = "turn_on"
             data = {"entity_id": resolved_target}
 
+        execution_envelope = _build_execute_envelope(
+            state,
+            requested_area_id=area_id,
+            call=call,
+            capabilities=capabilities,
+            assembled_context=assembled_context,
+            resolved_target=resolved_target,
+            room_vocabulary_resolution=room_vocabulary_resolution,
+            device_entity_vocabulary_resolution=device_entity_vocabulary_resolution,
+            asset_vocabulary_resolution=asset_vocabulary_resolution,
+            domain=domain,
+            service=service,
+            data=data,
+        )
+
         await hass.services.async_call(domain, service, data, blocking=True)
 
         payload = {
             "target": call.data["target"],
             "resolved_target": resolved_target,
             "area_id": area_id,
-            "composite_id": call.data.get("composite_id"),
+            "composite_id": composite_id,
             "context": call.data.get("context", {}),
+            "execution_envelope": execution_envelope,
         }
         hass.bus.async_fire(EVENT_EXECUTION, payload)
-        return {"executed": True, "resolved_target": resolved_target}
+        response: dict[str, Any] = {
+            "executed": True,
+            "resolved_target": resolved_target,
+            "execution_envelope": execution_envelope,
+            "activity_external_refs": [
+                _build_context_assembly_ref(assembled_context),
+                _build_routing_decision_ref(execution_envelope),
+                _build_execution_envelope_ref(execution_envelope),
+                _build_preservation_alignment_ref(execution_envelope),
+                {
+                    "ref_type": "preservation_outcome",
+                    "preservation_cluster": "composite_room_execution",
+                    "requested_target": call.data["target"],
+                    "resolved_target": resolved_target,
+                    "resolved_composite_id": assembled_context.get("resolved_composite_id"),
+                    "preserved": resolved_target != call.data["target"],
+                },
+            ],
+        }
+        if room_vocabulary_resolution is not None:
+            response["room_vocabulary_resolution"] = dict(room_vocabulary_resolution)
+            response["activity_external_refs"].append(
+                {
+                    "ref_type": "room_vocabulary_resolution",
+                    "matched_term": room_vocabulary_resolution.get("matched_term"),
+                    "canonical_term": room_vocabulary_resolution.get("canonical_term"),
+                    "resolved_area_id": area_id,
+                    "resolved_composite_id": composite_id,
+                    "source": room_vocabulary_resolution.get("source", "room_vocabulary_registry"),
+                }
+            )
+        if device_entity_vocabulary_resolution is not None:
+            response["device_entity_vocabulary_resolution"] = dict(device_entity_vocabulary_resolution)
+            response["activity_external_refs"].append(
+                {
+                    "ref_type": "device_entity_vocabulary_resolution",
+                    "matched_term": device_entity_vocabulary_resolution.get("matched_term"),
+                    "canonical_term": device_entity_vocabulary_resolution.get("canonical_term"),
+                    "resolved_entity_id": device_entity_vocabulary_resolution.get("entity_id"),
+                    "resolved_area_id": area_id,
+                    "resolved_composite_id": composite_id,
+                    "source": device_entity_vocabulary_resolution.get(
+                        "source",
+                        "device_entity_vocabulary_registry",
+                    ),
+                }
+            )
+        if asset_vocabulary_resolution is not None:
+            response["asset_vocabulary_resolution"] = dict(asset_vocabulary_resolution)
+            response["activity_external_refs"].append(
+                {
+                    "ref_type": "asset_vocabulary_resolution",
+                    "matched_term": asset_vocabulary_resolution.get("matched_term"),
+                    "canonical_term": asset_vocabulary_resolution.get("canonical_term"),
+                    "asset_id": asset_vocabulary_resolution.get("asset_id"),
+                    "resolved_entity_id": asset_vocabulary_resolution.get("entity_id"),
+                    "resolved_area_id": area_id,
+                    "resolved_composite_id": composite_id,
+                    "source": asset_vocabulary_resolution.get("source", "asset_intelligence_handoff"),
+                }
+            )
+            response["activity_external_refs"].append(
+                {
+                    "ref_type": "asset_intelligence_cp00_handoff",
+                    "authority_owner": "asset_intelligence",
+                    "handoff_source": asset_vocabulary_resolution.get(
+                        "source",
+                        "asset_intelligence_handoff",
+                    ),
+                    "asset_id": asset_vocabulary_resolution.get("asset_id"),
+                    "resolved_entity_id": asset_vocabulary_resolution.get("entity_id"),
+                    "resolved_area_id": area_id,
+                    "resolved_composite_id": composite_id,
+                    "consumption_only": True,
+                }
+            )
+        return response
 
     return await _async_with_activity(
         hass,
@@ -1121,7 +5288,13 @@ async def _async_handle_execute(hass: HomeAssistant, call: ServiceCall) -> dict[
         resolved_area_id=area_id,
         resolved_person_id=call.data.get("person_id"),
         channel="service_execute",
-        external_refs=[{"ref_type": "execute_target", "target": call.data["target"], "resolved_target": resolved_target}],
+        external_refs=[
+            {
+                "ref_type": "execute_target",
+                "target": call.data["target"],
+                "resolved_target": resolved_target,
+            }
+        ],
         runner=_runner,
     )
 
@@ -1130,6 +5303,7 @@ async def _async_handle_execute_direct(hass: HomeAssistant, call: ServiceCall) -
     """Execute a direct service/entity action without orchestration."""
     storage = ConciergeStorage(hass)
     state = await storage.async_load_state()
+    capabilities = await _async_resolve_integration_capabilities(hass)
     service_ref = call.data["service"]
 
     async def _runner() -> dict[str, Any]:
@@ -1145,15 +5319,31 @@ async def _async_handle_execute_direct(hass: HomeAssistant, call: ServiceCall) -
         domain, service = service_ref.split(".", 1)
         data: dict[str, Any] = {"entity_id": call.data["entity_id"]}
         data.update(call.data.get("data", {}))
+        execution_envelope = _build_execute_direct_envelope(
+            call=call,
+            capabilities=capabilities,
+            domain=domain,
+            service=service,
+            data=data,
+        )
         await hass.services.async_call(domain, service, data, blocking=True)
 
         payload = {
             "entity_id": call.data["entity_id"],
             "service": service_ref,
             "data": call.data.get("data", {}),
+            "execution_envelope": execution_envelope,
         }
         hass.bus.async_fire(EVENT_EXECUTION, payload)
-        return {"executed": True}
+        return {
+            "executed": True,
+            "execution_envelope": execution_envelope,
+            "activity_external_refs": [
+                _build_routing_decision_ref(execution_envelope),
+                _build_execution_envelope_ref(execution_envelope),
+                _build_preservation_alignment_ref(execution_envelope),
+            ],
+        }
 
     return await _async_with_activity(
         hass,
@@ -1276,6 +5466,7 @@ async def _async_handle_get_signals(hass: HomeAssistant, call: ServiceCall) -> d
 async def _async_handle_update_room_config(hass: HomeAssistant, call: ServiceCall) -> dict[str, Any]:
     """Upsert room configuration with deterministic aliases/overlays."""
     area_id = call.data["area_id"]
+    _require_known_area_id(hass, area_id)
     changed_keys = {key for key in call.data.keys() if key != "area_id"}
     aliases = call.data.get("aliases")
     global_overlays = call.data.get("global_overlays")
@@ -2311,27 +6502,207 @@ async def _async_handle_get_summary(hass: HomeAssistant, call: ServiceCall) -> d
     """Return deterministic summary from available context and signals."""
     storage = ConciergeStorage(hass)
     state = await storage.async_load_state()
-
-    parts: list[str] = []
-    if call.data.get("include_context", True):
-        parts.extend(
-            context.summary
-            for context in state.contexts.values()
-            if context.available and context.summary
-        )
-    if call.data.get("include_signals", True):
-        parts.extend(
-            signal.summary
-            for signal in state.signals.values()
-            if signal.available and signal.summary
-        )
-
-    summary = " | ".join(parts)
+    capabilities = await _async_resolve_integration_capabilities(hass)
+    assembled_context = _assemble_foundation_context(
+        state,
+        requested_area_id=call.data.get("area_id"),
+        include_context=bool(call.data.get("include_context", True)),
+        include_signals=bool(call.data.get("include_signals", True)),
+    )
+    fallback_status = _context_fallback_status(
+        state,
+        requested_area_id=call.data.get("area_id"),
+        assembled_context=assembled_context,
+    )
+    capability_discovery = _build_capability_discovery(
+        capabilities=capabilities,
+        route_scope=(
+            "composite"
+            if assembled_context.get("resolved_composite_id")
+            else ("room" if assembled_context.get("context_area_id") else "global")
+        ),
+        context_area_id=assembled_context.get("context_area_id"),
+        resolved_composite_id=assembled_context.get("resolved_composite_id"),
+        room_vocabulary_resolution=None,
+        device_entity_vocabulary_resolution=None,
+        asset_vocabulary_resolution=None,
+    )
+    experience_governance_boundary = _build_experience_governance_boundary(
+        route_scope=(
+            "composite"
+            if assembled_context.get("resolved_composite_id")
+            else ("room" if assembled_context.get("context_area_id") else "global")
+        ),
+        context_area_id=assembled_context.get("context_area_id"),
+        resolved_composite_id=assembled_context.get("resolved_composite_id"),
+    )
+    continuity_governance_boundary = _build_continuity_governance_boundary(
+        execution_kind="summary",
+        route_scope=(
+            "composite"
+            if assembled_context.get("resolved_composite_id")
+            else ("room" if assembled_context.get("context_area_id") else "global")
+        ),
+        context_area_id=assembled_context.get("context_area_id"),
+        resolved_composite_id=assembled_context.get("resolved_composite_id"),
+    )
+    person_room_affinity_boundary = _build_person_room_affinity_boundary(
+        execution_kind="summary",
+        route_scope=(
+            "composite"
+            if assembled_context.get("resolved_composite_id")
+            else ("room" if assembled_context.get("context_area_id") else "global")
+        ),
+        context_area_id=assembled_context.get("context_area_id"),
+        resolved_composite_id=assembled_context.get("resolved_composite_id"),
+    )
+    privacy_household_memory_boundary = _build_privacy_household_memory_boundary(
+        execution_kind="summary",
+        route_scope=(
+            "composite"
+            if assembled_context.get("resolved_composite_id")
+            else ("room" if assembled_context.get("context_area_id") else "global")
+        ),
+        context_area_id=assembled_context.get("context_area_id"),
+        resolved_composite_id=assembled_context.get("resolved_composite_id"),
+    )
+    messaging_governance_boundary = _build_messaging_governance_boundary(
+        route_scope=(
+            "composite"
+            if assembled_context.get("resolved_composite_id")
+            else ("room" if assembled_context.get("context_area_id") else "global")
+        ),
+        context_area_id=assembled_context.get("context_area_id"),
+        resolved_composite_id=assembled_context.get("resolved_composite_id"),
+        recipient_scope="household",
+        message_context_type="summary",
+    )
+    occupancy_governance_boundary = _build_occupancy_governance_boundary(
+        execution_kind="summary",
+        route_scope=(
+            "composite"
+            if assembled_context.get("resolved_composite_id")
+            else ("room" if assembled_context.get("context_area_id") else "global")
+        ),
+        context_area_id=assembled_context.get("context_area_id"),
+        resolved_composite_id=assembled_context.get("resolved_composite_id"),
+    )
+    presence_governance_boundary = _build_presence_governance_boundary(
+        execution_kind="summary",
+        route_scope=(
+            "composite"
+            if assembled_context.get("resolved_composite_id")
+            else ("room" if assembled_context.get("context_area_id") else "global")
+        ),
+        context_area_id=assembled_context.get("context_area_id"),
+        resolved_composite_id=assembled_context.get("resolved_composite_id"),
+    )
+    guest_unknown_occupant_behavior = _build_guest_unknown_occupant_behavior(
+        execution_kind="summary",
+        route_scope=(
+            "composite"
+            if assembled_context.get("resolved_composite_id")
+            else ("room" if assembled_context.get("context_area_id") else "global")
+        ),
+        context_area_id=assembled_context.get("context_area_id"),
+        resolved_composite_id=assembled_context.get("resolved_composite_id"),
+        person_id=None,
+        context=None,
+        occupancy_governance_boundary=occupancy_governance_boundary,
+        presence_governance_boundary=presence_governance_boundary,
+    )
+    multi_occupant_behavior = _build_multi_occupant_behavior(
+        execution_kind="summary",
+        route_scope=(
+            "composite"
+            if assembled_context.get("resolved_composite_id")
+            else ("room" if assembled_context.get("context_area_id") else "global")
+        ),
+        context_area_id=assembled_context.get("context_area_id"),
+        resolved_composite_id=assembled_context.get("resolved_composite_id"),
+        person_id=None,
+        context=None,
+        occupancy_governance_boundary=occupancy_governance_boundary,
+        presence_governance_boundary=presence_governance_boundary,
+        guest_unknown_occupant_behavior=guest_unknown_occupant_behavior,
+    )
+    capability_to_experience_handoff = _build_capability_to_experience_handoff(
+        capability_discovery=capability_discovery,
+        experience_governance_boundary=experience_governance_boundary,
+        execution_kind="summary",
+    )
+    experience_projection = _build_experience_projection(
+        capability_to_experience_handoff=capability_to_experience_handoff,
+        experience_governance_boundary=experience_governance_boundary,
+        execution_kind="summary",
+    )
+    experience_restoration_boundary = _build_experience_restoration_boundary(
+        experience_projection=experience_projection,
+        guest_unknown_occupant_behavior=guest_unknown_occupant_behavior,
+        multi_occupant_behavior=multi_occupant_behavior,
+        execution_kind="summary",
+        route_scope=(
+            "composite"
+            if assembled_context.get("resolved_composite_id")
+            else ("room" if assembled_context.get("context_area_id") else "global")
+        ),
+        context_area_id=assembled_context.get("context_area_id"),
+        resolved_composite_id=assembled_context.get("resolved_composite_id"),
+    )
+    experience_restoration_outcome = _build_experience_restoration_outcome(
+        experience_projection=experience_projection,
+        experience_restoration_boundary=experience_restoration_boundary,
+        guest_unknown_occupant_behavior=guest_unknown_occupant_behavior,
+        multi_occupant_behavior=multi_occupant_behavior,
+        execution_kind="summary",
+        route_scope=(
+            "composite"
+            if assembled_context.get("resolved_composite_id")
+            else ("room" if assembled_context.get("context_area_id") else "global")
+        ),
+        context_area_id=assembled_context.get("context_area_id"),
+        resolved_composite_id=assembled_context.get("resolved_composite_id"),
+    )
+    e3a_preservation_alignment = _build_e3a_preservation_alignment(
+        experience_restoration_boundary=experience_restoration_boundary,
+        experience_restoration_outcome=experience_restoration_outcome,
+        execution_kind="summary",
+        route_scope=(
+            "composite"
+            if assembled_context.get("resolved_composite_id")
+            else ("room" if assembled_context.get("context_area_id") else "global")
+        ),
+        context_area_id=assembled_context.get("context_area_id"),
+        resolved_composite_id=assembled_context.get("resolved_composite_id"),
+        requested_target=None,
+        resolved_target=None,
+    )
     return {
-        "summary": summary,
+        "summary": assembled_context["summary"],
         "area_id": call.data.get("area_id"),
+        "context_area_id": assembled_context["context_area_id"],
+        "resolved_composite_id": assembled_context["resolved_composite_id"],
         "include_signals": call.data.get("include_signals", True),
         "include_context": call.data.get("include_context", True),
+        "context_source_count": assembled_context["context_source_count"],
+        "signal_count": assembled_context["signal_count"],
+        "fallback_context_applied": fallback_status["fallback_context_applied"],
+        "fallback_reason": fallback_status["fallback_reason"],
+        "global_context_continuity_available": fallback_status["global_context_continuity_available"],
+        "capability_discovery": capability_discovery,
+        "continuity_governance_boundary": continuity_governance_boundary,
+        "person_room_affinity_boundary": person_room_affinity_boundary,
+        "privacy_household_memory_boundary": privacy_household_memory_boundary,
+        "messaging_governance_boundary": messaging_governance_boundary,
+        "occupancy_governance_boundary": occupancy_governance_boundary,
+        "presence_governance_boundary": presence_governance_boundary,
+        "guest_unknown_occupant_behavior": guest_unknown_occupant_behavior,
+        "experience_governance_boundary": experience_governance_boundary,
+        "capability_to_experience_handoff": capability_to_experience_handoff,
+        "experience_projection": experience_projection,
+        "experience_restoration_boundary": experience_restoration_boundary,
+        "experience_restoration_outcome": experience_restoration_outcome,
+        "e3a_preservation_alignment": e3a_preservation_alignment,
     }
 
 
@@ -2727,11 +7098,25 @@ async def _async_handle_resolve_mobile_context(
 
     resolved_area_id = resolved_person.linked_area_id if resolved_person is not None else None
     room_confidence = 0.8 if resolved_area_id else 0.0
+    assembled_context = _assemble_foundation_context(
+        state,
+        requested_area_id=resolved_area_id,
+        person_profile=resolved_person,
+        include_context=True,
+        include_signals=True,
+    )
+    fallback_status = _context_fallback_status(
+        state,
+        requested_area_id=resolved_area_id,
+        assembled_context=assembled_context,
+    )
 
     return {
         "resolved_person_id": resolved_person.person_id if resolved_person else None,
         "person_confidence": person_confidence,
         "resolved_area_id": resolved_area_id,
+        "resolved_composite_id": assembled_context["resolved_composite_id"],
+        "context_area_id": assembled_context["context_area_id"],
         "room_confidence": room_confidence,
         "attribution_factors": (
             ["explicit_person_id"]
@@ -2739,6 +7124,10 @@ async def _async_handle_resolve_mobile_context(
             else (["mobile_target_match"] if resolved_person else [])
         ),
         "clarification_required": room_confidence < 0.5,
+        "fallback_context_applied": fallback_status["fallback_context_applied"],
+        "fallback_reason": fallback_status["fallback_reason"],
+        "global_context_continuity_available": fallback_status["global_context_continuity_available"],
+        "assembled_context": assembled_context,
     }
 
 
@@ -2746,41 +7135,374 @@ async def _async_handle_push_person_message(
     hass: HomeAssistant,
     call: ServiceCall,
 ) -> dict[str, Any]:
-    """Send person-scoped mobile push after deterministic target filtering."""
+    """Send person-scoped messages to the requested room or mobile delivery target."""
     storage = ConciergeStorage(hass)
     state = await storage.async_load_state()
     profile = state.person_profiles.get(call.data["person_id"])
     if profile is None:
         raise vol.Invalid("person_id is not configured")
 
-    target_id = _select_mobile_target(profile, call.data.get("target_id"))
-    notify_service = f"notify.{target_id}"
+    room = state.rooms.get(profile.linked_area_id) if profile.linked_area_id else None
 
-    async def _runner() -> dict[str, Any]:
-        payload: dict[str, Any] = {
+    requested_target = _normalize_message_target(call.data.get("target_id"))
+    delivery_mode = "mobile_notify"
+    service_domain = "notify"
+    service_name = ""
+    target_id = ""
+    service_ref = ""
+    service_data: dict[str, Any] = {}
+    routing_path = "person_mobile_target_fallback"
+    requested_target_supplied = bool(requested_target)
+    explicit_entity_target = False
+
+    if requested_target in _MESSAGE_WEB_UI_TARGETS:
+        delivery_mode = "web_ui"
+        target_id = requested_target or "web_ui"
+        service_domain = "persistent_notification"
+        service_name = "create"
+        service_ref = "persistent_notification.create"
+        routing_path = "explicit_web_ui_target"
+        service_data = {
+            "title": call.data.get("title", "Concierge"),
+            "message": call.data["message"],
+            "notification_id": f"concierge.{profile.person_id}.{target_id}",
+        }
+    elif requested_target.startswith("assist_satellite."):
+        delivery_mode = "voice_assistant"
+        target_id = requested_target
+        routing_path = "explicit_voice_assistant_entity_target"
+        explicit_entity_target = True
+        if room is not None:
+            voice_targets = _room_entity_ids(room, "voice_device_entity_ids")
+            if voice_targets and target_id not in voice_targets:
+                target_id = voice_targets[0]
+        provider, _ = _resolve_tts_engine_entity_id(hass)
+        tts_settings = _resolve_room_tts_settings(hass, provider=provider, room=room)
+        media_id = await _resolve_tts_media_id(
+            hass,
+            provider=provider,
+            message=call.data["message"],
+            language=tts_settings["language"],
+            voice=tts_settings["voice"],
+        )
+        service_domain = "assist_satellite"
+        service_name = "announce"
+        service_ref = "assist_satellite.announce"
+        service_data = {"entity_id": target_id}
+        if media_id:
+            service_data["media_id"] = media_id
+        else:
+            service_data["message"] = call.data["message"]
+    elif requested_target in _MESSAGE_VOICE_ASSISTANT_TARGETS:
+        delivery_mode = "voice_assistant"
+        if room is None:
+            raise vol.Invalid("person is not linked to a room with voice assistant targets")
+        voice_targets = _room_entity_ids(room, "voice_device_entity_ids")
+        if not voice_targets:
+            raise vol.Invalid("room has no configured voice assistant targets")
+        target_id = voice_targets[0]
+        routing_path = "resolved_room_voice_assistant_target"
+        provider, _ = _resolve_tts_engine_entity_id(hass)
+        tts_settings = _resolve_room_tts_settings(hass, provider=provider, room=room)
+        media_id = await _resolve_tts_media_id(
+            hass,
+            provider=provider,
+            message=call.data["message"],
+            language=tts_settings["language"],
+            voice=tts_settings["voice"],
+        )
+        service_domain = "assist_satellite"
+        service_name = "announce"
+        service_ref = "assist_satellite.announce"
+        service_data = {"entity_id": target_id}
+        if media_id:
+            service_data["media_id"] = media_id
+        else:
+            service_data["message"] = call.data["message"]
+    elif requested_target.startswith("media_player."):
+        delivery_mode = "room_tts"
+        target_id = requested_target
+        routing_path = "explicit_speaker_entity_target"
+        explicit_entity_target = True
+        if room is not None:
+            speaker_targets = _room_entity_ids(room, "media_player_entity_ids") or _room_entity_ids(
+                room,
+                "speaker_entity_ids",
+            )
+            if speaker_targets and target_id not in speaker_targets:
+                target_id = speaker_targets[0]
+        provider, engine_entity_id = _resolve_tts_engine_entity_id(hass)
+        tts_settings = _resolve_room_tts_settings(hass, provider=provider, room=room)
+        message_data: dict[str, Any] = {"cache": False}
+        if tts_settings["voice"]:
+            message_data["options"] = {"voice": tts_settings["voice"]}
+        if tts_settings["language"]:
+            message_data["language"] = tts_settings["language"]
+        service_domain = "tts"
+        service_name = "speak"
+        service_ref = "tts.speak"
+        service_data = {
+            "entity_id": engine_entity_id,
+            "media_player_entity_id": target_id,
+            "message": call.data["message"],
+            **message_data,
+        }
+    elif requested_target in _MESSAGE_TTS_TARGETS:
+        delivery_mode = "room_tts"
+        if room is None:
+            raise vol.Invalid("person is not linked to a room with speaker targets")
+        speaker_targets = _room_entity_ids(room, "media_player_entity_ids") or _room_entity_ids(
+            room,
+            "speaker_entity_ids",
+        )
+        if not speaker_targets:
+            raise vol.Invalid("room has no configured speaker targets")
+        routing_path = "resolved_room_speaker_target"
+        provider, engine_entity_id = _resolve_tts_engine_entity_id(hass)
+        tts_settings = _resolve_room_tts_settings(hass, provider=provider, room=room)
+        message_data: dict[str, Any] = {"cache": False}
+        if tts_settings["voice"]:
+            message_data["options"] = {"voice": tts_settings["voice"]}
+        if tts_settings["language"]:
+            message_data["language"] = tts_settings["language"]
+        target_id = speaker_targets[0]
+        service_domain = "tts"
+        service_name = "speak"
+        service_ref = "tts.speak"
+        service_data = {
+            "entity_id": engine_entity_id,
+            "media_player_entity_id": target_id,
+            "message": call.data["message"],
+            **message_data,
+        }
+    else:
+        requested_mobile_target = requested_target[7:] if requested_target.startswith(_MESSAGE_MOBILE_TARGET_PREFIXES) else requested_target or None
+        target_id = _select_mobile_target(profile, requested_mobile_target)
+        routing_path = (
+            "explicit_mobile_notify_target" if requested_mobile_target else "person_mobile_target_fallback"
+        )
+        service_domain = "notify"
+        service_name = target_id
+        service_ref = f"notify.{target_id}"
+        service_data = {
             "title": call.data.get("title", "Concierge"),
             "message": call.data["message"],
             "data": dict(call.data.get("data", {})),
         }
-        await hass.services.async_call("notify", target_id, payload, blocking=True)
+
+    messaging_governance_boundary = _build_messaging_governance_boundary(
+        route_scope="room" if profile.linked_area_id else "global",
+        context_area_id=profile.linked_area_id,
+        resolved_composite_id=None,
+        recipient_scope="person",
+        message_context_type="person_push",
+    )
+    messaging_boundary_ref = {
+        "ref_type": "messaging_governance_boundary",
+        "boundary_path": messaging_governance_boundary["boundary_path"],
+        "messaging_boundary_version": messaging_governance_boundary["messaging_boundary_version"],
+        "route_scope": messaging_governance_boundary["governance_controls"]["route_scope"],
+        "recipient_scope": messaging_governance_boundary["governance_controls"]["recipient_scope"],
+        "message_context_type": messaging_governance_boundary["governance_controls"]["message_context_type"],
+        "message_authority_external": messaging_governance_boundary["message_authority_external"],
+        "provenance_authority_external": messaging_governance_boundary["provenance_authority_external"],
+        "household_memory_authority_external": messaging_governance_boundary["household_memory_authority_external"],
+    }
+    messaging_provenance, messaging_provenance_ref = _build_messaging_provenance(
+        person_id=profile.person_id,
+        linked_area_id=profile.linked_area_id,
+        requested_target=requested_target,
+        requested_target_supplied=requested_target_supplied,
+        selected_target_id=target_id,
+        selected_service=service_ref,
+        delivery_channel=delivery_mode,
+        routing_path=routing_path,
+        explicit_entity_target=explicit_entity_target,
+        messaging_governance_boundary=messaging_governance_boundary,
+    )
+    notification_delivery_boundary = _build_notification_delivery_boundary(
+        route_scope=messaging_governance_boundary["governance_controls"]["route_scope"],
+        context_area_id=profile.linked_area_id,
+        resolved_composite_id=None,
+        recipient_scope="person",
+        message_context_type="person_push",
+        delivery_channel=delivery_mode,
+        selected_service=service_ref,
+        selected_target_id=target_id,
+        routing_path=routing_path,
+        explicit_entity_target=explicit_entity_target,
+    )
+    notification_delivery_boundary_ref = {
+        "ref_type": "notification_delivery_boundary",
+        "boundary_path": notification_delivery_boundary["boundary_path"],
+        "route_scope": notification_delivery_boundary["governance_controls"]["route_scope"],
+        "recipient_scope": notification_delivery_boundary["governance_controls"]["recipient_scope"],
+        "message_context_type": notification_delivery_boundary["governance_controls"]["message_context_type"],
+        "delivery_channel": delivery_mode,
+        "selected_service": service_ref,
+        "selected_target_id": target_id,
+        "routing_path": routing_path,
+        "explicit_entity_target": explicit_entity_target,
+        "delivery_authority_external": True,
+        "recipient_authority_external": True,
+        "consent_authority_external": True,
+        "visibility_authority_external": True,
+    }
+    household_memory_governance_boundary, household_memory_governance_boundary_ref = (
+        _build_household_memory_governance_boundary(
+            route_scope=messaging_governance_boundary["governance_controls"]["route_scope"],
+            context_area_id=profile.linked_area_id,
+            resolved_composite_id=None,
+            recipient_scope="person",
+            message_context_type="person_push",
+            delivery_channel=delivery_mode,
+            selected_service=service_ref,
+            selected_target_id=target_id,
+            routing_path=routing_path,
+            explicit_entity_target=explicit_entity_target,
+        )
+    )
+    recipient_boundary, recipient_boundary_ref, delivery_permitted, delivery_decision_reason = (
+        _build_recipient_consent_privacy_visibility_boundary(
+            profile=profile,
+            requested_target=requested_target,
+            selected_target_id=target_id,
+            selected_service=service_ref,
+            delivery_channel=delivery_mode,
+            routing_path=routing_path,
+            explicit_entity_target=explicit_entity_target,
+            route_scope=messaging_governance_boundary["governance_controls"]["route_scope"],
+            context_area_id=profile.linked_area_id,
+        )
+    )
+    messaging_diagnostics_explainability, messaging_diagnostics_explainability_ref = (
+        _build_messaging_diagnostics_explainability(
+            route_scope=messaging_governance_boundary["governance_controls"]["route_scope"],
+            context_area_id=profile.linked_area_id,
+            recipient_scope="person",
+            message_context_type="person_push",
+            delivery_permitted=delivery_permitted,
+            decision_reason=delivery_decision_reason,
+            delivery_channel=delivery_mode,
+            selected_service=service_ref,
+            selected_target_id=target_id,
+            routing_path=routing_path,
+            explicit_entity_target=explicit_entity_target,
+            requested_target_supplied=requested_target_supplied,
+        )
+    )
+    household_memory_ownership_consumption_boundary, household_memory_ownership_consumption_boundary_ref = (
+        _build_household_memory_ownership_consumption_boundary(
+            route_scope=messaging_governance_boundary["governance_controls"]["route_scope"],
+            context_area_id=profile.linked_area_id,
+            resolved_composite_id=None,
+            recipient_scope="person",
+            message_context_type="person_push",
+            delivery_channel=delivery_mode,
+            selected_service=service_ref,
+            selected_target_id=target_id,
+            routing_path=routing_path,
+            explicit_entity_target=explicit_entity_target,
+            consumption_permitted=delivery_permitted,
+            consumption_decision_reason=delivery_decision_reason,
+        )
+    )
+    household_memory_identity_privacy_retention_separation_boundary, household_memory_identity_privacy_retention_separation_boundary_ref = (
+        _build_household_memory_identity_privacy_retention_separation_boundary(
+            route_scope=messaging_governance_boundary["governance_controls"]["route_scope"],
+            context_area_id=profile.linked_area_id,
+            resolved_composite_id=None,
+            recipient_scope="person",
+            message_context_type="person_push",
+            delivery_channel=delivery_mode,
+            selected_service=service_ref,
+            selected_target_id=target_id,
+            routing_path=routing_path,
+            explicit_entity_target=explicit_entity_target,
+            separation_permitted=delivery_permitted,
+            separation_decision_reason=delivery_decision_reason,
+        )
+    )
+    delivery_execution_attempt_ref = {
+        "ref_type": "delivery_execution",
+        "execution_state": "attempting",
+        "delivery_channel": delivery_mode,
+        "selected_service": service_ref,
+        "selected_target_id": target_id,
+        "routing_path": routing_path,
+    }
+
+    async def _runner() -> dict[str, Any]:
+        if not delivery_permitted:
+            raise vol.Invalid(
+                "message delivery denied by recipient-consent-privacy-visibility boundary: "
+                + delivery_decision_reason
+            )
+
+        await hass.services.async_call(service_domain, service_name, service_data, blocking=True)
+
+        delivery_execution_success_ref = {
+            "ref_type": "delivery_execution",
+            "execution_state": "success",
+            "delivery_channel": delivery_mode,
+            "selected_service": service_ref,
+            "selected_target_id": target_id,
+            "routing_path": routing_path,
+        }
 
         return {
             "sent": True,
             "person_id": profile.person_id,
             "target_id": target_id,
-            "service": notify_service,
+            "service": service_ref,
+            "messaging_governance_boundary": messaging_governance_boundary,
+            "messaging_provenance": messaging_provenance,
+            "notification_delivery_boundary": notification_delivery_boundary,
+            "recipient_consent_privacy_visibility_boundary": recipient_boundary,
+            "messaging_diagnostics_explainability": messaging_diagnostics_explainability,
+            "household_memory_governance_boundary": household_memory_governance_boundary,
+            "household_memory_ownership_consumption_boundary": household_memory_ownership_consumption_boundary,
+            "household_memory_identity_privacy_retention_separation_boundary": household_memory_identity_privacy_retention_separation_boundary,
+            "activity_external_refs": [
+                messaging_boundary_ref,
+                messaging_provenance_ref,
+                notification_delivery_boundary_ref,
+                recipient_boundary_ref,
+                messaging_diagnostics_explainability_ref,
+                household_memory_governance_boundary_ref,
+                household_memory_ownership_consumption_boundary_ref,
+                household_memory_identity_privacy_retention_separation_boundary_ref,
+                delivery_execution_success_ref,
+            ],
         }
 
     return await _async_with_activity(
         hass,
         call,
         intent_class="push_person_message",
-        request_summary=f"Mobile push sent to {profile.name or profile.person_id}",
+        request_summary=f"Person message sent to {profile.name or profile.person_id}",
         action_name="push_person_message",
         resolved_person_id=profile.person_id,
         resolved_area_id=profile.linked_area_id,
         channel="service_operational",
-        external_refs=[{"ref_type": "mobile_notify", "target_id": target_id}],
+        external_refs=[
+            {
+                "ref_type": "message_delivery",
+                "delivery_mode": delivery_mode,
+                "target_id": target_id,
+                "selected_service": service_ref,
+                "routing_path": routing_path,
+                "explicit_entity_target": explicit_entity_target,
+            },
+            notification_delivery_boundary_ref,
+            recipient_boundary_ref,
+            messaging_diagnostics_explainability_ref,
+            household_memory_governance_boundary_ref,
+            household_memory_ownership_consumption_boundary_ref,
+            household_memory_identity_privacy_retention_separation_boundary_ref,
+            delivery_execution_attempt_ref,
+        ],
+        policy_gates=["recipient_consent_privacy_visibility_boundary"],
         runner=_runner,
     )
 

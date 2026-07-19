@@ -5,9 +5,10 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import area_registry as ar
 
 from custom_components.concierge.diagnostics import async_get_config_entry_diagnostics
-from custom_components.concierge.models import ContextState, Interaction
+from custom_components.concierge.models import ContextState, Interaction, PersonProfile
 from custom_components.concierge.storage import ConciergeStorage
 
 
@@ -26,16 +27,17 @@ async def test_diagnostics_include_state_summary(
     setup_integration,
 ) -> None:
     """Diagnostics should expose only allowlisted operational summaries."""
+    area = ar.async_get(hass).async_create(name="Great Room")
     storage = ConciergeStorage(hass)
     await storage.async_update_room_config(
-        area_id="great_room",
+        area_id=area.id,
         aliases={"movie time": "scene.movie_mode"},
         global_overlays={"weather": True},
     )
     await storage.async_upsert_interaction(
         Interaction(
             interaction_id="interaction-1",
-            area_id="great_room",
+            area_id=area.id,
             message="Laundry complete",
             level="attention",
             state="active",
@@ -62,6 +64,24 @@ async def test_diagnostics_include_state_summary(
         "reconciliation_health",
         "repairs_health",
         "provider_availability",
+        "foundation_runtime_boundary",
+        "context_assembly_visibility",
+        "execution_explainability",
+        "vocabulary_diagnostics_visibility",
+        "capability_diagnostics_explainability_visibility",
+        "experience_diagnostics_explainability_visibility",
+        "messaging_governance_boundary_visibility",
+        "messaging_provenance_visibility",
+        "notification_delivery_boundary_visibility",
+        "recipient_consent_privacy_visibility_boundary_visibility",
+        "messaging_diagnostics_explainability_visibility",
+        "household_memory_governance_boundary_visibility",
+        "household_memory_ownership_consumption_boundary_visibility",
+        "household_memory_identity_privacy_retention_separation_visibility",
+        "continuity_affinity_diagnostics_explainability_visibility",
+        "occupancy_presence_diagnostics_explainability_visibility",
+        "restoration_diagnostics_explainability_visibility",
+        "preservation_baseline",
         "enrollment_activity_summary",
         "completion_activity_summary",
         "cleanup_activity_summary",
@@ -81,6 +101,114 @@ async def test_diagnostics_include_state_summary(
     assert diagnostics["provider_availability"]["reason_code"] == "ready"
     assert diagnostics["provider_availability"]["satellite_capture_supported"] is False
     assert diagnostics["provider_availability"]["satellite_status_code"] == "provider_not_selected"
+    assert diagnostics["foundation_runtime_boundary"]["room_identity_source"] == "home_assistant_area_registry"
+    assert diagnostics["foundation_runtime_boundary"]["concierge_role"] == "bounded_consumer_orchestrator"
+    assert diagnostics["foundation_runtime_boundary"]["foundation_area_count"] == 1
+    assert diagnostics["foundation_runtime_boundary"]["configured_room_count"] == 1
+    assert diagnostics["foundation_runtime_boundary"]["configured_room_outside_foundation_count"] == 0
+    assert diagnostics["foundation_runtime_boundary"]["room_configs_bound_to_foundation"] is True
+    assert diagnostics["foundation_runtime_boundary"]["composites_bound_to_foundation"] is True
+    assert diagnostics["context_assembly_visibility"]["configured_room_projection_count"] == 1
+    assert diagnostics["context_assembly_visibility"]["enabled_composite_projection_count"] == 0
+    assert diagnostics["context_assembly_visibility"]["active_context_types"] == ["weather"]
+    assert diagnostics["context_assembly_visibility"]["room_projection_samples"][0]["context_source_count"] == 1
+    assert diagnostics["execution_explainability"]["orchestration_activity_count"] == 0
+    assert diagnostics["execution_explainability"]["latest_orchestration"] is None
+    assert diagnostics["vocabulary_diagnostics_visibility"]["authority_visibility"]["room_vocabulary_authority"] == "room_vocabulary_registry"
+    assert diagnostics["vocabulary_diagnostics_visibility"]["authority_visibility"]["device_entity_vocabulary_authority"] == "device_entity_vocabulary_registry"
+    assert diagnostics["vocabulary_diagnostics_visibility"]["authority_visibility"]["asset_handoff_authority"] == "asset_intelligence_handoff"
+    assert diagnostics["vocabulary_diagnostics_visibility"]["authority_visibility"]["concierge_role"] == "bounded_consumer_orchestrator"
+    assert diagnostics["vocabulary_diagnostics_visibility"]["asset_intelligence_boundary"]["asset_evaluation_logic_visible"] is False
+    assert diagnostics["vocabulary_diagnostics_visibility"]["asset_intelligence_boundary"]["asset_scoring_visible"] is False
+    assert diagnostics["vocabulary_diagnostics_visibility"]["asset_intelligence_boundary"]["asset_significance_logic_visible"] is False
+    assert diagnostics["vocabulary_diagnostics_visibility"]["asset_intelligence_boundary"]["asset_advisory_reasoning_visible"] is False
+    capability_diag = diagnostics["capability_diagnostics_explainability_visibility"]
+    assert capability_diag["authority_visibility"]["capability_authority_origin"] == "htbw_governed_contracts_and_models"
+    assert capability_diag["authority_visibility"]["vocabulary_authority_external"] is True
+    assert capability_diag["authority_visibility"]["asset_intelligence_authority_external"] is True
+    assert capability_diag["diagnostics_non_rights"]["creates_authority"] is False
+    assert capability_diag["diagnostics_non_rights"]["creates_outcomes"] is False
+    assert capability_diag["diagnostics_non_rights"]["recreates_capability_reasoning"] is False
+    assert capability_diag["diagnostics_non_rights"]["recreates_asset_intelligence_reasoning"] is False
+    experience_diag = diagnostics["experience_diagnostics_explainability_visibility"]
+    assert experience_diag["authority_visibility"]["capability_authority_origin"] == "htbw_governed_contracts_and_models"
+    assert experience_diag["authority_visibility"]["vocabulary_authority_external"] is True
+    assert experience_diag["authority_visibility"]["asset_intelligence_authority_external"] is True
+    assert experience_diag["authority_visibility"]["experience_authority_external"] is True
+    assert experience_diag["diagnostics_non_rights"]["creates_authority"] is False
+    assert experience_diag["diagnostics_non_rights"]["creates_outcomes"] is False
+    assert experience_diag["diagnostics_non_rights"]["recreates_projection_reasoning"] is False
+    assert experience_diag["diagnostics_non_rights"]["recreates_restoration_reasoning"] is False
+    continuity_affinity_diag = diagnostics["continuity_affinity_diagnostics_explainability_visibility"]
+    assert continuity_affinity_diag["authority_visibility"]["continuity_authority_external"] is True
+    assert continuity_affinity_diag["authority_visibility"]["person_room_affinity_authority_external"] is True
+    assert continuity_affinity_diag["availability_explainability"]["continuity_available"] is False
+    assert continuity_affinity_diag["availability_explainability"]["affinity_available"] is False
+    assert continuity_affinity_diag["ownership_boundary_visibility"]["continuity_owns_identity"] is False
+    assert continuity_affinity_diag["ownership_boundary_visibility"]["affinity_owns_room_truth"] is False
+    assert continuity_affinity_diag["diagnostics_non_rights"]["creates_authority"] is False
+    assert continuity_affinity_diag["diagnostics_non_rights"]["modifies_continuity_behavior"] is False
+    assert continuity_affinity_diag["diagnostics_non_rights"]["modifies_affinity_behavior"] is False
+
+    occupancy_presence_diag = diagnostics["occupancy_presence_diagnostics_explainability_visibility"]
+    assert occupancy_presence_diag["authority_visibility"]["occupancy_authority_external"] is True
+    assert occupancy_presence_diag["authority_visibility"]["presence_authority_external"] is True
+    assert occupancy_presence_diag["authority_visibility"]["identity_authority_external"] is True
+    assert occupancy_presence_diag["authority_visibility"]["room_truth_authority_external"] is True
+    assert occupancy_presence_diag["authority_visibility"]["restoration_authority_external"] is False
+    assert occupancy_presence_diag["governance_visibility"]["latest_occupancy_governance_applicable"] is False
+    assert occupancy_presence_diag["governance_visibility"]["latest_occupancy_governance_path"] is None
+    assert occupancy_presence_diag["governance_visibility"]["latest_occupancy_governance_unavailable_reason"] == "execution_envelope_not_available"
+    assert occupancy_presence_diag["governance_visibility"]["latest_presence_governance_applicable"] is False
+    assert occupancy_presence_diag["governance_visibility"]["latest_presence_governance_path"] is None
+    assert occupancy_presence_diag["governance_visibility"]["latest_presence_governance_unavailable_reason"] == "execution_envelope_not_available"
+    assert occupancy_presence_diag["governance_visibility"]["latest_orchestration_occupancy_governance_applicable"] is True
+    assert occupancy_presence_diag["governance_visibility"]["latest_orchestration_occupancy_governance_path"] == "governed_occupancy_boundary"
+    assert occupancy_presence_diag["governance_visibility"]["latest_orchestration_presence_governance_applicable"] is True
+    assert occupancy_presence_diag["governance_visibility"]["latest_orchestration_presence_governance_path"] == "governed_presence_boundary"
+    assert occupancy_presence_diag["governance_visibility"]["latest_direct_occupancy_governance_applicable"] is False
+    assert occupancy_presence_diag["governance_visibility"]["latest_direct_occupancy_governance_path"] is None
+    assert occupancy_presence_diag["governance_visibility"]["latest_direct_presence_governance_applicable"] is False
+    assert occupancy_presence_diag["governance_visibility"]["latest_direct_presence_governance_path"] is None
+    assert occupancy_presence_diag["behavior_visibility"]["latest_guest_unknown_behavior_applicable"] is False
+    assert occupancy_presence_diag["behavior_visibility"]["latest_guest_unknown_behavior_path"] is None
+    assert occupancy_presence_diag["behavior_visibility"]["latest_multi_occupant_behavior_applicable"] is False
+    assert occupancy_presence_diag["behavior_visibility"]["latest_multi_occupant_behavior_path"] is None
+    assert occupancy_presence_diag["ownership_boundary_visibility"]["occupancy_owns_room_truth"] is False
+    assert occupancy_presence_diag["ownership_boundary_visibility"]["presence_owns_room_truth"] is False
+    assert occupancy_presence_diag["ownership_boundary_visibility"]["restoration_authority_external"] is False
+    assert occupancy_presence_diag["safeguard_visibility"]["guest_safe_boundary_preserved"] is False
+    assert occupancy_presence_diag["safeguard_visibility"]["privacy_boundary_preserved"] is False
+    assert occupancy_presence_diag["safeguard_visibility"]["guest_safe_mode_preserved"] is False
+    assert occupancy_presence_diag["safeguard_visibility"]["unknown_occupant_mode_preserved"] is False
+    assert occupancy_presence_diag["traceability_visibility"]["execution_envelope_ref_count"] == 0
+    assert occupancy_presence_diag["traceability_visibility"]["latest_execution_kind"] is None
+    assert occupancy_presence_diag["deferred_functionality_visibility"]["occupancy_governance_boundary"] == "#333"
+    assert occupancy_presence_diag["deferred_functionality_visibility"]["presence_governance_boundary"] == "#334"
+    assert occupancy_presence_diag["deferred_functionality_visibility"]["guest_unknown_occupant_behavior"] == "#335"
+    assert occupancy_presence_diag["deferred_functionality_visibility"]["multi_occupant_behavior"] == "#336"
+    assert occupancy_presence_diag["deferred_functionality_visibility"]["occupancy_presence_diagnostics_explainability"] == "#337"
+    assert occupancy_presence_diag["diagnostics_non_rights"]["creates_authority"] is False
+    assert occupancy_presence_diag["diagnostics_non_rights"]["modifies_occupancy_behavior"] is False
+    assert occupancy_presence_diag["diagnostics_non_rights"]["modifies_presence_behavior"] is False
+    assert occupancy_presence_diag["diagnostics_non_rights"]["modifies_guest_unknown_behavior"] is False
+    assert occupancy_presence_diag["diagnostics_non_rights"]["modifies_multi_occupant_behavior"] is False
+    restoration_diag = diagnostics["restoration_diagnostics_explainability_visibility"]
+    assert restoration_diag["authority_visibility"]["restoration_authority_external"] is False
+    assert restoration_diag["authority_visibility"]["restoration_policy_authority_external"] is False
+    assert restoration_diag["restoration_explainability"]["restoration_available"] is False
+    assert restoration_diag["restoration_explainability"]["restoration_unavailable_reason"] == "execution_envelope_not_available"
+    assert restoration_diag["preservation_alignment_explainability"]["alignment_applicable"] is False
+    assert restoration_diag["governance_controls_visibility"]["restoration_diagnostics_behavior_enabled"] is False
+    assert restoration_diag["traceability_visibility"]["execution_envelope_ref_count"] == 0
+    assert restoration_diag["diagnostics_non_rights"]["creates_authority"] is False
+    assert restoration_diag["diagnostics_non_rights"]["executes_restoration_behavior"] is False
+    assert diagnostics["preservation_baseline"]["preservation_governance_source"] == "adr_013_outcome_preservation"
+    assert diagnostics["preservation_baseline"]["preservation_mode"] == "household_facing_outcomes"
+    assert diagnostics["preservation_baseline"]["implementation_preservation_required"] is False
+    assert diagnostics["preservation_baseline"]["baseline_validation_only"] is True
+    assert diagnostics["preservation_baseline"]["global_context_visibility_available"] is True
+    assert diagnostics["preservation_baseline"]["observed_outcome_clusters"]["global_context_provider_parity"]["room_projection_sample_count"] == 1
     assert diagnostics["enrollment_activity_summary"]["active_enrollments"] == 0
     assert diagnostics["completion_activity_summary"]["completion_attempts"] == 0
     assert diagnostics["cleanup_activity_summary"]["cleanup_executions"] == 0
@@ -110,3 +238,717 @@ async def test_diagnostics_include_state_summary(
         "coordinator_data",
     }:
         assert _contains_key(diagnostics, forbidden_key) is False
+
+
+async def test_diagnostics_report_room_configs_outside_foundation(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """Diagnostics should expose non-sensitive counts when stored room configs drift outside Foundation truth."""
+    storage = ConciergeStorage(hass)
+    await storage.async_update_room_config(area_id="orphaned_room")
+
+    diagnostics = await async_get_config_entry_diagnostics(hass, setup_integration)
+
+    assert diagnostics["foundation_runtime_boundary"]["configured_room_outside_foundation_count"] == 1
+    assert diagnostics["foundation_runtime_boundary"]["room_configs_bound_to_foundation"] is False
+
+
+async def test_diagnostics_expose_execution_and_routing_explainability(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """Diagnostics should expose bounded explainability for routing and execution-envelope outcomes."""
+    area_registry = ar.async_get(hass)
+    kitchen = area_registry.async_create(name="Kitchen")
+    dining = area_registry.async_create(name="Dining")
+
+    await hass.services.async_call(
+        DOMAIN,
+        "update_global_context",
+        {
+            "context_type": "weather",
+            "enabled": True,
+            "summary": "Clear skies",
+            "detail": "Mild evening",
+            "speakable": "Clear skies tonight.",
+        },
+        blocking=True,
+    )
+    await hass.services.async_call(
+        DOMAIN,
+        "update_composite_config",
+        {
+            "composite_id": "public_space",
+            "name": "Public Space",
+            "area_ids": [kitchen.id, dining.id],
+            "primary_area": dining.id,
+        },
+        blocking=True,
+    )
+    await hass.services.async_call(
+        DOMAIN,
+        "update_execution_preferences",
+        {
+            "scope_id": "public_space",
+            "preferences": {"mode": "scene", "target": "scene.public_space"},
+        },
+        blocking=True,
+    )
+
+    await hass.services.async_call(
+        DOMAIN,
+        "execute",
+        {
+            "target": "scene.public_space",
+            "area_id": kitchen.id,
+            "intent_class": "home_control",
+        },
+        blocking=True,
+        return_response=True,
+    )
+    await hass.services.async_call(
+        DOMAIN,
+        "execute_direct",
+        {
+            "entity_id": "light.den",
+            "service": "homeassistant.turn_on",
+            "intent_class": "home_control",
+        },
+        blocking=True,
+        return_response=True,
+    )
+
+    diagnostics = await async_get_config_entry_diagnostics(hass, setup_integration)
+
+    latest_orchestration = diagnostics["execution_explainability"]["latest_orchestration"]
+    assert diagnostics["execution_explainability"]["orchestration_activity_count"] >= 1
+    assert latest_orchestration is not None
+    assert latest_orchestration["execution_kind"] == "orchestration"
+    assert latest_orchestration["plan_kind"] == "scene_turn_on"
+    assert latest_orchestration["route_scope"] == "composite"
+    assert latest_orchestration["resolved_composite_id"] == "public_space"
+    assert latest_orchestration["execution_preference_scope_id"] == "public_space"
+    assert latest_orchestration["execution_preference_present"] is True
+    assert latest_orchestration["context_source_count"] == 1
+
+    latest_direct = diagnostics["execution_explainability"]["latest_direct"]
+    assert diagnostics["execution_explainability"]["direct_activity_count"] >= 1
+    assert latest_direct is not None
+    assert latest_direct["execution_kind"] == "direct"
+    assert latest_direct["plan_kind"] == "direct_service_call"
+    assert latest_direct["route_scope"] == "direct"
+
+    occupancy_presence_diag = diagnostics["occupancy_presence_diagnostics_explainability_visibility"]
+    assert occupancy_presence_diag["authority_visibility"]["occupancy_authority_external"] is True
+    assert occupancy_presence_diag["authority_visibility"]["presence_authority_external"] is True
+    assert occupancy_presence_diag["authority_visibility"]["identity_authority_external"] is True
+    assert occupancy_presence_diag["authority_visibility"]["room_truth_authority_external"] is True
+    assert occupancy_presence_diag["authority_visibility"]["restoration_authority_external"] is True
+    assert occupancy_presence_diag["governance_visibility"]["latest_occupancy_governance_applicable"] is False
+    assert occupancy_presence_diag["governance_visibility"]["latest_occupancy_governance_path"] == "not_applicable_direct_execution"
+    assert occupancy_presence_diag["governance_visibility"]["latest_presence_governance_applicable"] is False
+    assert occupancy_presence_diag["governance_visibility"]["latest_presence_governance_path"] == "not_applicable_direct_execution"
+    assert occupancy_presence_diag["governance_visibility"]["latest_orchestration_occupancy_governance_applicable"] is True
+    assert occupancy_presence_diag["governance_visibility"]["latest_orchestration_occupancy_governance_path"] == "governed_occupancy_boundary"
+    assert occupancy_presence_diag["governance_visibility"]["latest_orchestration_presence_governance_applicable"] is True
+    assert occupancy_presence_diag["governance_visibility"]["latest_orchestration_presence_governance_path"] == "governed_presence_boundary"
+    assert occupancy_presence_diag["governance_visibility"]["latest_direct_occupancy_governance_applicable"] is False
+    assert occupancy_presence_diag["governance_visibility"]["latest_direct_occupancy_governance_path"] == "not_applicable_direct_execution"
+    assert occupancy_presence_diag["governance_visibility"]["latest_direct_presence_governance_applicable"] is False
+    assert occupancy_presence_diag["governance_visibility"]["latest_direct_presence_governance_path"] == "not_applicable_direct_execution"
+    assert occupancy_presence_diag["behavior_visibility"]["latest_guest_unknown_behavior_applicable"] is False
+    assert occupancy_presence_diag["behavior_visibility"]["latest_guest_unknown_behavior_path"] == "not_applicable_direct_execution"
+    assert occupancy_presence_diag["behavior_visibility"]["latest_multi_occupant_behavior_applicable"] is False
+    assert occupancy_presence_diag["behavior_visibility"]["latest_multi_occupant_behavior_path"] == "not_applicable_direct_execution"
+    assert occupancy_presence_diag["ownership_boundary_visibility"]["occupancy_owns_room_truth"] is False
+    assert occupancy_presence_diag["ownership_boundary_visibility"]["presence_owns_room_truth"] is False
+    assert occupancy_presence_diag["ownership_boundary_visibility"]["restoration_authority_external"] is True
+    assert occupancy_presence_diag["safeguard_visibility"]["guest_safe_boundary_preserved"] is True
+    assert occupancy_presence_diag["safeguard_visibility"]["privacy_boundary_preserved"] is True
+    assert occupancy_presence_diag["safeguard_visibility"]["guest_safe_mode_preserved"] is False
+    assert occupancy_presence_diag["safeguard_visibility"]["unknown_occupant_mode_preserved"] is False
+    assert occupancy_presence_diag["traceability_visibility"]["execution_envelope_ref_count"] >= 1
+    assert occupancy_presence_diag["traceability_visibility"]["latest_execution_kind"] == "direct"
+    assert occupancy_presence_diag["traceability_visibility"]["latest_orchestration_occupancy_governance_path"] == "governed_occupancy_boundary"
+    assert occupancy_presence_diag["traceability_visibility"]["latest_direct_occupancy_governance_path"] == "not_applicable_direct_execution"
+    assert occupancy_presence_diag["deferred_functionality_visibility"]["occupancy_governance_boundary"] == "#333"
+    assert occupancy_presence_diag["deferred_functionality_visibility"]["presence_governance_boundary"] == "#334"
+    assert occupancy_presence_diag["deferred_functionality_visibility"]["guest_unknown_occupant_behavior"] == "#335"
+    assert occupancy_presence_diag["deferred_functionality_visibility"]["multi_occupant_behavior"] == "#336"
+    assert occupancy_presence_diag["deferred_functionality_visibility"]["occupancy_presence_diagnostics_explainability"] == "#337"
+    assert occupancy_presence_diag["diagnostics_non_rights"]["creates_authority"] is False
+    assert occupancy_presence_diag["diagnostics_non_rights"]["modifies_occupancy_behavior"] is False
+    assert occupancy_presence_diag["diagnostics_non_rights"]["modifies_presence_behavior"] is False
+    assert occupancy_presence_diag["diagnostics_non_rights"]["modifies_guest_unknown_behavior"] is False
+    assert occupancy_presence_diag["diagnostics_non_rights"]["modifies_multi_occupant_behavior"] is False
+
+    experience_diag = diagnostics["experience_diagnostics_explainability_visibility"]
+    assert experience_diag["governance_visibility"]["latest_experience_governance_applicable"] is True
+    assert experience_diag["governance_visibility"]["latest_experience_governance_path"] == "capability_consumption_to_experience_governance"
+    assert experience_diag["handoff_visibility"]["latest_capability_to_experience_handoff_applicable"] is True
+    assert experience_diag["handoff_visibility"]["latest_capability_to_experience_handoff_path"] == "capability_to_experience_consumption"
+    assert experience_diag["handoff_visibility"]["latest_handoff_transfers_authority"] is False
+    assert experience_diag["projection_visibility"]["latest_experience_projection_applicable"] is True
+    assert experience_diag["projection_visibility"]["latest_experience_projection_path"] == "experience_projection_from_capability_handoff"
+    assert experience_diag["projection_visibility"]["latest_projection_is_authority"] is False
+    assert experience_diag["restoration_visibility"]["latest_experience_restoration_boundary_applicable"] is True
+    assert experience_diag["restoration_visibility"]["latest_experience_restoration_path"] == "experience_projection_to_restoration_boundary"
+    assert experience_diag["restoration_visibility"]["latest_restoration_governance_path"] == "governed_restoration_boundary"
+    assert experience_diag["restoration_visibility"]["latest_restoration_authority_transferred"] is False
+    assert experience_diag["restoration_visibility"]["latest_restoration_authority_external"] is True
+    assert experience_diag["restoration_visibility"]["latest_restoration_policy_authority_external"] is True
+    assert experience_diag["restoration_visibility"]["latest_restoration_owns_identity"] is False
+    assert experience_diag["restoration_visibility"]["latest_restoration_owns_occupancy"] is False
+    assert experience_diag["restoration_visibility"]["latest_restoration_owns_continuity"] is False
+    assert experience_diag["restoration_visibility"]["latest_restoration_owns_affinity"] is False
+    assert experience_diag["restoration_visibility"]["latest_restoration_owns_household_memory"] is False
+    assert experience_diag["restoration_visibility"]["latest_restoration_execution_enabled"] is False
+    assert experience_diag["restoration_visibility"]["latest_restoration_decision_behavior_enabled"] is False
+    assert experience_diag["traceability_visibility"]["execution_envelope_ref_count"] >= 1
+
+    continuity_affinity_diag = diagnostics["continuity_affinity_diagnostics_explainability_visibility"]
+    assert continuity_affinity_diag["availability_explainability"]["continuity_available"] is False
+    assert continuity_affinity_diag["availability_explainability"]["affinity_available"] is False
+    assert continuity_affinity_diag["availability_explainability"]["latest_continuity_path"] == "not_applicable_direct_execution"
+    assert continuity_affinity_diag["availability_explainability"]["latest_affinity_path"] == "not_applicable_direct_execution"
+    assert continuity_affinity_diag["availability_explainability"]["latest_direct_continuity_path"] == "not_applicable_direct_execution"
+    assert continuity_affinity_diag["availability_explainability"]["latest_direct_affinity_path"] == "not_applicable_direct_execution"
+    assert continuity_affinity_diag["ownership_boundary_visibility"]["continuity_owns_identity"] is False
+    assert continuity_affinity_diag["ownership_boundary_visibility"]["continuity_owns_occupancy"] is False
+    assert continuity_affinity_diag["ownership_boundary_visibility"]["continuity_owns_memory"] is False
+    assert continuity_affinity_diag["ownership_boundary_visibility"]["affinity_owns_identity"] is False
+    assert continuity_affinity_diag["ownership_boundary_visibility"]["affinity_owns_room_truth"] is False
+    assert continuity_affinity_diag["ownership_boundary_visibility"]["affinity_owns_occupancy"] is False
+    assert continuity_affinity_diag["ownership_boundary_visibility"]["affinity_owns_memory"] is False
+    assert continuity_affinity_diag["ownership_boundary_visibility"]["memory_owns_identity"] is False
+    assert continuity_affinity_diag["ownership_boundary_visibility"]["memory_owns_retention_policy"] is False
+    assert continuity_affinity_diag["ownership_boundary_visibility"]["memory_owns_storage"] is False
+    assert continuity_affinity_diag["ownership_boundary_visibility"]["memory_owns_provenance"] is False
+    assert continuity_affinity_diag["safeguard_visibility"]["privacy_boundary_preserved"] is True
+    assert continuity_affinity_diag["safeguard_visibility"]["affinity_privacy_boundary_preserved"] is True
+    assert continuity_affinity_diag["safeguard_visibility"]["affinity_guest_safe_boundary_preserved"] is True
+    assert continuity_affinity_diag["safeguard_visibility"]["privacy_memory_guest_safe_boundary_preserved"] is True
+    assert continuity_affinity_diag["diagnostics_non_rights"]["creates_authority"] is False
+    assert continuity_affinity_diag["diagnostics_non_rights"]["creates_outcomes"] is False
+    assert continuity_affinity_diag["diagnostics_non_rights"]["modifies_continuity_behavior"] is False
+    assert continuity_affinity_diag["diagnostics_non_rights"]["modifies_affinity_behavior"] is False
+    assert continuity_affinity_diag["diagnostics_non_rights"]["modifies_privacy_behavior"] is False
+
+    restoration_diag = diagnostics["restoration_diagnostics_explainability_visibility"]
+    assert restoration_diag["authority_visibility"]["restoration_authority_external"] is True
+    assert restoration_diag["authority_visibility"]["restoration_policy_authority_external"] is True
+    assert restoration_diag["authority_visibility"]["restoration_authority_transferred"] is False
+    assert restoration_diag["restoration_explainability"]["restoration_available"] is True
+    assert restoration_diag["restoration_explainability"]["restoration_applicable"] is True
+    assert restoration_diag["restoration_explainability"]["restoration_eligible"] is True
+    assert restoration_diag["restoration_explainability"]["restoration_applied"] is True
+    assert restoration_diag["restoration_explainability"]["restoration_outcome_path"] == "experience_projection_to_restoration_outcome"
+    assert restoration_diag["restoration_explainability"]["restoration_outcome_reason"] == "projected_experience_selected"
+    assert restoration_diag["restoration_explainability"]["restoration_suppression_reason"] == "not_suppressed"
+    assert restoration_diag["restoration_explainability"]["direct_path_reason"] == "direct_execution_not_eligible"
+    assert restoration_diag["preservation_alignment_explainability"]["alignment_applicable"] is False
+    assert restoration_diag["preservation_alignment_explainability"]["alignment_path"] == "not_applicable_direct_execution"
+    assert restoration_diag["preservation_alignment_explainability"]["alignment_eligible"] is False
+    assert restoration_diag["preservation_alignment_explainability"]["alignment_reason"] == "direct_execution_not_eligible"
+    assert restoration_diag["preservation_alignment_explainability"]["direct_alignment_path"] == "not_applicable_direct_execution"
+    assert restoration_diag["preservation_alignment_explainability"]["direct_alignment_reason"] == "direct_execution_not_eligible"
+    assert restoration_diag["preservation_alignment_explainability"]["consumes_restoration_outcomes"] is True
+    assert restoration_diag["governance_controls_visibility"]["restoration_diagnostics_behavior_enabled"] is True
+    assert restoration_diag["governance_controls_visibility"]["restoration_decision_behavior_enabled"] is False
+    assert restoration_diag["governance_controls_visibility"]["restoration_execution_enabled"] is False
+    assert restoration_diag["governance_controls_visibility"]["direct_restoration_diagnostics_behavior_enabled"] is True
+    assert restoration_diag["governance_controls_visibility"]["direct_restoration_decision_behavior_enabled"] is False
+    assert restoration_diag["governance_controls_visibility"]["direct_restoration_execution_enabled"] is False
+    assert restoration_diag["ownership_boundary_visibility"]["restoration_owns_identity"] is False
+    assert restoration_diag["ownership_boundary_visibility"]["restoration_owns_occupancy"] is False
+    assert restoration_diag["ownership_boundary_visibility"]["restoration_owns_continuity"] is False
+    assert restoration_diag["ownership_boundary_visibility"]["restoration_owns_affinity"] is False
+    assert restoration_diag["ownership_boundary_visibility"]["restoration_owns_household_memory"] is False
+    assert restoration_diag["safeguard_visibility"]["privacy_boundary_preserved"] is True
+    assert restoration_diag["safeguard_visibility"]["guest_safe_boundary_preserved"] is True
+    assert restoration_diag["deferred_functionality_visibility"]["restoration_outcome_implementation"] == "#330"
+    assert restoration_diag["deferred_functionality_visibility"]["e3a_preservation_alignment"] == "#331"
+    assert restoration_diag["deferred_functionality_visibility"]["restoration_diagnostics_explainability"] == "#332"
+    assert restoration_diag["deferred_functionality_visibility"]["release_3_validation"] == "#338"
+    assert restoration_diag["traceability_visibility"]["execution_envelope_ref_count"] >= 1
+    assert restoration_diag["traceability_visibility"]["preservation_alignment_ref_count"] >= 1
+    assert restoration_diag["traceability_visibility"]["latest_execution_kind"] == "direct"
+    assert restoration_diag["traceability_visibility"]["latest_restoration_path"] == "not_applicable_direct_execution"
+    assert restoration_diag["traceability_visibility"]["latest_restoration_outcome_path"] == "not_applicable_direct_execution"
+    assert restoration_diag["traceability_visibility"]["latest_preservation_alignment_path"] == "not_applicable_direct_execution"
+    assert restoration_diag["diagnostics_non_rights"]["creates_authority"] is False
+    assert restoration_diag["diagnostics_non_rights"]["creates_restoration_outcomes"] is False
+    assert restoration_diag["diagnostics_non_rights"]["creates_preservation_outcomes"] is False
+    assert restoration_diag["diagnostics_non_rights"]["modifies_restoration_decision_logic"] is False
+    assert restoration_diag["diagnostics_non_rights"]["modifies_preservation_alignment_logic"] is False
+    assert restoration_diag["diagnostics_non_rights"]["executes_restoration_behavior"] is False
+    assert restoration_diag["diagnostics_non_rights"]["executes_preservation_alignment_behavior"] is False
+
+    assert diagnostics["context_assembly_visibility"]["enabled_composite_projection_count"] >= 1
+    composite_sample = diagnostics["context_assembly_visibility"]["composite_projection_samples"][0]
+    assert composite_sample["composite_id"] == "public_space"
+    assert composite_sample["context_area_id"] == dining.id
+
+    preservation = diagnostics["preservation_baseline"]
+    assert preservation["foundation_boundary_ready"] is True
+    assert preservation["composite_scope_visibility_available"] is True
+    assert preservation["global_context_visibility_available"] is True
+    assert preservation["execution_hierarchy_visibility_available"] is True
+    assert preservation["explainability_surface_available"] is True
+    assert preservation["observed_outcome_clusters"]["execution_hierarchy"]["latest_orchestration_route_scope"] == "composite"
+    assert "merged_room_preservation_logic" in preservation["not_yet_implemented_in_baseline"]
+
+
+async def test_diagnostics_expose_vocabulary_resolution_visibility(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """Diagnostics should expose bounded room/device/asset vocabulary resolution visibility."""
+    area = ar.async_get(hass).async_create(name="Studio")
+    storage = ConciergeStorage(hass)
+    await storage.async_update_global_feature(
+        feature_key="room_vocabulary_registry",
+        enabled=True,
+        options={
+            "entries": [
+                {
+                    "term": "studio",
+                    "aliases": ["music room"],
+                    "area_id": area.id,
+                }
+            ]
+        },
+    )
+    await storage.async_update_global_feature(
+        feature_key="device_entity_vocabulary_registry",
+        enabled=True,
+        options={
+            "entries": [
+                {
+                    "term": "main lights",
+                    "aliases": ["ceiling lights"],
+                    "entity_id": "light.studio_ceiling",
+                    "area_id": area.id,
+                }
+            ]
+        },
+    )
+    await storage.async_update_global_feature(
+        feature_key="asset_vocabulary_registry",
+        enabled=True,
+        options={
+            "entries": [
+                {
+                    "term": "piano",
+                    "aliases": ["grand piano"],
+                    "asset_id": "asset.grand_piano",
+                    "handoff_entity_id": "switch.studio_piano_protect",
+                    "area_id": area.id,
+                }
+            ]
+        },
+    )
+
+    await hass.services.async_call(
+        DOMAIN,
+        "execute",
+        {
+            "target": "ceiling lights",
+            "area_id": "music room",
+            "intent_class": "home_control",
+        },
+        blocking=True,
+        return_response=True,
+    )
+    await hass.services.async_call(
+        DOMAIN,
+        "execute",
+        {
+            "target": "grand piano",
+            "area_id": area.id,
+            "intent_class": "home_control",
+        },
+        blocking=True,
+        return_response=True,
+    )
+
+    diagnostics = await async_get_config_entry_diagnostics(hass, setup_integration)
+    vocab = diagnostics["vocabulary_diagnostics_visibility"]
+
+    assert vocab["configured_entry_counts"]["room_vocabulary_entries"] == 1
+    assert vocab["configured_entry_counts"]["device_entity_vocabulary_entries"] == 1
+    assert vocab["configured_entry_counts"]["asset_vocabulary_entries"] == 1
+    assert vocab["resolution_visibility"]["room_resolution_count"] >= 1
+    assert vocab["resolution_visibility"]["device_entity_resolution_count"] >= 1
+    assert vocab["resolution_visibility"]["asset_handoff_resolution_count"] >= 1
+    latest_room = vocab["resolution_visibility"]["latest_room_resolution"]
+    assert latest_room is not None
+    assert latest_room["source"] == "room_vocabulary_registry"
+    latest_device = vocab["resolution_visibility"]["latest_device_entity_resolution"]
+    assert latest_device is not None
+    assert latest_device["source"] == "device_entity_vocabulary_registry"
+    latest_asset = vocab["resolution_visibility"]["latest_asset_handoff_resolution"]
+    assert latest_asset is not None
+    assert latest_asset["source"] == "asset_intelligence_handoff"
+
+    capability_diag = diagnostics["capability_diagnostics_explainability_visibility"]
+    assert capability_diag["discovery_visibility"]["latest_capability_discovery_applicable"] is True
+    assert capability_diag["discovery_visibility"]["latest_capability_discovery_path"] == "capability_consumption_to_discovery"
+    assert capability_diag["discovery_visibility"]["latest_discovered_capability_count"] >= 0
+    assert capability_diag["handoff_visibility"]["room_vocabulary_resolution_count"] >= 1
+    assert capability_diag["handoff_visibility"]["device_entity_vocabulary_resolution_count"] >= 1
+    assert capability_diag["handoff_visibility"]["asset_vocabulary_resolution_count"] >= 1
+    assert capability_diag["handoff_visibility"]["asset_intelligence_cp00_handoff_count"] >= 1
+    assert capability_diag["traceability_visibility"]["execution_envelope_ref_count"] >= 1
+
+
+async def test_diagnostics_expose_messaging_governance_boundary_visibility(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """Diagnostics should expose bounded visibility for the recorded messaging governance boundary."""
+    area = ar.async_get(hass).async_create(name="Living Room")
+    storage = ConciergeStorage(hass)
+    await storage.async_update_person_profile(
+        PersonProfile(
+            person_id="tom",
+            name="Tom",
+            linked_area_id=area.id,
+            mobile_notify_targets=["phone"],
+            preferred_mobile_target="phone",
+        )
+    )
+
+    notify_calls: list[dict[str, object]] = []
+
+    async def _notify_handler(call) -> None:
+        notify_calls.append(dict(call.data))
+
+    hass.services.async_register("notify", "phone", _notify_handler)
+
+    await hass.services.async_call(
+        DOMAIN,
+        "push_person_message",
+        {
+            "person_id": "tom",
+            "message": "Hello Tom",
+        },
+        blocking=True,
+        return_response=True,
+    )
+
+    diagnostics = await async_get_config_entry_diagnostics(hass, setup_integration)
+
+    messaging_diag = diagnostics["messaging_governance_boundary_visibility"]
+    assert messaging_diag["authority_visibility"]["message_authority_external"] is True
+    assert messaging_diag["authority_visibility"]["provenance_authority_external"] is True
+    assert messaging_diag["authority_visibility"]["household_memory_authority_external"] is True
+    assert messaging_diag["governance_visibility"]["messaging_boundary_ref_count"] >= 1
+    assert messaging_diag["governance_visibility"]["latest_messaging_boundary_applicable"] is True
+    assert messaging_diag["governance_visibility"]["latest_messaging_boundary_path"] == "governed_messaging_boundary"
+    assert messaging_diag["governance_visibility"]["latest_route_scope"] == "room"
+    assert messaging_diag["governance_visibility"]["latest_recipient_scope"] == "person"
+    assert messaging_diag["governance_visibility"]["latest_message_context_type"] == "person_push"
+    assert messaging_diag["ownership_boundary_visibility"]["messaging_owns_truth"] is False
+    assert messaging_diag["ownership_boundary_visibility"]["messaging_owns_provenance"] is False
+    assert messaging_diag["ownership_boundary_visibility"]["messaging_owns_memory"] is False
+    assert messaging_diag["ownership_boundary_visibility"]["messaging_owns_identity"] is False
+    assert messaging_diag["lifecycle_governance_visibility"]["message_creation_governed"] is True
+    assert messaging_diag["lifecycle_governance_visibility"]["message_delivery_governed"] is True
+    assert messaging_diag["lifecycle_governance_visibility"]["message_acknowledgement_governed"] is True
+    assert messaging_diag["lifecycle_governance_visibility"]["message_retention_governed"] is True
+    assert messaging_diag["traceability_visibility"]["messaging_boundary_ref_count"] >= 1
+    assert messaging_diag["traceability_visibility"]["latest_message_authority_external"] is True
+    assert messaging_diag["traceability_visibility"]["latest_provenance_authority_external"] is True
+    assert messaging_diag["traceability_visibility"]["latest_household_memory_authority_external"] is True
+    assert messaging_diag["deferred_functionality_visibility"]["messaging_provenance"] == "#340"
+    assert messaging_diag["deferred_functionality_visibility"]["messaging_diagnostics_explainability"] == "#343"
+    provenance_diag = diagnostics["messaging_provenance_visibility"]
+    assert provenance_diag["authority_visibility"]["provenance_authority_external"] is True
+    assert provenance_diag["traceability_visibility"]["messaging_provenance_ref_count"] >= 1
+    assert provenance_diag["traceability_visibility"]["latest_provenance_id_present"] is True
+    assert provenance_diag["traceability_visibility"]["latest_source_service"] == "concierge.push_person_message"
+    assert provenance_diag["traceability_visibility"]["latest_created_in_room"] == area.id
+    assert provenance_diag["delivery_visibility"]["latest_delivery_channel"] == "mobile_notify"
+    assert provenance_diag["delivery_visibility"]["latest_selected_service"] == "notify.phone"
+    assert provenance_diag["delivery_visibility"]["latest_selected_target_id"] == "phone"
+    assert provenance_diag["delivery_visibility"]["latest_routing_path"] == "person_mobile_target_fallback"
+    assert provenance_diag["diagnostics_non_rights"]["claims_upstream_truth"] is False
+    assert provenance_diag["diagnostics_non_rights"]["claims_identity_authority"] is False
+    assert provenance_diag["diagnostics_non_rights"]["claims_household_memory_authority"] is False
+    delivery_diag = diagnostics["notification_delivery_boundary_visibility"]
+    assert delivery_diag["authority_visibility"]["delivery_authority_external"] is True
+    assert delivery_diag["authority_visibility"]["recipient_authority_external"] is True
+    assert delivery_diag["authority_visibility"]["consent_authority_external"] is True
+    assert delivery_diag["authority_visibility"]["visibility_authority_external"] is True
+    assert delivery_diag["delivery_visibility"]["notification_delivery_boundary_ref_count"] >= 1
+    assert delivery_diag["delivery_visibility"]["latest_delivery_boundary_path"] == "governed_notification_delivery_boundary"
+    assert delivery_diag["delivery_visibility"]["latest_delivery_channel"] == "mobile_notify"
+    assert delivery_diag["delivery_visibility"]["latest_selected_service"] == "notify.phone"
+    assert delivery_diag["delivery_visibility"]["latest_selected_target_id"] == "phone"
+    assert delivery_diag["delivery_visibility"]["latest_routing_path"] == "person_mobile_target_fallback"
+    assert delivery_diag["execution_tracking"]["delivery_activity_count"] >= 1
+    assert delivery_diag["execution_tracking"]["delivery_success_count"] >= 1
+    assert delivery_diag["governance_visibility"]["delivery_boundary_only"] is True
+    assert delivery_diag["governance_visibility"]["recipient_authorization_enabled"] is False
+    assert delivery_diag["governance_visibility"]["consent_adjudication_enabled"] is False
+    assert delivery_diag["governance_visibility"]["visibility_adjudication_enabled"] is False
+    assert delivery_diag["diagnostics_non_rights"]["claims_recipient_authority"] is False
+    assert delivery_diag["diagnostics_non_rights"]["claims_consent_authority"] is False
+    assert delivery_diag["diagnostics_non_rights"]["claims_visibility_authority"] is False
+    assert delivery_diag["diagnostics_non_rights"]["claims_delivery_truth"] is False
+    assert delivery_diag["diagnostics_non_rights"]["claims_acknowledgement"] is False
+    assert delivery_diag["diagnostics_non_rights"]["claims_message_seen"] is False
+    recipient_diag = diagnostics["recipient_consent_privacy_visibility_boundary_visibility"]
+    assert recipient_diag["authority_visibility"]["recipient_authority_external"] is True
+    assert recipient_diag["authority_visibility"]["consent_authority_external"] is True
+    assert recipient_diag["authority_visibility"]["privacy_authority_external"] is True
+    assert recipient_diag["authority_visibility"]["visibility_authority_external"] is True
+    assert recipient_diag["decision_visibility"]["boundary_ref_count"] >= 1
+    assert recipient_diag["decision_visibility"]["latest_delivery_permitted"] is True
+    assert recipient_diag["decision_visibility"]["latest_decision_reason"] == "delivery_permitted"
+    assert recipient_diag["delivery_visibility"]["latest_delivery_channel"] == "mobile_notify"
+    assert recipient_diag["delivery_visibility"]["latest_selected_service"] == "notify.phone"
+    assert recipient_diag["delivery_visibility"]["latest_selected_target_id"] == "phone"
+    assert recipient_diag["delivery_visibility"]["latest_routing_path"] == "person_mobile_target_fallback"
+    assert recipient_diag["diagnostics_non_rights"]["claims_identity_authority"] is False
+    assert recipient_diag["diagnostics_non_rights"]["claims_recipient_authority"] is False
+    assert recipient_diag["diagnostics_non_rights"]["claims_consent_authority"] is False
+    assert recipient_diag["diagnostics_non_rights"]["claims_privacy_authority"] is False
+    assert recipient_diag["diagnostics_non_rights"]["claims_visibility_authority"] is False
+    assert recipient_diag["diagnostics_non_rights"]["claims_message_seen"] is False
+    assert recipient_diag["diagnostics_non_rights"]["claims_acknowledgement"] is False
+    messaging_diag = diagnostics["messaging_diagnostics_explainability_visibility"]
+    assert messaging_diag["authority_visibility"]["diagnostics_authority_external"] is True
+    assert messaging_diag["authority_visibility"]["explainability_authority_external"] is True
+    assert messaging_diag["explainability_summary"]["messaging_explainability_ref_count"] >= 1
+    assert messaging_diag["explainability_summary"]["latest_delivery_permitted"] is True
+    assert messaging_diag["explainability_summary"]["latest_decision_reason"] == "delivery_permitted"
+    assert messaging_diag["explainability_summary"]["latest_governance_boundary_involved"] == "notification_delivery_boundary"
+    assert messaging_diag["explainability_summary"]["latest_delivery_channel"] == "mobile_notify"
+    assert messaging_diag["governance_outcome_visibility"]["expected_governance_outcomes_visible"] is True
+    assert messaging_diag["governance_outcome_visibility"]["governance_denial_is_runtime_failure"] is False
+    assert messaging_diag["logging_strategy_visibility"]["governance_policy_denied_level"] == "info"
+    assert messaging_diag["logging_strategy_visibility"]["operational_delivery_failure_level"] == "error"
+    assert messaging_diag["diagnostics_non_rights"]["creates_authority"] is False
+    assert messaging_diag["diagnostics_non_rights"]["creates_truth"] is False
+    assert messaging_diag["diagnostics_non_rights"]["creates_memory"] is False
+    assert messaging_diag["diagnostics_non_rights"]["creates_identity"] is False
+    memory_diag = diagnostics["household_memory_governance_boundary_visibility"]
+    assert memory_diag["authority_visibility"]["household_memory_authority_external"] is True
+    assert memory_diag["authority_visibility"]["identity_authority_external"] is True
+    assert memory_diag["authority_visibility"]["occupancy_authority_external"] is True
+    assert memory_diag["authority_visibility"]["messaging_authority_external"] is True
+    assert memory_diag["authority_visibility"]["consent_authority_external"] is True
+    assert memory_diag["authority_visibility"]["privacy_authority_external"] is True
+    assert memory_diag["authority_visibility"]["source_of_truth_authority_external"] is True
+    assert memory_diag["boundary_visibility"]["household_memory_boundary_ref_count"] >= 1
+    assert memory_diag["boundary_visibility"]["latest_boundary_path"] == "governed_household_memory_boundary"
+    assert memory_diag["boundary_visibility"]["latest_boundary_status"] == "active"
+    assert memory_diag["boundary_visibility"]["latest_household_memory_role"] == "bounded_record_reference_consumer"
+    assert memory_diag["diagnostics_non_rights"]["claims_household_truth_authority"] is False
+    assert memory_diag["diagnostics_non_rights"]["claims_identity_authority"] is False
+    assert memory_diag["diagnostics_non_rights"]["claims_occupancy_authority"] is False
+    assert memory_diag["diagnostics_non_rights"]["claims_messaging_authority"] is False
+    assert memory_diag["diagnostics_non_rights"]["claims_consent_authority"] is False
+    assert memory_diag["diagnostics_non_rights"]["claims_privacy_authority"] is False
+    assert memory_diag["diagnostics_non_rights"]["claims_source_of_truth_authority"] is False
+    ownership_consumption_diag = diagnostics[
+        "household_memory_ownership_consumption_boundary_visibility"
+    ]
+    assert ownership_consumption_diag["authority_visibility"]["household_memory_authority_external"] is True
+    assert ownership_consumption_diag["authority_visibility"]["identity_authority_external"] is True
+    assert ownership_consumption_diag["authority_visibility"]["occupancy_authority_external"] is True
+    assert ownership_consumption_diag["authority_visibility"]["messaging_authority_external"] is True
+    assert ownership_consumption_diag["authority_visibility"]["consent_authority_external"] is True
+    assert ownership_consumption_diag["authority_visibility"]["privacy_authority_external"] is True
+    assert ownership_consumption_diag["authority_visibility"]["source_of_truth_authority_external"] is True
+    assert ownership_consumption_diag["ownership_visibility"]["ownership_boundary_ref_count"] >= 1
+    assert (
+        ownership_consumption_diag["ownership_visibility"]["latest_boundary_path"]
+        == "governed_household_memory_ownership_consumption_boundary"
+    )
+    assert ownership_consumption_diag["ownership_visibility"]["latest_boundary_status"] == "active"
+    assert ownership_consumption_diag["ownership_visibility"]["latest_memory_owner"] == "household_memory_governance"
+    assert ownership_consumption_diag["ownership_visibility"]["latest_memory_runtime_owner"] == "concierge"
+    assert ownership_consumption_diag["consumption_visibility"]["consumption_permitted_count"] >= 1
+    assert ownership_consumption_diag["consumption_visibility"]["latest_consumption_permitted"] is True
+    assert (
+        ownership_consumption_diag["consumption_visibility"]["latest_consumption_decision_reason"]
+        == "delivery_permitted"
+    )
+    assert ownership_consumption_diag["ownership_boundary_assertions"]["ownership_is_not_authority"] is True
+    assert ownership_consumption_diag["ownership_boundary_assertions"]["ownership_does_not_replace_identity"] is True
+    assert ownership_consumption_diag["ownership_boundary_assertions"]["ownership_does_not_replace_occupancy"] is True
+    assert ownership_consumption_diag["ownership_boundary_assertions"]["ownership_does_not_replace_messaging"] is True
+    assert ownership_consumption_diag["ownership_boundary_assertions"]["ownership_does_not_replace_consent"] is True
+    assert ownership_consumption_diag["ownership_boundary_assertions"]["ownership_does_not_replace_privacy"] is True
+    assert (
+        ownership_consumption_diag["ownership_boundary_assertions"][
+            "ownership_does_not_replace_source_of_truth"
+        ]
+        is True
+    )
+    assert ownership_consumption_diag["consumption_boundary_assertions"]["consumption_is_not_authority"] is True
+    assert (
+        ownership_consumption_diag["consumption_boundary_assertions"][
+            "consumption_does_not_replace_identity"
+        ]
+        is True
+    )
+    assert (
+        ownership_consumption_diag["consumption_boundary_assertions"][
+            "consumption_does_not_replace_occupancy"
+        ]
+        is True
+    )
+    assert (
+        ownership_consumption_diag["consumption_boundary_assertions"][
+            "consumption_does_not_replace_messaging"
+        ]
+        is True
+    )
+    assert (
+        ownership_consumption_diag["consumption_boundary_assertions"][
+            "consumption_does_not_replace_consent"
+        ]
+        is True
+    )
+    assert (
+        ownership_consumption_diag["consumption_boundary_assertions"][
+            "consumption_does_not_replace_privacy"
+        ]
+        is True
+    )
+    assert (
+        ownership_consumption_diag["consumption_boundary_assertions"][
+            "consumption_does_not_replace_source_of_truth"
+        ]
+        is True
+    )
+    assert ownership_consumption_diag["diagnostics_non_rights"]["claims_household_truth_authority"] is False
+    assert ownership_consumption_diag["diagnostics_non_rights"]["claims_identity_authority"] is False
+    assert ownership_consumption_diag["diagnostics_non_rights"]["claims_occupancy_authority"] is False
+    assert ownership_consumption_diag["diagnostics_non_rights"]["claims_messaging_authority"] is False
+    assert ownership_consumption_diag["diagnostics_non_rights"]["claims_consent_authority"] is False
+    assert ownership_consumption_diag["diagnostics_non_rights"]["claims_privacy_authority"] is False
+    assert ownership_consumption_diag["diagnostics_non_rights"]["claims_source_of_truth_authority"] is False
+    identity_privacy_retention_diag = diagnostics[
+        "household_memory_identity_privacy_retention_separation_visibility"
+    ]
+    assert identity_privacy_retention_diag["authority_visibility"]["identity_authority_external"] is True
+    assert identity_privacy_retention_diag["authority_visibility"]["privacy_authority_external"] is True
+    assert identity_privacy_retention_diag["authority_visibility"]["retention_authority_external"] is True
+    assert identity_privacy_retention_diag["authority_visibility"]["source_of_truth_authority_external"] is True
+    assert identity_privacy_retention_diag["separation_visibility"]["separation_boundary_ref_count"] >= 1
+    assert (
+        identity_privacy_retention_diag["separation_visibility"]["latest_boundary_path"]
+        == "governed_household_memory_identity_privacy_retention_separation_boundary"
+    )
+    assert identity_privacy_retention_diag["separation_visibility"]["latest_boundary_status"] == "active"
+    assert identity_privacy_retention_diag["separation_visibility"]["latest_identity_separated"] is True
+    assert identity_privacy_retention_diag["separation_visibility"]["latest_privacy_separated"] is True
+    assert identity_privacy_retention_diag["separation_visibility"]["latest_retention_separated"] is True
+    assert identity_privacy_retention_diag["separation_visibility"]["latest_separation_permitted"] is True
+    assert (
+        identity_privacy_retention_diag["separation_visibility"]["latest_separation_decision_reason"]
+        == "delivery_permitted"
+    )
+    assert (
+        identity_privacy_retention_diag["separation_boundary_assertions"][
+            "identity_reference_is_not_authority"
+        ]
+        is True
+    )
+    assert (
+        identity_privacy_retention_diag["separation_boundary_assertions"][
+            "privacy_reference_is_not_authority"
+        ]
+        is True
+    )
+    assert (
+        identity_privacy_retention_diag["separation_boundary_assertions"][
+            "retention_reference_is_not_authority"
+        ]
+        is True
+    )
+    assert (
+        identity_privacy_retention_diag["separation_boundary_assertions"][
+            "separation_does_not_replace_source_of_truth"
+        ]
+        is True
+    )
+    assert (
+        identity_privacy_retention_diag["separation_boundary_assertions"][
+            "separation_does_not_replace_identity"
+        ]
+        is True
+    )
+    assert (
+        identity_privacy_retention_diag["separation_boundary_assertions"][
+            "separation_does_not_replace_privacy"
+        ]
+        is True
+    )
+    assert (
+        identity_privacy_retention_diag["separation_boundary_assertions"][
+            "separation_does_not_replace_retention"
+        ]
+        is True
+    )
+    assert identity_privacy_retention_diag["diagnostics_non_rights"]["claims_identity_authority"] is False
+    assert identity_privacy_retention_diag["diagnostics_non_rights"]["claims_privacy_authority"] is False
+    assert identity_privacy_retention_diag["diagnostics_non_rights"]["claims_retention_authority"] is False
+    assert (
+        identity_privacy_retention_diag["diagnostics_non_rights"]["claims_source_of_truth_authority"]
+        is False
+    )
+    assert notify_calls[0]["message"] == "Hello Tom"
+
+
+async def test_diagnostics_expose_vocabulary_ambiguity_visibility(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """Diagnostics should expose bounded vocabulary ambiguity visibility from config and outcomes."""
+    storage = ConciergeStorage(hass)
+    area = ar.async_get(hass).async_create(name="Gallery")
+    await storage.async_update_global_feature(
+        feature_key="room_vocabulary_registry",
+        enabled=True,
+        options={
+            "entries": [
+                {
+                    "term": "gallery",
+                    "aliases": ["art room"],
+                    "area_id": area.id,
+                },
+                {
+                    "term": "display room",
+                    "aliases": ["art room"],
+                    "area_id": area.id,
+                },
+            ]
+        },
+    )
+
+    with pytest.raises(Exception):
+        await hass.services.async_call(
+            DOMAIN,
+            "execute",
+            {
+                "target": "light.gallery",
+                "area_id": "art room",
+                "intent_class": "home_control",
+            },
+            blocking=True,
+        )
+
+    diagnostics = await async_get_config_entry_diagnostics(hass, setup_integration)
+    ambiguity = diagnostics["vocabulary_diagnostics_visibility"]["ambiguity_visibility"]
+
+    assert ambiguity["known_config_ambiguity_count"] >= 1
+    assert ambiguity["recent_ambiguity_event_count"] >= 1
+    latest_event = ambiguity["recent_ambiguity_events"][0]
+    assert "ambiguous" in latest_event["outcome_reason"]
