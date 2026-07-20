@@ -40,17 +40,18 @@ def mock_config_entry() -> MockConfigEntry:
     )
 
 
+@pytest.fixture(autouse=True)
+def auto_enable_custom_integrations(enable_custom_integrations):
+    """Enable loading integration code from custom_components during tests."""
+    yield
+
+
 @pytest.fixture
 async def setup_integration(hass: HomeAssistant, mock_config_entry: MockConfigEntry) -> MockConfigEntry:
     """Set up the integration for tests."""
     from pathlib import Path
 
     storage_root = Path(hass.config.path("voice-enrollment-test-root"))
-
-    mock_config_entry.options = {
-        CONF_AUDIT_ARCHIVE_DESTINATION_URI: "/media/concierge-tests",
-        CONF_AUDIT_ARCHIVE_ENABLED: True,
-    }
 
     services_module.resolve_voice_enrollment_root = lambda destination_uri: storage_root
     panel_module.resolve_voice_enrollment_root = lambda destination_uri: storage_root
@@ -59,6 +60,13 @@ async def setup_integration(hass: HomeAssistant, mock_config_entry: MockConfigEn
     orchestrator_module.resolve_voice_enrollment_root = lambda destination_uri: storage_root
 
     mock_config_entry.add_to_hass(hass)
+    hass.config_entries.async_update_entry(
+        mock_config_entry,
+        options={
+            CONF_AUDIT_ARCHIVE_DESTINATION_URI: "/media/concierge-tests",
+            CONF_AUDIT_ARCHIVE_ENABLED: True,
+        },
+    )
     assert await hass.config_entries.async_setup(mock_config_entry.entry_id)
 
     class _DiscoveryIntegration:
@@ -100,6 +108,27 @@ async def setup_integration(hass: HomeAssistant, mock_config_entry: MockConfigEn
         "generate_voiceprint_operation": _GenerateVoiceprintOperation(),
         "get_voiceprint_status_operation": _GetVoiceprintStatusOperation(),
     }
+
+    async def _capture_provider_capabilities(_self):
+        return {
+            "provider_type": "browser_microphone",
+            "provider_available": True,
+            "provider_supported": True,
+            "capture_supported": True,
+            "selection_supported": True,
+            "reason_code": "ready",
+            "satellite_capture_supported": False,
+            "satellite_status_code": "provider_not_selected",
+            "provider_status_summary": "ready",
+        }
+
+    orchestrator_module.EnrollmentOrchestrator.get_capture_provider_capabilities = (
+        _capture_provider_capabilities
+    )
+
+    for service_domain in ("homeassistant", "light", "scene"):
+        if not hass.services.has_service(service_domain, "turn_on"):
+            hass.services.async_register(service_domain, "turn_on", lambda call: None)
 
     await hass.async_block_till_done()
     return mock_config_entry

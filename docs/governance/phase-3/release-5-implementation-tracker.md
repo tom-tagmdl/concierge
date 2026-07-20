@@ -31,3 +31,946 @@ No missing authority sources were invented.
 No implementation code was changed.
 
 No roadmap scope was expanded.
+
+## Issue #350 Baseline Validation Evidence (2026-07-19)
+
+- Issue: #350 - P3-R5-E11-01 Voice Identity consumption boundary implementation
+- Scope: governed baseline validation and closure for the foundational Release 5 Voice Identity consumption boundary; no reimplementation of #351, #352, #353, or #354 authorized.
+- Baseline question: Can Concierge consume Voice Identity without becoming Voice Identity?
+- Evidence-backed answer: yes. Completed Epic 11 work shows Concierge consumes Voice Identity outputs as bounded context while Voice Identity remains authoritative for identity, attribution, confidence, enrollment, lifecycle, permission/consent semantics, diagnostics, explainability, and provenance-generation semantics where Voice Identity owns them.
+- Files changed:
+	- docs/governance/phase-3/release-5-implementation-tracker.md
+- Authority review summary: PASS (ADR -> Contract -> Model -> Existing Implementation -> GitHub Issue)
+	- GitHub Issues were treated as execution inputs only and not architecture authority.
+	- No ADR, contract, model, or existing-implementation conflict was identified that requires STOP.
+- Contract review summary: PASS
+	- HTBW Voice Recognition Contract defines voice identity as probabilistic context, not authentication or system truth.
+	- HTBW Person Identity Contract defines identity as behavioral context that does not redefine truth or bypass safety.
+	- HTBW Service Contracts require deterministic service boundaries with explicit inputs/outputs and no hidden authority transfer.
+	- HTBW Performance Contract preserves prepared, bounded runtime behavior and avoids runtime discovery or heavy identity computation in Concierge.
+- Model review summary: PASS
+	- HTBW Voice Profile Model is for speaker attribution and interaction style only, not authentication.
+	- HTBW Voice Enrollment Domain Model keeps enrollment session, storage, capture, cleanup, and profile-quality responsibilities explicitly bounded.
+	- HTBW Person Profile Model states Voice Identity remains authoritative for attribution and confidence while person profiles consume identity context.
+	- HTBW Provenance Model is a consumption model and not an identity authority, provenance governance authority, attribution algorithm, or write path.
+- Existing implementation review summary: PASS
+	- `services.py` normalizes and consumes Voice Identity identity, enrollment/lifecycle, permission/consent, legacy disposition, diagnostics, and explainability context into execution-envelope projections.
+	- `diagnostics.py` exposes `voice_identity_consumption_boundary_visibility` as bounded visibility with explicit ownership-boundary and diagnostics non-rights assertions.
+	- `tests/test_services.py` and `tests/test_diagnostics.py` include targeted Voice Identity consumption and ownership non-rights assertions.
+	- No #350 validation evidence showed Concierge calculating attribution, calculating confidence, creating voice profiles, changing enrollment state, granting/revoking permissions, inferring consent, migrating or disposing legacy identity data, generating Voice Identity diagnostics, generating Voice Identity explainability, or replacing Voice Identity provenance.
+- #350 scope review: PASS
+	- #350 is the foundational Epic 11 boundary validation issue.
+	- #350 is satisfied by completed downstream implementation evidence from #351 through #354 and Release 5 validation evidence from #361.
+	- No additional runtime implementation is required for #350.
+	- No runtime code was changed for #350.
+- Epic 11 baseline validation summary: PASS
+	- #350 baseline role: define and close the overall Voice Identity consumption boundary for P3-R5-E11-01.
+	- #351 validates attribution and confidence consumption.
+	- #352 validates enrollment and lifecycle consumption.
+	- #353 validates permission and legacy disposition consumption.
+	- #354 validates diagnostics, explainability, and provenance-reference consumption.
+	- #361 validates Release 5 and confirms Epic 11 boundary preservation.
+	- Together, #350 through #354 plus #361 satisfy P3-R5-E11-01 without requiring new runtime behavior.
+- #351 evidence review: PASS
+	- Attribution and confidence outcomes are consumed into a governed execution-envelope projection.
+	- Concierge does not derive attribution authority, derive confidence authority, calculate attribution, calculate confidence, create voice profiles, manage enrollment, or manage identity lifecycle.
+	- Focused #351/#361 service evidence remains valid: `tests/test_services.py -k voice_identity` -> `7 passed, 60 deselected`.
+- #352 evidence review: PASS
+	- Enrollment state, enrollment readiness, enrollment lifecycle state, voice profile lifecycle state, and identity lifecycle state are consumed as Voice Identity-originated context.
+	- Concierge does not create voice profiles, enroll users, approve enrollment, reject enrollment, change enrollment state, infer enrollment state, manage enrollment lifecycle, manage voice profile lifecycle, or manage identity lifecycle.
+	- Focused #352 diagnostics evidence remains valid through `tests/test_diagnostics.py -k voice_identity` and the `voice_identity_consumption_boundary_visibility` enrollment/lifecycle assertions.
+- #353 evidence review: PASS
+	- Permission, consent, eligibility, gating reason, and legacy disposition outcomes are consumed as Voice Identity-originated context.
+	- Concierge does not grant permissions, revoke permissions, approve consent, infer consent, migrate legacy identity data, dispose of legacy identity data, determine legacy disposition, or infer legacy disposition state.
+	- #353 post-deploy Home Assistant restart/log evidence remains the available runtime validation baseline for permission/legacy-disposition boundary code.
+- #354 evidence review: PASS
+	- Diagnostics outputs, explainability outputs, repair-hint references, source references, lineage references, and provenance source references are consumed and exposed as bounded diagnostics visibility.
+	- Concierge does not generate Voice Identity diagnostics authority, rewrite diagnostics, calculate Voice Identity health/readiness, generate repair hints, generate Voice Identity explainability authority, replace provenance, or create explainability lineage.
+	- #354 HA dev deployment/runtime marker validation remains valid for diagnostics/explainability boundary code.
+- #361 Release validation linkage: PASS
+	- #361 Release 5 governed implementation validation explicitly validated #351 through #354 as Epic 11 PASS and preserved Voice Identity ownership.
+	- #361 classified Epic 12 readiness gaps without converting them into Voice Identity boundary failures or false readiness claims.
+	- #361 confirmed no ownership drift, architecture drift, roadmap expansion, or unsupported readiness claim for Release 5.
+- Mandatory ownership validation: PASS
+	- Voice Identity remains authoritative for attribution, confidence, enrollment, enrollment readiness, enrollment lifecycle, voice profile lifecycle, identity lifecycle, permission semantics, consent semantics, legacy disposition semantics, diagnostics generation, explainability generation, and provenance generation where Voice Identity owns them.
+	- Concierge remains bounded consumer, orchestrator, Home Assistant integration surface, diagnostics exposure surface, and explainability exposure surface.
+	- Asset Intelligence ownership is unchanged and outside #350 runtime scope.
+	- HTBW remains governance authority for ADRs, contracts, models, and canonical ownership definitions.
+- Prohibited behavior review: PASS
+	- No evidence found that Concierge calculates attribution or confidence.
+	- No evidence found that Concierge creates voice profiles, enrolls users as Voice Identity authority, approves/rejects enrollment, changes enrollment state, manages enrollment lifecycle, or manages identity lifecycle under #350.
+	- No evidence found that Concierge grants/revokes permissions, infers consent, migrates legacy identity data, disposes legacy identity data, or determines legacy disposition.
+	- No evidence found that Concierge generates Voice Identity diagnostics, explainability, or provenance authority, or redefines Voice Identity contracts/models.
+- Testing evidence reused:
+	- #351 focused service evidence: PASS.
+	- #352 focused service and diagnostics evidence: PASS.
+	- #353 focused service, diagnostics, combined regression, and post-deploy runtime evidence: PASS.
+	- #354 focused service, diagnostics, combined regression, and HA dev deployment marker evidence: PASS.
+	- #361 focused Release 5 validation evidence: architecture guardrails PASS; `tests/test_services.py -k voice_identity` PASS (`7 passed, 60 deselected`); `tests/test_diagnostics.py -k voice_identity` PASS (`3 passed, 6 deselected`); config/repairs PASS (`8 passed`).
+- #350 validation tests run:
+	- `wsl -d Ubuntu -- /home/tomtom/.venvs/concierge312/bin/python -m pytest -q /mnt/r/HomesPlatformRepos/concierge/tests/test_services.py -k voice_identity` -> PASS (`7 passed, 60 deselected`).
+	- `wsl -d Ubuntu -- /home/tomtom/.venvs/concierge312/bin/python -m pytest -q /mnt/r/HomesPlatformRepos/concierge/tests/test_diagnostics.py -k voice_identity` -> PASS (`3 passed, 6 deselected`).
+	- Pytest cache write warnings under `/mnt/r/HomesPlatformRepos/concierge/.pytest_cache` remain non-failing environment warnings.
+- Known unrelated failures preserved:
+	- Full-suite health remains NOT READY under #360.
+	- Complete diagnostics health remains NOT READY because `test_diagnostics_expose_vocabulary_ambiguity_visibility` still observes `recent_ambiguity_event_count == 0`.
+	- Prior broad service/diagnostics runs had unrelated response-only service-call and legacy test-environment drift; those are not summarized as passing evidence for #350.
+- Runtime validation evidence:
+	- #350 introduced no runtime behavior change.
+	- No deploy required for #350.
+	- No Home Assistant restart required for #350.
+	- Existing runtime evidence from #353 and #354 remains the runtime baseline for completed Epic 11 implementation.
+	- No manufactured runtime evidence added.
+- Evidence-equivalence review:
+	- Validation criterion: prove Concierge can consume Voice Identity without becoming Voice Identity.
+	- Actual evidence: #351 through #354 execution-envelope projections, diagnostics visibility, non-rights flags, targeted service/diagnostics tests, #353/#354 runtime deployment evidence, and #361 Release 5 validation.
+	- Equivalence assessment: the actual evidence proves the same governance requirement even though #350 itself did not implement runtime code.
+	- Remediation assessment: no runtime remediation required; missing #350 durable baseline evidence is remediated by this tracker section only.
+- Governance validation: PASS
+	- E15-G1 authority order preserved.
+	- E15-G2 standard prompt boundary preserved.
+	- E15-G3 validation/closure checklist documented.
+	- E15-G4 cross-repo ownership drift checklist documented.
+	- No architecture invention, roadmap expansion, ownership drift, unsupported Platinum readiness claim, or hidden readiness gap introduced.
+- Home Assistant standards assessment: PASS
+	- Completed Epic 11 implementation uses Home Assistant service-response, diagnostics, and integration patterns.
+	- #350 adds governance evidence only and does not introduce UI, config-flow, repairs, translation, or runtime behavior changes.
+- PASS/FAIL recommendation: PASS for Issue #350 baseline Voice Identity consumption boundary validation and closure.
+	- #350 foundational boundary is validated.
+	- #351 through #354 evidence supports the boundary.
+	- #361 Release 5 validation supports the boundary.
+	- Durable evidence is recorded here.
+	- No ownership drift or architecture drift found.
+	- No unsupported claims introduced.
+	- No runtime implementation changes made for #350.
+
+## Issue #351 Implementation Evidence (2026-07-19)
+
+- Issue: #351 - P3-R5-E11-02 Attribution and confidence consumption implementation
+- Scope: Concierge bounded consumption of Voice Identity attribution/confidence outcomes only
+- Files changed:
+	- custom_components/concierge/services.py
+	- custom_components/concierge/diagnostics.py
+	- tests/test_services.py
+	- tests/test_diagnostics.py
+- Authority-order validation: PASS (ADR -> Contract -> Model -> Existing Implementation -> GitHub Issue)
+- Ownership validation: PASS
+	- Concierge DOES consume identity/attribution/confidence outcomes and orchestrate behavior.
+	- Concierge DOES NOT create voice profiles, manage enrollment, calculate attribution, calculate confidence, or manage identity lifecycle.
+- Implementation summary:
+	- Added execution-envelope Voice Identity attribution/confidence consumption projection with explicit non-authority assertions.
+	- Added diagnostics visibility for attribution/confidence explainability and authority-boundary verification.
+	- Added test coverage for success/unavailable attribution and confidence consumption paths plus boundary-preservation assertions.
+- Governance drift assessment: no drift identified.
+- Implementation assessment: PASS
+
+## Issue #352 Implementation Evidence (2026-07-19)
+
+- Issue: #352 - P3-R5-E11-03 Enrollment and lifecycle boundary implementation
+- Scope: Concierge bounded consumption and diagnostics visibility for Voice Identity enrollment/lifecycle state only
+- Files changed:
+	- custom_components/concierge/services.py
+	- custom_components/concierge/diagnostics.py
+	- tests/test_services.py
+	- tests/test_diagnostics.py
+- Authority review summary: PASS (ADR -> Contract -> Model -> Existing Implementation -> GitHub Issue)
+- Contract/model review summary: Voice Identity remains authoritative for enrollment state, enrollment lifecycle, voice profile lifecycle, identity lifecycle, attribution, and confidence. Concierge may consume and expose bounded projections only.
+- Ownership validation: PASS
+	- Concierge DOES consume enrollment/lifecycle state and expose diagnostics boundary visibility.
+	- Concierge DOES NOT create voice profiles, enroll users, approve or reject enrollment, change enrollment state, manage enrollment lifecycle, manage voice profile lifecycle, manage identity lifecycle, infer enrollment state, calculate attribution, or calculate confidence.
+- Diagnostics evidence:
+	- `voice_identity_consumption_boundary_visibility.enrollment_boundary_visibility` exposes latest enrollment state consumption and unavailable state.
+	- `voice_identity_consumption_boundary_visibility.lifecycle_boundary_visibility` exposes latest lifecycle state consumption and unavailable state.
+	- `ownership_boundary_visibility` and `diagnostics_non_rights` include explicit non-rights flags for enrollment/lifecycle authority.
+- Tests run:
+	- Targeted Issue #352 service tests: PASS (`4 passed, 57 deselected`).
+	- Targeted Issue #352 diagnostics tests plus Voice Identity boundary diagnostics regression: PASS (`3 passed, 4 deselected`).
+	- Required broader `tests/test_services.py tests/test_diagnostics.py`: executed; existing out-of-scope HA 2025 compatibility drift remains (`32 passed, 36 failed`). Failures are legacy response-only service calls, registry/storage expectation drift, and an unrelated missing `pytest` import in vocabulary diagnostics coverage.
+- Home Assistant standards confirmation: implementation uses existing Home Assistant service response and diagnostics patterns; no new UI, repair, or translation behavior added.
+- Governance drift assessment: no drift identified.
+- Implementation assessment: PASS for Issue #352 scoped implementation evidence.
+
+## Issue #353 Implementation Evidence (2026-07-19)
+
+- Issue: #353 - P3-R5-E11-04 Permission and legacy disposition boundary implementation
+- Scope: Concierge bounded consumption and diagnostics visibility for Voice Identity permission and legacy disposition outcomes only
+- Files changed:
+	- custom_components/concierge/services.py
+	- custom_components/concierge/diagnostics.py
+	- tests/test_services.py
+	- tests/test_diagnostics.py
+- Authority review summary: PASS (ADR -> Contract -> Model -> Existing Implementation -> GitHub Issue)
+- Contract/model review summary: Voice Identity remains authoritative for permission semantics, consent semantics, legacy disposition semantics, enrollment/lifecycle state, attribution, and confidence. Concierge may consume and expose bounded projections only.
+- Existing implementation review summary: implementation extends the established #351/#352 Voice Identity consumption envelope and diagnostics visibility seam; no duplicate diagnostics surface added.
+- #351 baseline preservation review: attribution/confidence consumption boundary remains additive and consumer-only.
+- #352 baseline preservation review: enrollment/lifecycle consumption boundary remains additive and consumer-only.
+- Ownership validation: PASS
+	- Concierge DOES consume permission and legacy disposition outcomes and expose diagnostics boundary visibility.
+	- Concierge DOES NOT grant permission, revoke permission, approve consent, infer consent, migrate legacy identity data, dispose of legacy identity data, determine legacy disposition, infer legacy disposition state, create voice profiles, enroll users, manage lifecycle, calculate attribution, or calculate confidence.
+- Diagnostics evidence:
+	- `voice_identity_consumption_boundary_visibility.permission_boundary_visibility` exposes latest permission/consent outcome consumption and unavailable state.
+	- `voice_identity_consumption_boundary_visibility.legacy_disposition_boundary_visibility` exposes latest legacy disposition outcome consumption and unavailable state.
+	- `ownership_boundary_visibility` and `diagnostics_non_rights` include explicit non-rights flags for permission, consent, and legacy disposition authority.
+- Validation evidence:
+	- Static check: `services.py`, `diagnostics.py`, `tests/test_services.py`, and `tests/test_diagnostics.py` reported no editor diagnostics.
+	- Focused #353 service target: PASS (`5 passed, 60 deselected`).
+	- Focused #353 diagnostics target with #351/#352 diagnostics regression coverage: PASS (`4 passed, 4 deselected`).
+	- Combined #351/#352/#353 service regression target: PASS (`11 passed, 54 deselected`).
+	- Broader `tests/test_services.py tests/test_diagnostics.py`: known out-of-scope drift remains (`37 passed, 36 failed`), consisting of response-only service calls missing `return_response=True` and the existing vocabulary diagnostics `pytest` import failure.
+- Post-deploy runtime validation:
+	- Home Assistant restart completed successfully after deployment.
+	- Home Assistant logs showed no issues after restart.
+- Home Assistant standards confirmation: implementation uses existing Home Assistant service response and diagnostics patterns; no new UI, repair, or translation behavior added.
+- Governance drift assessment: no drift identified.
+- Implementation assessment: PASS for Issue #353 scoped implementation evidence.
+
+## Issue #354 Implementation Evidence (2026-07-19)
+
+- Issue: #354 - P3-R5-E11-05 Voice Identity diagnostics and explainability consumption
+- Scope: Concierge bounded consumption and diagnostics visibility for Voice Identity diagnostics outputs, explainability outputs, provenance references, and authority-boundary visibility only
+- Files changed:
+	- custom_components/concierge/services.py
+	- custom_components/concierge/diagnostics.py
+	- tests/test_services.py
+	- tests/test_diagnostics.py
+- Authority review summary: PASS (ADR -> Contract -> Model -> Existing Implementation -> GitHub Issue)
+- Contract review summary: Voice Identity remains authoritative for attribution, confidence, enrollment, lifecycle, permission, consent, legacy disposition, diagnostics, repair hints, health/readiness status, explainability, and provenance. Concierge may consume safe outputs and expose bounded diagnostic visibility only.
+- Model review summary: provenance and explainability are advisory lineage/reference surfaces. Concierge consumes source references, lineage references, authority source, provenance source, reason codes, and unavailable-source state without creating lineage, calculating health/readiness, or inferring identity state.
+- Existing implementation review summary: implementation extends the established #351/#352/#353 `voice_identity_attribution_confidence_consumption` execution envelope and `voice_identity_consumption_boundary_visibility` diagnostics surface; no duplicate diagnostics structure added.
+- Explainability review summary: approved consumed fields include consumed outcome, authority source, provenance source, source reference, lineage reference, attribution source, confidence source, enrollment source, lifecycle source, permission source, legacy disposition source, unavailable state, and reason code.
+- Provenance review summary: provenance visibility is reference-only and preserves Voice Identity as source; Concierge does not replace Voice Identity provenance or create new explainability lineage.
+- Diagnostics review summary: approved consumed fields include diagnostic availability, diagnostic reason code, health status, attribution readiness, compatibility readiness, repair availability, repair hint code, suggested next action code, provenance source, source reference, lineage reference, and unavailable-source state.
+- Dependency preservation review:
+	- #351 attribution/confidence authority preserved.
+	- #352 enrollment/lifecycle authority preserved.
+	- #353 permission/consent/legacy-disposition authority preserved.
+- Ownership validation: PASS
+	- Concierge DOES consume diagnostics outputs, explainability outputs, provenance references, and authority-boundary visibility.
+	- Concierge DOES NOT generate attribution authority, confidence authority, enrollment authority, lifecycle authority, permission authority, consent authority, diagnostics authority, repair hints, health/readiness status, explainability authority, provenance, identity state, or unavailable Voice Identity state.
+- Diagnostics evidence:
+	- `voice_identity_consumption_boundary_visibility.diagnostics_boundary_visibility` exposes latest diagnostics consumption, diagnostic availability, health/readiness status, repair hint references, provenance source, source reference, and lineage reference.
+	- `voice_identity_consumption_boundary_visibility.explainability_boundary_visibility` exposes latest explainability consumption, consumed outcome, authority source, provenance source, source reference, lineage reference, upstream source references for #351/#352/#353 boundary families, unavailable state, and reason code.
+	- `ownership_boundary_visibility` and `diagnostics_non_rights` include explicit non-rights flags for diagnostics authority, diagnostics rewriting, health/readiness calculation, repair-hint generation, explainability authority, provenance replacement, and explainability-lineage creation.
+- Translation review: no translation entries added; #354 changes add machine-readable Home Assistant diagnostics payload fields only and no new user-facing strings or UI content.
+- Validation evidence:
+	- Static check: `services.py`, `diagnostics.py`, `tests/test_services.py`, and `tests/test_diagnostics.py` reported no editor diagnostics.
+	- Focused #354 service target with authority regression: PASS (`3 passed, 64 deselected`).
+	- Focused #354 diagnostics target with #351/#352/#353 diagnostics regression coverage: PASS (`4 passed, 5 deselected`).
+	- Combined #351/#352/#353/#354 service regression target: PASS (`13 passed, 54 deselected`).
+	- Broader `tests/test_services.py tests/test_diagnostics.py`: known out-of-scope drift remains (`40 passed, 36 failed`), consisting of response-only service calls missing `return_response=True` and the existing vocabulary diagnostics `pytest` import failure.
+- Deployment evidence:
+	- Deployed to Home Assistant dev with `scripts/deploy-to-ha.ps1`.
+	- Robocopy completed successfully with exit code `1` and copied 2 runtime files.
+	- Verified `H:\custom_components\concierge` contains `governed_voice_identity_diagnostics_consumption`, `governed_voice_identity_explainability_consumption`, `diagnostics_boundary_visibility`, and `explainability_boundary_visibility`.
+- Home Assistant standards confirmation: implementation uses existing Home Assistant service response and diagnostics patterns; no new UI, repair, or translation behavior added.
+- Governance drift assessment: no drift identified.
+- Implementation assessment: PASS for Issue #354 scoped implementation evidence.
+
+## Issue #355 Implementation Evidence (2026-07-19)
+
+- Issue: #355 - P3-R5-E12-01 HACS readiness implementation evidence
+- Scope: readiness evidence generation and validation only; no runtime feature implementation authorized.
+- Files changed:
+	- tests/test_config_flow.py
+	- tests/test_diagnostics.py
+	- docs/governance/phase-3/release-5-implementation-tracker.md
+- Authority review summary: PASS (ADR -> Contract -> Model -> Existing Implementation -> GitHub Issue)
+- Existing readiness evidence review:
+	- Phase 2 E12 governance states HACS/Platinum readiness governance is complete for implementation planning, but explicitly does not claim full Platinum certification.
+	- Repository contains HACS and Home Assistant distribution evidence: `hacs.json`, `custom_components/concierge/manifest.json`, `services.yaml`, `translations/en.json`, `strings.json`, `config_flow.py`, diagnostics, repairs, tests, README/info docs, and CI workflows for HACS validation, hassfest, and tests.
+	- Existing governance identifies implementation-stage gaps for full quality-scale/Platinum evidence, migration readiness, and deeper accessibility/documentation proof.
+- Repository artifacts reviewed:
+	- `hacs.json`
+	- `custom_components/concierge/manifest.json`
+	- `custom_components/concierge/services.yaml`
+	- `custom_components/concierge/translations/en.json`
+	- `custom_components/concierge/strings.json`
+	- `custom_components/concierge/config_flow.py`
+	- `custom_components/concierge/diagnostics.py`
+	- `custom_components/concierge/repairs.py`
+	- `.github/workflows/hacs-validate.yml`
+	- `.github/workflows/hassfest.yml`
+	- `.github/workflows/tests.yml`
+	- `README.md`, `info.md`, and Release 5 governance artifacts
+- HACS readiness requirement mapping:
+	- Manifest compliance: READY. Evidence: manifest declares `domain`, `name`, `config_flow: true`, `documentation`, `integration_type`, `iot_class`, `issue_tracker`, `loggers`, empty `requirements`, and `version`.
+	- HACS repository metadata: READY. Evidence: `hacs.json` declares name, `content_in_root: false`, country, minimum Home Assistant version, and README rendering.
+	- Integration packaging layout: READY. Evidence: `custom_components/concierge` integration layout exists; HACS workflow is present.
+	- Config Flow: READY. Evidence: `manifest.json` enables config flow, `config_flow.py` implements `ConciergeConfigFlow`, current schema tests pass, and duplicate submission abort evidence passes.
+	- Options Flow: READY. Evidence: `config_flow.py` implements `ConciergeOptionsFlow`; option schema uses Home Assistant selectors and archive validation.
+	- Diagnostics: READY for baseline HACS support. Evidence: `diagnostics.py` exposes sanitized Home Assistant diagnostics; focused diagnostics tests pass except one vocabulary ambiguity event assertion outside HACS baseline readiness.
+	- Repairs: READY. Evidence: `repairs.py` is present and `tests/test_repairs.py` passes.
+	- Translation readiness: READY. Evidence: `translations/en.json` and `strings.json` parse successfully and include config/options/issues surfaces.
+	- Service registration: READY. Evidence: `services.yaml` is present and service tests exist; broader service suite has known unrelated HA response-only drift.
+	- Testing: READY for baseline readiness evidence with known unrelated gaps. Evidence: config-flow and repairs tests pass; readiness subset result documented below.
+	- Documentation: READY for HACS baseline. Evidence: `README.md`, `info.md`, and governance docs exist. Full Platinum-depth documentation remains separately insufficient.
+	- HACS compatibility workflow: READY. Evidence: `.github/workflows/hacs-validate.yml` invokes `hacs/action@main` with category `integration`.
+	- Hassfest workflow: READY. Evidence: `.github/workflows/hassfest.yml` invokes `home-assistant/actions/hassfest@master`.
+	- Versioning: READY for repository evidence. Evidence: manifest includes version `0.1.0`; release/version governance remains managed outside #355 runtime scope.
+	- Quality Scale / Platinum artifact: INSUFFICIENT EVIDENCE. Evidence: no `quality_scale.yaml`; Phase 2 governance states Platinum is aspirational/governance-ready, not certification-ready.
+	- Migration handler: INSUFFICIENT EVIDENCE. Evidence: `ConfigFlow.VERSION = 1`; no `async_migrate_entry` evidence found, and E12 governance identifies migration implementation as future/implementation-stage.
+	- Accessibility verification: INSUFFICIENT EVIDENCE. Evidence: Home Assistant-native patterns are used, but no dedicated accessibility validation artifact was found.
+- Not Ready determinations:
+	- None for HACS baseline requirements supported by repository evidence.
+- Insufficient Evidence determinations:
+	- Quality Scale / Platinum artifact (`quality_scale.yaml`) is not evidenced.
+	- Runtime migration handler (`async_migrate_entry`) is not evidenced.
+	- Dedicated accessibility verification artifact is not evidenced.
+- Evidence-equivalence review:
+	- Config-flow tests previously used obsolete `action_model`, `action_endpoint`, `tts_voice`, and `night_mode_enabled` fields. Current implementation evidence uses `media_provider`, `asset_intelligence_provider`, and audit archive options. The test evidence was updated to current schema rather than changing runtime behavior.
+	- Duplicate-flow evidence is submit-time duplicate rejection, matching current implementation behavior through `async_set_unique_id(DOMAIN)` and `_abort_if_unique_id_configured()`.
+- Validation evidence:
+	- Core JSON readiness artifacts parse successfully: `hacs.json`, `manifest.json`, `translations/en.json`, and `strings.json`.
+	- Architecture guardrails: PASS (`Architecture guardrails validated.`).
+	- Config flow tests: PASS (`2 passed`).
+	- Focused readiness subset (`tests/test_config_flow.py tests/test_diagnostics.py tests/test_repairs.py`): `16 passed, 1 failed`; remaining failure is `test_diagnostics_expose_vocabulary_ambiguity_visibility` asserting recent ambiguity event count, not a HACS baseline readiness requirement.
+	- Initial readiness subset before test-evidence alignment: `14 passed, 3 failed`; failures were stale config-flow test input and missing diagnostics `pytest` import.
+	- Editor diagnostics: no errors in `tests/test_config_flow.py`, `tests/test_diagnostics.py`, or this tracker.
+	- Ruff check over readiness-touched test artifacts reports pre-existing style debt in `tests/test_diagnostics.py` (`293 errors`, primarily E501 line-length); not remediated under #355 evidence scope.
+- Ownership validation: PASS
+	- Concierge ownership unchanged.
+	- Voice Identity ownership unchanged.
+	- Asset Intelligence ownership unchanged.
+	- HTBW governance ownership unchanged.
+- Home Assistant standards confirmation: evidence relies on Home Assistant-native config/options selectors, diagnostics, repairs, translations, services, HACS workflow, and hassfest workflow; no new runtime behavior or UI patterns introduced.
+- Governance drift assessment: no drift identified. Readiness claims are evidence-backed; gaps remain classified as INSUFFICIENT EVIDENCE rather than READY.
+- Implementation assessment: PASS for Issue #355 scoped readiness evidence, with explicit insufficiencies documented for non-baseline/future artifacts.
+
+## Issue #356 Implementation Evidence (2026-07-19)
+
+- Issue: #356 - P3-R5-E12-02 Integration Quality Scale readiness evidence
+- Scope: IQS readiness evidence generation and validation only; no runtime feature implementation authorized.
+- Files changed:
+	- docs/governance/phase-3/release-5-implementation-tracker.md
+- Authority review summary: PASS (ADR -> Contract -> Model -> Existing Implementation -> GitHub Issue)
+- Existing IQS evidence review:
+	- Phase 2 E12 governance states HACS/Platinum readiness governance is complete for implementation planning, but does not claim full Platinum certification.
+	- #355 HACS readiness evidence is PASS and serves as an input baseline, not a substitute for IQS proof.
+	- Repository evidence supports many baseline Home Assistant quality surfaces but does not fully evidence Platinum/IQS completion.
+- Repository artifacts reviewed:
+	- `hacs.json`
+	- `custom_components/concierge/manifest.json`
+	- `custom_components/concierge/services.yaml`
+	- `custom_components/concierge/translations/en.json`
+	- `custom_components/concierge/strings.json`
+	- `custom_components/concierge/config_flow.py`
+	- `custom_components/concierge/diagnostics.py`
+	- `custom_components/concierge/repairs.py`
+	- `.github/workflows/hacs-validate.yml`
+	- `.github/workflows/hassfest.yml`
+	- `.github/workflows/tests.yml`
+	- `README.md`, `info.md`, and Release 5 governance artifacts
+- IQS requirement mapping:
+	- Config Flow: READY. Evidence: `manifest.json` declares `config_flow: true`; `config_flow.py` implements `ConciergeConfigFlow`; config-flow tests pass (`2 passed`).
+	- Options Flow: READY. Evidence: `config_flow.py` implements `ConciergeOptionsFlow` using Home Assistant selectors and archive validation.
+	- Diagnostics: READY for baseline diagnostics structure, with partial runtime evidence. Evidence: `diagnostics.py` exists and diagnostics tests report `8 passed, 1 failed`; the failure is vocabulary ambiguity recent-event count, so complete vocabulary-event diagnostics runtime evidence remains not proven.
+	- Repairs: READY. Evidence: `repairs.py` exists and repairs tests pass as part of `tests/test_config_flow.py tests/test_repairs.py` (`8 passed`).
+	- Translations: READY. Evidence: `translations/en.json` and `strings.json` parse successfully.
+	- Tests: READY for baseline test presence and targeted passing subsets; INSUFFICIENT EVIDENCE for full suite health. Evidence: targeted config-flow/repairs tests pass; broader diagnostics has one failure; broader service/diagnostics suite retains known unrelated failures from #354/#355 evidence.
+	- Documentation: READY for baseline docs. Evidence: `README.md`, `info.md`, and governance docs exist. Full Platinum-depth end-user documentation remains INSUFFICIENT EVIDENCE.
+	- Runtime Stability: INSUFFICIENT EVIDENCE. Evidence: Home Assistant dev restart after #353 was clean, but full IQS stability proof and full passing runtime test suite are not evidenced.
+	- Error Handling: READY for configured surfaces with caveats. Evidence: repairs tests pass and config-flow invalid archive handling exists; full suite evidence remains incomplete.
+	- Explainability: READY for governed Release 5 scope. Evidence: #354 PASS documented diagnostics/explainability consumption and targeted tests.
+	- Accessibility Evidence: INSUFFICIENT EVIDENCE. Evidence: Home Assistant-native patterns are used, but no dedicated accessibility verification artifact was found.
+	- Migration Evidence: INSUFFICIENT EVIDENCE. Evidence: `ConfigFlow.VERSION = 1`; no `async_migrate_entry` evidence found.
+	- Service Validation: INSUFFICIENT EVIDENCE for full IQS. Evidence: `services.yaml` exists and targeted service tests pass for Release 5 slices, but broader service tests retain known response-only service-call drift.
+	- Home Assistant Patterns: READY. Evidence: config/options selectors, diagnostics, repairs, translations, services, HACS, and hassfest workflows use Home Assistant-native patterns.
+	- HACS Compatibility: READY for baseline evidence. Evidence: #355 PASS; `hacs.json`; HACS validation workflow present.
+	- Release Governance Evidence: READY. Evidence: Release 5 tracker documents #351, #352, #353, #354, and #355 PASS evidence and #356 determinations.
+	- Quality Scale / Platinum Artifact: INSUFFICIENT EVIDENCE. Evidence: neither `quality_scale.yaml` nor `custom_components/concierge/quality_scale.yaml` exists.
+- READY determinations:
+	- Config Flow
+	- Options Flow
+	- Baseline diagnostics structure
+	- Repairs
+	- Translations
+	- Baseline tests and targeted validation subsets
+	- Baseline documentation
+	- Release 5 explainability evidence
+	- Home Assistant patterns
+	- HACS compatibility baseline
+	- Release governance evidence
+- NOT READY determinations:
+	- None. Where proof is absent or incomplete, classification remains INSUFFICIENT EVIDENCE rather than NOT READY.
+- INSUFFICIENT EVIDENCE determinations:
+	- Full Platinum/IQS certification readiness.
+	- Quality Scale artifact (`quality_scale.yaml`).
+	- Runtime migration handler (`async_migrate_entry`).
+	- Dedicated accessibility verification artifact.
+	- Full runtime stability proof.
+	- Full service-validation proof for IQS due known response-only service-call drift in broader tests.
+	- Complete vocabulary ambiguity event diagnostics runtime proof due `test_diagnostics_expose_vocabulary_ambiguity_visibility` failure.
+- Evidence-equivalence review:
+	- HACS baseline readiness from #355 is evidence-equivalent for HACS compatibility but not equivalent to full IQS/Platinum certification.
+	- Home Assistant-native config/options/diagnostics/repairs/translations evidence is equivalent for baseline HA-pattern readiness but not for dedicated accessibility verification.
+	- Release 5 #354 explainability diagnostics evidence is equivalent for governed explainability readiness within Release 5 scope, not a claim of all future explainability/IQS coverage.
+- Validation evidence:
+	- Core JSON readiness artifacts parse successfully: `hacs.json`, `manifest.json`, `translations/en.json`, and `strings.json`.
+	- Architecture guardrails: PASS (`Architecture guardrails validated.`).
+	- Config flow and repairs tests: PASS (`8 passed`).
+	- Diagnostics tests: `8 passed, 1 failed`; failure is `test_diagnostics_expose_vocabulary_ambiguity_visibility` asserting recent ambiguity event count.
+	- Current repository evidence check: no `quality_scale.yaml`; no `custom_components/concierge/quality_scale.yaml`; no `async_migrate_entry` in `custom_components/concierge/__init__.py`; HACS/hassfest/tests workflows present.
+- Ownership validation: PASS
+	- Concierge ownership unchanged.
+	- Voice Identity ownership unchanged.
+	- Asset Intelligence ownership unchanged.
+	- HTBW governance ownership unchanged.
+- Home Assistant standards confirmation: evidence relies on Home Assistant-native config/options selectors, diagnostics, repairs, translations, services, HACS workflow, hassfest workflow, and governed release validation; no runtime behavior or UI patterns introduced.
+- Governance drift assessment: no drift identified. IQS readiness is mapped with READY / NOT READY / INSUFFICIENT EVIDENCE only, and no unsupported Platinum readiness claim is made.
+- Implementation assessment: PASS for Issue #356 scoped IQS readiness evidence, with explicit insufficiencies documented for full IQS/Platinum proof.
+
+## Issue #357 Implementation Evidence (2026-07-19)
+
+- Issue: #357 - P3-R5-E12-03 Diagnostics and repairs readiness evidence
+- Scope: diagnostics and repairs readiness evidence generation and validation only; no runtime feature implementation authorized.
+- Files changed:
+	- docs/governance/phase-3/release-5-implementation-tracker.md
+- Authority review summary: PASS (ADR -> Contract -> Model -> Existing Implementation -> GitHub Issue)
+- Existing diagnostics evidence review:
+	- `custom_components/concierge/diagnostics.py` implements the Home Assistant `async_get_config_entry_diagnostics(hass, config_entry)` diagnostics export pattern.
+	- Diagnostics payloads expose supportability summaries, runtime traceability, explainability, provenance references, authority-boundary visibility, and explicit diagnostics non-rights.
+	- Epic 11 diagnostics evidence is complete for #351 attribution/confidence, #352 enrollment/lifecycle, #353 permission/consent/legacy disposition, and #354 diagnostics/explainability consumption.
+	- Diagnostics tests exercise config-state exports, foundation boundary visibility, Voice Identity boundary visibility, execution/routing explainability, vocabulary visibility, and messaging/provenance surfaces.
+- Existing repairs evidence review:
+	- `custom_components/concierge/repairs.py` implements Home Assistant issue-registry based repairs using stable issue IDs, translation keys, sanitized placeholders, persistent non-fixable issue records, and idempotent clear behavior.
+	- `tests/test_repairs.py` validates storage failure mapping, safe clear behavior, reconciliation issue stability, capture-provider sanitization, selected-provider gating, and safe capture-provider clear behavior.
+- Diagnostics requirement mapping:
+	- Diagnostics availability: READY. Evidence: `diagnostics.py` is present and exports through `async_get_config_entry_diagnostics`.
+	- Diagnostics structure: READY. Evidence: diagnostics tests validate broad top-level diagnostics categories and nested boundary visibility structures.
+	- Diagnostics explainability: READY. Evidence: execution envelope refs, routing decision refs, Voice Identity explainability refs, messaging/provenance refs, and governance visibility are exposed in diagnostics.
+	- Diagnostics provenance visibility: READY. Evidence: diagnostics include provenance/source/lineage references across Release 5 and messaging/provenance surfaces.
+	- Diagnostics authority-boundary visibility: READY. Evidence: diagnostics expose authority visibility and non-rights sections that preserve Concierge as bounded consumer/orchestrator.
+	- Diagnostics redaction behavior: READY for tested forbidden-key coverage. Evidence: `tests/test_diagnostics.py` includes `_contains_key` checks for forbidden diagnostic keys.
+	- Diagnostics test coverage: READY for broad baseline coverage, with one known gap. Evidence: `tests/test_diagnostics.py` reports `8 passed, 1 failed`.
+	- Diagnostics runtime validation: INSUFFICIENT EVIDENCE for complete diagnostics runtime validation. Evidence: diagnostics export tests execute, but `test_diagnostics_expose_vocabulary_ambiguity_visibility` fails because `recent_ambiguity_event_count` remains `0`.
+	- Diagnostics export quality: READY for baseline export structure; INSUFFICIENT EVIDENCE for complete vocabulary ambiguity event export quality due the failing event-count assertion.
+- Repairs requirement mapping:
+	- Repairs availability: READY. Evidence: `repairs.py` is present.
+	- Repairs registration: READY. Evidence: repairs use `homeassistant.helpers.issue_registry.async_create_issue` and `async_delete_issue`.
+	- Repairs structure: READY. Evidence: stable issue identifiers, translation keys, severity, persistence, and placeholder handling are implemented.
+	- Repair guidance clarity: READY for implemented repair surfaces. Evidence: repair issue IDs map to storage, capture-provider, cleanup, manifest, and reconciliation failure classes through translation keys/placeholders.
+	- Ownership-boundary preservation: READY. Evidence: repairs create guidance/support issues only; no repair path redefines external authority or performs unauthorized self-healing.
+	- Repair test coverage: READY. Evidence: standalone repairs tests pass (`6 passed`).
+	- Repair runtime validation: READY for issue-registry behavior covered by tests; no live Home Assistant repair UI export was captured under #357.
+	- Repair explainability: READY. Evidence: stable issue IDs, failure-code mapping, sanitized placeholders, and last-occurrence timestamps support explainable repair guidance.
+- READY determinations:
+	- Diagnostics availability.
+	- Diagnostics structure.
+	- Diagnostics explainability.
+	- Diagnostics provenance visibility.
+	- Diagnostics authority-boundary visibility.
+	- Diagnostics redaction behavior for tested forbidden keys.
+	- Baseline diagnostics test coverage.
+	- Baseline diagnostics export structure.
+	- Repairs availability.
+	- Repairs registration.
+	- Repairs structure.
+	- Repair guidance clarity for implemented surfaces.
+	- Repair ownership-boundary preservation.
+	- Repair test coverage.
+	- Repair runtime validation through issue-registry tests.
+	- Repair explainability.
+- NOT READY determinations:
+	- None. Where runtime proof is incomplete, classification remains INSUFFICIENT EVIDENCE rather than NOT READY.
+- INSUFFICIENT EVIDENCE determinations:
+	- Complete diagnostics runtime validation for vocabulary ambiguity event export.
+	- Complete diagnostics export quality for recent vocabulary ambiguity event count.
+	- Live Home Assistant diagnostics download/export capture outside pytest.
+	- Live Home Assistant repair UI registration/export capture outside pytest.
+	- Home Assistant restart/log review specifically for #357. No runtime code changed under #357, so no new restart was performed.
+- Runtime validation evidence:
+	- Diagnostics runtime evidence source: `tests/test_diagnostics.py` calls `async_get_config_entry_diagnostics(hass, setup_integration)` and reviews exported diagnostics payloads.
+	- Diagnostics runtime result: `8 passed, 1 failed`; the failure is `test_diagnostics_expose_vocabulary_ambiguity_visibility`, where `known_config_ambiguity_count >= 1` passes but `recent_ambiguity_event_count >= 1` fails with observed value `0`.
+	- Repairs runtime evidence source: `tests/test_repairs.py` exercises Home Assistant issue-registry create/delete paths and repair issue mappings.
+	- Repairs runtime result: standalone `tests/test_repairs.py` PASS (`6 passed`).
+	- Combined diagnostics/repairs readiness subset: `14 passed, 1 failed`; the single failure is the diagnostics vocabulary ambiguity recent-event count assertion.
+	- No #357 runtime deployment or Home Assistant restart was performed because #357 changed documentation evidence only.
+- Diagnostics export evidence:
+	- Export source: `async_get_config_entry_diagnostics` in `custom_components/concierge/diagnostics.py`.
+	- Export interpretation: baseline diagnostics export structure, authority visibility, provenance/explainability fields, and redaction coverage are evidenced by passing diagnostics tests; complete vocabulary ambiguity event export is not fully proven.
+- Repairs evidence:
+	- Repair source: `custom_components/concierge/repairs.py`.
+	- Repair interpretation: issue-registry creation/deletion, stable issue mapping, sanitized placeholders, and selected-provider gating are evidenced by passing repairs tests.
+- Evidence-equivalence review:
+	- Passing diagnostics export tests are evidence-equivalent for Home Assistant diagnostics pattern readiness, but not equivalent to live UI download validation.
+	- Passing repairs tests are evidence-equivalent for issue-registry behavior readiness, but not equivalent to a captured live Repairs UI screenshot/export.
+	- The vocabulary ambiguity diagnostics failure is materially incomplete evidence for recent ambiguity event export and remains documented rather than reclassified as READY.
+- Validation evidence:
+	- Standalone repairs tests: PASS (`6 passed`).
+	- Combined diagnostics/repairs tests: `14 passed, 1 failed`.
+	- Existing #356 diagnostics evidence: `8 passed, 1 failed` for `tests/test_diagnostics.py`.
+	- Repository evidence check: diagnostics and repairs implementation/test files are present.
+- Ownership validation: PASS
+	- Concierge ownership unchanged.
+	- Voice Identity ownership unchanged.
+	- Asset Intelligence ownership unchanged.
+	- HTBW governance ownership unchanged.
+- Home Assistant standards confirmation: diagnostics use Home Assistant config-entry diagnostics pattern; repairs use Home Assistant issue-registry pattern; no runtime behavior, ownership boundary, UI pattern, or architecture change introduced.
+- Governance drift assessment: no drift identified. Diagnostics and repairs readiness is mapped with READY / NOT READY / INSUFFICIENT EVIDENCE only; missing runtime proof is not claimed as READY.
+- Implementation assessment: PASS for Issue #357 scoped diagnostics and repairs readiness evidence, with explicit insufficiencies documented for complete diagnostics event export and live UI/runtime capture evidence.
+
+## Issue #358 Implementation Evidence (2026-07-19)
+
+- Issue: #358 - P3-R5-E12-04 Translation and accessibility readiness evidence
+- Scope: translation and accessibility readiness evidence generation and validation only; no runtime feature implementation authorized.
+- Files changed:
+	- docs/governance/phase-3/release-5-implementation-tracker.md
+- Authority review summary: PASS (ADR -> Contract -> Model -> Existing Implementation -> GitHub Issue)
+- Governance sources reviewed:
+	- `docs/governance/phase-2/release-5-voice-identity-and-readiness-build-execution-plan.md`
+	- `docs/governance/phase-2/e12-hacs-and-platinum-governed-implementation-readiness.md`
+	- `docs/governance/phase-2/concierge-v2-end-to-end-governed-implementation-validation.md`
+	- `docs/governance/concierge-translation-and-accessibility-planning.md`
+	- `homes_that_behave_well/docs/architecture/hacs-and-platinum-governance-standard.md`
+	- `homes_that_behave_well/docs/architecture/hacs-platinum-contract-compliance-checklist.md`
+- Existing translation evidence review:
+	- `custom_components/concierge/strings.json` exists and contains `config`, `options`, and `issues` sections.
+	- `custom_components/concierge/translations/en.json` exists and contains `config`, `options`, and `issues` sections.
+	- Config flow translations cover the current user-step field labels in the translation artifact, including `name`, `ai_enabled`, `ai_local_first`, `action_provider`, `tts_enabled`, `tts_provider`, `media_provider`, and `asset_intelligence_provider`; `translations/en.json` also includes `night_mode_enabled` while the current schema no longer exposes it.
+	- Options flow translations cover the current options-step field labels for global options and audit archive fields, including archive destination, enabled state, reference excerpts, and retention days.
+	- Repairs translations exist for voice enrollment storage, cleanup, reconciliation, and capture-provider issue keys, with user-facing titles and descriptions.
+	- Repair placeholders use Home Assistant issue-registry `translation_placeholders` and are covered by `tests/test_repairs.py` sanitization/mapping checks.
+	- `custom_components/concierge/services.yaml` contains user-facing service and field names/descriptions, but no `services` section exists in `strings.json` or `translations/en.json`.
+	- Diagnostics output exposes machine-readable keys through `diagnostics.py`; no separate localized diagnostics label inventory or diagnostics translation test evidence was found.
+- Existing accessibility evidence review:
+	- Config and options flows use Home Assistant selectors (`BooleanSelector`, `SelectSelector`, `NumberSelector`) through `config_flow.py`.
+	- Services use Home Assistant service selector definitions in `services.yaml`, including text, object, number, boolean, and entity selectors.
+	- Repairs use Home Assistant issue registry surfaces with plain-language translated titles/descriptions.
+	- Diagnostics are structured, allowlisted, and tested for readability/supportability at the payload-structure level.
+	- Frontend panel markup includes some ARIA labels on removal/reorder controls, but #358 did not perform a full frontend accessibility audit.
+	- No repository evidence was found for screen-reader validation, keyboard-navigation validation, focus-management validation, contrast validation, or a dedicated accessibility validation artifact.
+- Translation requirement mapping:
+	- Translation file existence: READY. Evidence: `strings.json` and `translations/en.json` are present.
+	- Translation JSON syntax/readability: READY from repository file read and editor diagnostics scope; no syntax errors were found while reading translation artifacts.
+	- Config flow translations: READY for current config flow baseline. Evidence: `strings.json` and `translations/en.json` include config user-step title/description/data keys; `tests/test_config_flow.py` validates the config flow path.
+	- Options flow translations: READY for current options flow baseline. Evidence: translation artifacts include options init-step data keys for global and audit archive options; `config_flow.py` implements `ConciergeOptionsFlow` using Home Assistant selectors.
+	- Repairs translations: READY. Evidence: `issues` translations exist for implemented repair issue IDs, and `tests/test_repairs.py` validates repair issue creation with translation placeholders.
+	- Service descriptions: NOT READY for translation inventory completeness. Evidence: `services.yaml` contains user-facing service strings and field descriptions, while `strings.json` and `translations/en.json` do not contain a `services` section.
+	- Diagnostics translations: INSUFFICIENT EVIDENCE. Evidence: diagnostics payload keys are structured and readable for support, but no localized diagnostics label inventory or translation test was found.
+	- Placeholder consistency: READY for repairs placeholders; INSUFFICIENT EVIDENCE for a whole-repo placeholder inventory. Evidence: repairs placeholders are tested, but no general placeholder consistency tool or report was found.
+	- Translation validation tooling: INSUFFICIENT EVIDENCE. Evidence: a hassfest workflow exists, but no dedicated translation inventory/completeness tool or command output was captured for #358.
+	- Translation test coverage: READY for config-flow baseline and repairs placeholder behavior; INSUFFICIENT EVIDENCE for complete translation coverage across services, diagnostics, and all user-facing strings.
+	- Multi-locale coverage: INSUFFICIENT EVIDENCE. Evidence: only `translations/en.json` was found.
+- Accessibility requirement mapping:
+	- Home Assistant-native selector usage: READY. Evidence: config/options flows use Home Assistant selector helpers and services use Home Assistant service selectors.
+	- Config flow accessibility: READY for Home Assistant-native baseline. Evidence: config flow is rendered by HA config-entry form infrastructure using selectors; no custom config UI introduced.
+	- Options flow accessibility: READY for Home Assistant-native baseline. Evidence: options flow uses the same HA selector-backed schema pattern.
+	- Diagnostics readability: READY for structured support payload baseline; INSUFFICIENT EVIDENCE for localized or screen-reader-specific diagnostics presentation. Evidence: diagnostics tests validate allowlisted structure, but no accessibility-specific diagnostics presentation test exists.
+	- Repair readability: READY for implemented repair surfaces. Evidence: repair issues have plain-language translated titles/descriptions and sanitized placeholders.
+	- Service description clarity: READY for English readability in `services.yaml`; NOT READY for translation-readiness completeness because service strings are not represented in translation artifacts.
+	- Localization support: READY for baseline English config/options/issues localization; INSUFFICIENT EVIDENCE beyond English and for services/diagnostics localization.
+	- Screen-reader compatibility evidence: INSUFFICIENT EVIDENCE. Evidence: some ARIA labels exist in the frontend panel, but no screen-reader validation artifact or automated test was found.
+	- Keyboard-navigation evidence: INSUFFICIENT EVIDENCE. Evidence: no keyboard-navigation validation, focus-management test, or documented tab-order review was found.
+	- Accessibility documentation evidence: INSUFFICIENT EVIDENCE. Evidence: governance planning exists, but the planning artifact explicitly does not define implementation accessibility features, screen-reader support, or accessibility testing.
+- READY determinations:
+	- Translation file existence.
+	- Translation artifact readability for existing JSON files.
+	- Config flow translation baseline.
+	- Options flow translation baseline.
+	- Repairs translation baseline.
+	- Repairs placeholder consistency for implemented repair issues.
+	- Config-flow and repairs-related test evidence.
+	- Home Assistant-native selector usage in config/options flows and services.
+	- Config flow accessibility baseline through HA-native flow infrastructure.
+	- Options flow accessibility baseline through HA-native flow infrastructure.
+	- Diagnostics structured readability baseline.
+	- Repair readability for implemented repair surfaces.
+	- English service description clarity in `services.yaml`.
+	- Baseline English localization support for config/options/issues.
+- NOT READY determinations:
+	- Service translation inventory completeness. User-facing service strings exist in `services.yaml`, but no `services` translation section exists in `strings.json` or `translations/en.json`.
+	- Service translation readiness completeness. The service surface remains readable in English but is not evidenced as translation-inventory complete.
+- INSUFFICIENT EVIDENCE determinations:
+	- Diagnostics translation/localization coverage.
+	- Whole-repo placeholder consistency inventory.
+	- Dedicated translation validation tooling/completeness report.
+	- Complete translation test coverage across all user-facing strings.
+	- Multi-locale coverage beyond English.
+	- Full accessibility validation beyond HA-native selector baseline.
+	- Screen-reader compatibility validation.
+	- Keyboard-navigation validation.
+	- Focus-management validation for custom panel interactions.
+	- Contrast/visual accessibility validation.
+	- Accessibility implementation documentation beyond governance planning.
+- Testing evidence:
+	- `tests/test_config_flow.py` remains the evidence source for config-flow baseline behavior.
+	- `tests/test_repairs.py` remains the evidence source for repair issue mapping and translation placeholder sanitization.
+	- `tests/test_diagnostics.py` remains the evidence source for diagnostics structure/readability and forbidden-key checks.
+	- Prior #356/#357 evidence recorded: config flow + repairs subset PASS (`8 passed`); repairs standalone PASS (`6 passed`); diagnostics + repairs subset `14 passed, 1 failed` with known diagnostics vocabulary recent-event count failure.
+	- #358 terminal output capture for new WSL validation was unreliable in the active shell session; no new passing command output is claimed beyond the repository reads, editor diagnostics, and prior recorded test evidence.
+- Evidence-equivalence review:
+	- Config/options flow tests are evidence-equivalent for HA-native form behavior, but not for complete translation inventory coverage.
+	- Repairs placeholder tests are evidence-equivalent for repair issue placeholder safety, but not for whole-repo placeholder consistency.
+	- HA-native selectors are evidence-equivalent for baseline config/options accessibility, but not for screen-reader, keyboard, focus, contrast, or live custom-panel accessibility validation.
+	- English service descriptions are evidence of readability, but materially incomplete for translation-readiness inventory because they are not represented in translation artifacts.
+- Ownership validation: PASS
+	- Concierge ownership unchanged.
+	- Voice Identity ownership unchanged.
+	- Asset Intelligence ownership unchanged.
+	- HTBW governance ownership unchanged.
+- Home Assistant standards confirmation: config/options flows and services use Home Assistant-native selectors; repairs use Home Assistant issue registry translations; no generic config flow, non-native repair behavior, runtime behavior, ownership boundary, or architecture change introduced.
+- Governance drift assessment: no drift identified. Translation and accessibility readiness is mapped with READY / NOT READY / INSUFFICIENT EVIDENCE only, and incomplete service translation inventory/accessibility verification are not reclassified as READY.
+- Implementation assessment: PASS for Issue #358 scoped readiness evidence documentation, with explicit NOT READY findings for service translation inventory completeness and explicit insufficiencies for complete translation/accessibility validation evidence.
+
+## Issue #359 Implementation Evidence (2026-07-19)
+
+- Issue: #359 - P3-R5-E12-05 Config Flow and Options Flow readiness evidence
+- Scope: Config Flow and Options Flow readiness evidence generation and validation only; no runtime feature implementation authorized.
+- Files changed:
+	- docs/governance/phase-3/release-5-implementation-tracker.md
+- Authority review summary: PASS (ADR -> Contract -> Model -> Existing Implementation -> GitHub Issue)
+- Governance sources reviewed:
+	- `docs/governance/phase-2/release-5-voice-identity-and-readiness-build-execution-plan.md`
+	- `docs/governance/phase-2/e12-hacs-and-platinum-governed-implementation-readiness.md`
+	- `docs/governance/phase-2/concierge-v2-end-to-end-governed-implementation-validation.md`
+	- `docs/governance/concierge-config-and-options-flow-readiness-planning.md`
+	- `homes_that_behave_well/docs/architecture/hacs-and-platinum-governance-standard.md`
+	- `homes_that_behave_well/docs/architecture/hacs-platinum-contract-compliance-checklist.md`
+- Existing Config Flow evidence review:
+	- `custom_components/concierge/manifest.json` declares `config_flow: true`.
+	- `custom_components/concierge/config_flow.py` implements `ConciergeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN)` with `async_step_user`.
+	- Config flow uses Home Assistant selector helpers: `BooleanSelector`, `SelectSelector`, and `NumberSelector`.
+	- Config flow discovers installed action, TTS, media, and Asset Intelligence providers from Home Assistant config entries and constrains defaults to available selector options.
+	- Config flow discovers attached archive destination candidates under `/media` and `/share` without blocking the event loop.
+	- Config flow validates archive destination input with `normalize_archive_destination` and `is_valid_archive_destination_uri`.
+	- Config flow rejects duplicate configuration through `async_set_unique_id(DOMAIN)` and `_abort_if_unique_id_configured()`.
+	- Config flow translations exist in `strings.json` and `translations/en.json` for the user step, title/description, field labels, and `already_configured` abort.
+	- `tests/test_config_flow.py` validates initial user flow form creation, create-entry behavior, and duplicate-entry abort behavior.
+- Existing Options Flow evidence review:
+	- `config_flow.py` exposes `async_get_options_flow(config_entry)` and returns `ConciergeOptionsFlow(config_entry)`.
+	- `ConciergeOptionsFlow` implements `async_step_init`.
+	- Options flow uses the same selector-backed schema builder as config flow.
+	- Options flow reads defaults from `config_entry.options` first, then falls back to `config_entry.data`, preserving existing configuration values when options are absent.
+	- Options flow validates archive destination input with the same normalization and validation path as config flow.
+	- Options flow disables archive export and reference excerpt options when the archive destination is not valid.
+	- Options translations exist in `strings.json` and `translations/en.json` for the init step and current options fields.
+	- No dedicated options-flow test was found in `tests/test_config_flow.py` or adjacent tests.
+- Config Flow requirement mapping:
+	- Config Flow existence: READY. Evidence: manifest declares `config_flow: true`; `ConciergeConfigFlow` exists.
+	- Onboarding experience: READY for HA-native form baseline. Evidence: `async_step_user` shows a Home Assistant form using selector-backed schema; `test_user_flow` asserts initial form and create-entry results.
+	- User guidance: READY for baseline translated title/description/field labels. Evidence: config translations exist in `strings.json` and `translations/en.json`.
+	- Error handling: READY for duplicate-entry handling; INSUFFICIENT EVIDENCE for invalid archive destination test coverage. Evidence: duplicate abort is tested; invalid archive destination handling exists in code but no dedicated test was found.
+	- Validation behavior: READY for implementation evidence; INSUFFICIENT EVIDENCE for full automated validation coverage. Evidence: archive destination normalization/validation and retention-day coercion exist; tests do not cover invalid archive destination or retention coercion.
+	- Home Assistant-native patterns: READY. Evidence: uses `config_entries.ConfigFlow`, Home Assistant selectors, config-entry unique ID, and Home Assistant flow result types.
+	- Selector usage: READY. Evidence: Boolean, select dropdown, and number-box selectors are used.
+	- Translation integration: READY for current config baseline. Evidence: user-step translation keys exist.
+	- Duplicate-entry behavior: READY. Evidence: `test_single_instance_abort` passes and asserts `already_configured`.
+	- Reauthentication readiness: INSUFFICIENT EVIDENCE. Evidence: no `async_step_reauth` implementation or test was found; applicability is not proven for the current no-credentials baseline.
+	- Reconfiguration readiness: INSUFFICIENT EVIDENCE for dedicated reconfigure flow. Evidence: options flow exists for settings updates, but no `async_step_reconfigure` implementation or test was found.
+	- Test coverage: READY for create/duplicate baseline; INSUFFICIENT EVIDENCE for error/validation edge coverage. Evidence: `tests/test_config_flow.py` passes (`2 passed`) but covers only initial flow and duplicate abort.
+	- Runtime evidence: INSUFFICIENT EVIDENCE for live Home Assistant onboarding capture. Evidence: pytest flow execution exists; no screenshot/export/manual runtime onboarding evidence was captured for #359.
+- Options Flow requirement mapping:
+	- Options Flow existence: READY. Evidence: `async_get_options_flow` returns `ConciergeOptionsFlow`; `ConciergeOptionsFlow.async_step_init` exists.
+	- User experience: READY for HA-native form baseline. Evidence: options flow shows an init-step Home Assistant form using selector-backed schema and translations.
+	- Update behavior: READY for implementation evidence. Evidence: submitted options return `async_create_entry(title="", data=user_input)` after normalization and validation.
+	- Validation behavior: READY for implementation evidence; INSUFFICIENT EVIDENCE for automated options validation coverage. Evidence: same archive destination validation path exists, but no options-flow test covers it.
+	- Translation integration: READY for current options baseline. Evidence: options init-step translation keys exist in `strings.json` and `translations/en.json`.
+	- Selector usage: READY. Evidence: options flow reuses `_build_global_config_schema` with Home Assistant selectors.
+	- Runtime update experience: INSUFFICIENT EVIDENCE. Evidence: no live Home Assistant options/settings update capture was recorded for #359.
+	- Backward compatibility: READY for baseline data/options fallback behavior. Evidence: defaults read options first and fall back to config-entry data for all current fields.
+	- Test coverage: NOT READY for dedicated options-flow test coverage. Evidence: repository search found no dedicated options-flow test in `tests/test_config_flow.py`; current passing tests exercise config flow only.
+	- Runtime evidence: INSUFFICIENT EVIDENCE beyond code/test-equivalent review. Evidence: no live options flow execution evidence was captured.
+- READY determinations:
+	- Config Flow existence.
+	- Config Flow HA-native onboarding baseline.
+	- Config Flow baseline user guidance.
+	- Config Flow duplicate-entry behavior.
+	- Config Flow Home Assistant-native patterns.
+	- Config Flow selector usage.
+	- Config Flow translation integration for current baseline.
+	- Config Flow create/duplicate test coverage.
+	- Options Flow existence.
+	- Options Flow HA-native user experience baseline.
+	- Options Flow implementation update behavior.
+	- Options Flow translation integration for current baseline.
+	- Options Flow selector usage.
+	- Options Flow baseline backward-compatible defaults from options/data.
+- NOT READY determinations:
+	- Dedicated Options Flow test coverage. Evidence: options flow exists, but no test directly executes `ConciergeOptionsFlow.async_step_init` or an options-flow settings update path.
+- INSUFFICIENT EVIDENCE determinations:
+	- Config Flow invalid archive destination test coverage.
+	- Config Flow retention-day coercion test coverage.
+	- Config Flow live Home Assistant onboarding screenshot/export/manual runtime evidence for #359.
+	- Dedicated Config Flow reauthentication readiness.
+	- Dedicated Config Flow reconfiguration readiness.
+	- Options Flow automated validation coverage.
+	- Options Flow live Home Assistant settings update screenshot/export/manual runtime evidence for #359.
+	- Options Flow runtime evidence beyond implementation review.
+- Runtime validation evidence:
+	- Automated config-flow execution evidence: `tests/test_config_flow.py` ran under WSL Ubuntu with Python 3.12.13 and passed (`2 passed`).
+	- Runtime onboarding evidence: INSUFFICIENT EVIDENCE. No live Home Assistant onboarding screenshot/export was captured for #359.
+	- Runtime options update evidence: INSUFFICIENT EVIDENCE. No live Home Assistant settings/options update screenshot/export was captured for #359.
+	- Error-handling runtime evidence: READY for duplicate-entry pytest path; INSUFFICIENT EVIDENCE for invalid archive destination live/runtime path.
+- Testing evidence:
+	- Command executed: `wsl -d Ubuntu -- /home/tomtom/.venvs/concierge312/bin/python -m pytest -q /mnt/r/HomesPlatformRepos/concierge/tests/test_config_flow.py`
+	- Result: PASS (`2 passed`).
+	- Warnings: pytest cache warnings due inability to write `.pytest_cache` under `/mnt/r/HomesPlatformRepos/concierge`; not a test failure.
+	- First attempted nested WSL command was misparsed by PowerShell and failed before running pytest; this is not counted as readiness evidence.
+	- No skipped tests were reported in the successful config-flow run.
+	- Known unrelated failures remain documented in #357/#358 for diagnostics vocabulary recent-event coverage and broader suite drift; not changed under #359.
+- Evidence-equivalence review:
+	- Passing config-flow pytest evidence is equivalent to HA flow-manager execution for initial form/create-entry and duplicate-abort behavior, but not equivalent to live UI screenshot evidence.
+	- Options Flow implementation evidence is sufficient for existence, selector usage, translation integration, update behavior, and options/data fallback mapping, but not equivalent to dedicated options-flow automated test coverage.
+	- Archive destination validation code evidence is sufficient to identify implemented validation behavior, but not equivalent to validation test/runtime evidence.
+	- Options flow fallback from `config_entry.options` to `config_entry.data` is evidence-equivalent for baseline backward compatibility, but not for upgrade/migration handler readiness.
+- Ownership validation: PASS
+	- Concierge ownership unchanged.
+	- Voice Identity ownership unchanged.
+	- Asset Intelligence ownership unchanged.
+	- HTBW governance ownership unchanged.
+- Home Assistant standards confirmation: config and options flows use Home Assistant config-entry flow patterns, selectors, translations, unique IDs, and flow result types; no generic form system, non-native UI behavior, runtime behavior, ownership boundary, or architecture change introduced.
+- Governance drift assessment: no drift identified. Config Flow and Options Flow readiness is mapped with READY / NOT READY / INSUFFICIENT EVIDENCE only, and missing options-flow test/runtime evidence is not claimed as READY.
+- Implementation assessment: PASS for Issue #359 scoped readiness evidence documentation, with explicit NOT READY finding for dedicated Options Flow test coverage and explicit insufficiencies for live runtime evidence and untested validation/reconfigure/reauth paths.
+
+## Issue #360 Implementation Evidence (2026-07-19)
+
+- Issue: #360 - P3-R5-E12-06 Testing, migration, release, packaging, and documentation readiness evidence
+- Scope: testing, migration, release, packaging, and documentation readiness evidence generation and validation only; no runtime feature implementation authorized.
+- Files changed:
+	- docs/governance/phase-3/release-5-implementation-tracker.md
+- Authority review summary: PASS (ADR -> Contract -> Model -> Existing Implementation -> GitHub Issue)
+- Governance sources reviewed:
+	- `docs/governance/phase-2/release-5-voice-identity-and-readiness-build-execution-plan.md`
+	- `docs/governance/phase-2/e12-hacs-and-platinum-governed-implementation-readiness.md`
+	- `docs/governance/phase-2/concierge-v2-end-to-end-governed-implementation-validation.md`
+	- `homes_that_behave_well/docs/architecture/hacs-and-platinum-governance-standard.md`
+	- `homes_that_behave_well/docs/architecture/hacs-platinum-contract-compliance-checklist.md`
+- Testing readiness evidence review:
+	- Test suite exists under `tests/` with config flow, diagnostics, repairs, services, foundation, init, panel, and enrollment coverage.
+	- `pyproject.toml` declares pytest testpaths and ruff configuration.
+	- `requirements-dev.txt` declares pytest, pytest-homeassistant-custom-component, ruff, and mypy.
+	- `.github/workflows/tests.yml` runs architecture guardrails and `pytest -q` on PR/push to main.
+	- Executed architecture guardrails: PASS (`Architecture guardrails validated.`).
+	- Executed focused config-flow/repairs subset: PASS (`8 passed`).
+	- Executed diagnostics/repairs subset: `14 passed, 1 failed`; failure is the known diagnostics vocabulary ambiguity recent-event count assertion.
+	- Broad pytest suite execution was attempted and produced real failures before a clean final summary was captured. Observed failure classes include enrollment capture-provider availability failures, service tests failing on immutable `mappingproxy` config-entry options assignment, response-only service calls requiring `return_response=True`, and the test-environment panel static-path error where `hass.http` is `None`.
+- Migration readiness evidence review:
+	- `custom_components/concierge/config_flow.py` declares `VERSION = 1`.
+	- Repository search found no `async_migrate_entry` implementation in `custom_components/concierge`.
+	- Repository search found no migration test coverage for config-entry migration.
+	- `docs/governance/concierge-migration-and-upgradeability-strategy.md` exists as governance/planning evidence, but it explicitly does not implement migration logic.
+	- Enrollment/storage schema version constants exist (`STORAGE_VERSION`, `VOICE_ENROLLMENT_MANIFEST_SCHEMA_VERSION`), but those are not config-entry migration handler evidence.
+- Release readiness evidence review:
+	- `custom_components/concierge/manifest.json` contains version `0.1.0` and release-relevant metadata (`documentation`, `issue_tracker`, `integration_type`, `iot_class`, `loggers`, empty `requirements`).
+	- `docs/governance/concierge-release-readiness-and-versioning-strategy.md` exists as governance/planning evidence.
+	- Release 5 tracker records #351 through #359 implementation/readiness evidence.
+	- No dedicated CHANGELOG or release-notes artifact was found for the current repository release.
+	- No release artifact publication evidence, tag evidence, or post-release validation evidence was produced under #360.
+- Packaging readiness evidence review:
+	- `hacs.json` exists and declares `content_in_root: false`, country `US`, Home Assistant minimum `2024.12.0`, and README rendering.
+	- `custom_components/concierge/manifest.json` exists with Home Assistant custom integration metadata and `config_flow: true`.
+	- `custom_components/concierge/` integration layout exists, including brand assets.
+	- `.github/workflows/hacs-validate.yml` invokes `hacs/action@main` with category `integration`.
+	- `.github/workflows/hassfest.yml` invokes `home-assistant/actions/hassfest@master`.
+	- `scripts/deploy-to-ha.ps1` exists and mirrors the integration to `H:\custom_components\concierge`, excluding tests/docs/cache artifacts.
+	- No `quality_scale.yaml` file was found in the repo.
+	- No built release package or HACS release artifact output was produced under #360.
+- Documentation readiness evidence review:
+	- `README.md` exists and documents Concierge positioning, current V1 release status, platform boundaries, architecture concepts, and HACS/Hassfest readiness goals.
+	- `info.md` exists with HACS-facing summary text.
+	- Governance docs exist for diagnostics, repairs, translation/accessibility, config/options, testing/validation, migration/upgradeability, release/versioning, HACS readiness, Platinum readiness, and Release 5 tracking.
+	- `services.yaml` provides Home Assistant service descriptions.
+	- No dedicated end-user installation walkthrough, troubleshooting matrix, CHANGELOG, release notes, or complete quality-scale documentation artifact was found.
+- Requirement mapping:
+	- Unit tests: READY for test presence and targeted executable evidence. Evidence: pytest suite and focused subset execution.
+	- Integration tests: READY for test presence; NOT READY for full-suite health. Evidence: broad pytest run produced failures before clean summary.
+	- Regression tests: INSUFFICIENT EVIDENCE as a distinct regression suite/report. Evidence: tests exist, but no dedicated regression report or full passing suite evidence.
+	- Diagnostics tests: READY for baseline structure; NOT READY for complete diagnostics test health. Evidence: diagnostics/repairs subset has one failing diagnostics assertion.
+	- Repair tests: READY. Evidence: repairs pass in focused subsets.
+	- Config flow tests: READY. Evidence: config-flow tests pass in focused subsets.
+	- Options flow tests: NOT READY. Evidence: #359 found no dedicated options-flow test coverage.
+	- Migration tests: NOT READY. Evidence: no migration handler or migration tests found.
+	- CI workflow validation: READY for workflow presence; INSUFFICIENT EVIDENCE for current successful CI run results. Evidence: workflows exist, but no Actions run output captured under #360.
+	- Runtime validation evidence: INSUFFICIENT EVIDENCE for #360-specific runtime deploy/restart/log review. Evidence: no deploy, restart, migration execution, or HA log review performed because #360 changed docs only.
+	- Version upgrade handling: NOT READY. Evidence: `VERSION = 1` exists, but no `async_migrate_entry` handler.
+	- `async_migrate_entry` existence: NOT READY. Evidence: repository search found none.
+	- Migration documentation: READY for governance planning; INSUFFICIENT EVIDENCE for implementation/runbook depth. Evidence: strategy doc exists but no execution artifact.
+	- Runtime migration evidence: INSUFFICIENT EVIDENCE. Evidence: no migration execution captured.
+	- Backward compatibility validation: INSUFFICIENT EVIDENCE for migrations; READY only for options-flow options/data fallback documented under #359.
+	- Versioning: READY for manifest version presence; INSUFFICIENT EVIDENCE for release versioning execution. Evidence: manifest has `0.1.0`, but no release/tag evidence.
+	- Release process: READY for governance strategy; INSUFFICIENT EVIDENCE for executed release process.
+	- Governance signoff evidence: READY for Release 5 tracker evidence through #359 and this #360 update.
+	- Deployment documentation/script: READY for deploy script presence; INSUFFICIENT EVIDENCE for #360 deploy execution. Evidence: `scripts/deploy-to-ha.ps1` exists, but not run under #360.
+	- Validation documentation: READY for governance/testing strategy; NOT READY for full passing validation evidence.
+	- Release artifact completeness: INSUFFICIENT EVIDENCE. Evidence: no built/published release artifact captured.
+	- Manifest completeness: READY for baseline custom integration metadata.
+	- Packaging structure: READY. Evidence: integration layout, HACS metadata, brand assets, README/info docs.
+	- HACS packaging expectations: READY for baseline repository evidence and workflows; INSUFFICIENT EVIDENCE for latest successful HACS workflow run.
+	- Quality scale artifacts: NOT READY. Evidence: no `quality_scale.yaml` found.
+	- Workflow validation: READY for workflow presence; INSUFFICIENT EVIDENCE for successful remote workflow execution.
+	- Installation guidance: INSUFFICIENT EVIDENCE for complete end-user installation walkthrough. Evidence: README/info exist, but installation steps are not evidenced as complete.
+	- Configuration guidance: INSUFFICIENT EVIDENCE for complete end-user configuration guide. Evidence: config/options governance and translations exist, but full user guidance is not proven.
+	- Diagnostics documentation: READY for governance documentation; INSUFFICIENT EVIDENCE for end-user support documentation depth.
+	- Repairs documentation: READY for governance documentation; INSUFFICIENT EVIDENCE for end-user repair walkthrough depth.
+	- Service documentation: READY for Home Assistant service descriptions in `services.yaml`; INSUFFICIENT EVIDENCE for complete user docs around each service.
+	- Governance documentation: READY. Evidence: Phase 2 and Phase 3 governance docs exist and were consumed.
+	- Release documentation: INSUFFICIENT EVIDENCE. Evidence: release/versioning strategy exists, but no changelog/release notes/current release artifact docs found.
+- READY determinations:
+	- Test suite presence.
+	- Pytest/ruff/dev tooling declaration.
+	- CI workflow presence for tests, hassfest, and HACS validation.
+	- Architecture guardrail validation.
+	- Focused config-flow and repairs test subset.
+	- Repairs tests.
+	- Config-flow tests.
+	- Migration governance strategy documentation.
+	- Manifest baseline metadata and version field.
+	- Release governance strategy documentation.
+	- HACS metadata baseline.
+	- Home Assistant integration packaging layout.
+	- HACS and hassfest workflow definitions.
+	- Deploy script presence.
+	- README/info baseline documentation.
+	- Governance documentation set.
+	- Home Assistant service descriptions in `services.yaml`.
+- NOT READY determinations:
+	- Full-suite test health.
+	- Complete diagnostics test health.
+	- Dedicated Options Flow test coverage.
+	- Migration handler readiness (`async_migrate_entry` absent).
+	- Migration test coverage.
+	- Quality Scale artifact readiness (`quality_scale.yaml` absent).
+	- Full validation readiness as a release gate because broad pytest did not pass.
+- INSUFFICIENT EVIDENCE determinations:
+	- Dedicated regression report/suite evidence.
+	- Current successful remote CI run evidence.
+	- Runtime deploy evidence for #360.
+	- Home Assistant restart/log review evidence for #360.
+	- Runtime migration execution evidence.
+	- Release tag/publication evidence.
+	- Built release package evidence.
+	- Latest successful HACS/hassfest workflow run output.
+	- Complete installation guide proof.
+	- Complete configuration guide proof.
+	- End-user diagnostics/repairs/service documentation depth.
+	- Current changelog/release notes evidence.
+- Runtime validation evidence:
+	- No #360 runtime deploy was performed because #360 changed documentation evidence only.
+	- No #360 Home Assistant restart/log review was performed.
+	- No migration execution evidence was available.
+	- Prior Release 5 runtime evidence from earlier issues remains baseline context but is not reclassified as #360 runtime release evidence.
+- Testing evidence:
+	- Architecture guardrails command: `wsl -d Ubuntu -- /home/tomtom/.venvs/concierge312/bin/python /mnt/r/HomesPlatformRepos/concierge/scripts/validate_architecture_guardrails.py` -> PASS (`Architecture guardrails validated.`).
+	- Config flow + repairs command: `wsl -d Ubuntu -- /home/tomtom/.venvs/concierge312/bin/python -m pytest -q /mnt/r/HomesPlatformRepos/concierge/tests/test_config_flow.py /mnt/r/HomesPlatformRepos/concierge/tests/test_repairs.py` -> PASS (`8 passed`).
+	- Diagnostics + repairs command: `wsl -d Ubuntu -- /home/tomtom/.venvs/concierge312/bin/python -m pytest -q /mnt/r/HomesPlatformRepos/concierge/tests/test_diagnostics.py /mnt/r/HomesPlatformRepos/concierge/tests/test_repairs.py` -> `14 passed, 1 failed`; failing test is `tests/test_diagnostics.py::test_diagnostics_expose_vocabulary_ambiguity_visibility`, where `recent_ambiguity_event_count` remains `0`.
+	- Broad pytest command attempted: `wsl -d Ubuntu -- /home/tomtom/.venvs/concierge312/bin/python -m pytest -q /mnt/r/HomesPlatformRepos/concierge/tests`; observed failures include enrollment capture-provider unavailable paths, immutable `mappingproxy` options mutation in service tests, response-only service calls missing `return_response=True`, and test-environment panel static-path registration failure where `hass.http` is `None`.
+	- Pytest warnings: cache writes under `/mnt/r/HomesPlatformRepos/concierge/.pytest_cache` fail due permissions; warnings are not counted as test failures.
+- Evidence-equivalence review:
+	- Focused passing subsets are evidence-equivalent for their scoped surfaces only, not for full release test readiness.
+	- Workflow file presence is evidence-equivalent for CI wiring, not for successful latest CI execution.
+	- Manifest/HACS metadata and layout are evidence-equivalent for baseline packaging readiness, not for a built or published release artifact.
+	- Migration strategy docs are evidence-equivalent for governance planning, not for executable migration readiness.
+	- README/info/governance docs are evidence-equivalent for baseline documentation presence, not for complete quality-scale user documentation depth.
+- Ownership validation: PASS
+	- Concierge ownership unchanged.
+	- Voice Identity ownership unchanged.
+	- Asset Intelligence ownership unchanged.
+	- HTBW governance ownership unchanged.
+- Home Assistant standards confirmation: evidence relies on Home Assistant-native integration layout, manifest/HACS metadata, config/options flows, diagnostics, repairs, translations, services, HACS/hassfest workflows, and pytest-homeassistant-custom-component testing patterns; no runtime behavior, UI pattern, ownership boundary, or architecture change introduced.
+- Governance drift assessment: no drift identified. Testing, migration, release, packaging, and documentation readiness is mapped with READY / NOT READY / INSUFFICIENT EVIDENCE only; failed/missing evidence is not claimed as READY.
+- Implementation assessment: PASS for Issue #360 scoped readiness evidence documentation, with explicit NOT READY findings for full-suite health, migration handler/tests, options-flow tests, diagnostics full health, quality-scale artifact readiness, and full validation readiness.
+
+## Issue #361 Release 5 Validation Evidence (2026-07-19)
+
+- Issue: #361 - P3-R5-VAL-01 Release 5 governed implementation validation
+- Scope: Release 5 governed implementation validation only; no feature implementation, readiness remediation, or runtime behavior change authorized.
+- Files changed:
+	- docs/governance/phase-3/release-5-implementation-tracker.md
+- Authority review summary: PASS (ADR -> Contract -> Model -> Existing Implementation -> GitHub Issue)
+- Governing artifacts reviewed:
+	- `docs/governance/phase-2/release-5-voice-identity-and-readiness-build-execution-plan.md`
+	- `docs/governance/phase-2/e11-voice-identity-integration-governed-implementation-readiness.md`
+	- `docs/governance/phase-2/e12-hacs-and-platinum-governed-implementation-readiness.md`
+	- `docs/governance/phase-2/concierge-v2-end-to-end-governed-implementation-validation.md`
+	- `docs/governance/phase-3/release-5-implementation-tracker.md`
+	- `docs/governance/phase-3/phase-3-governed-implementation-tracker.md`
+	- `homes_that_behave_well/docs/architecture/hacs-and-platinum-governance-standard.md`
+	- `homes_that_behave_well/docs/architecture/hacs-platinum-contract-compliance-checklist.md`
+	- `homes_that_behave_well/docs/architecture/adr-voice-identity-platform-service.md`
+	- `homes_that_behave_well/docs/architecture/adr-voice-profile-enrollment-architecture.md`
+	- `homes_that_behave_well/docs/architecture/adr-voice-enrollment-phase0-complete.md`
+	- Voice Identity/person/service/provenance contracts and voice/person/enrollment/provenance models in `homes_that_behave_well/docs/contracts` and `homes_that_behave_well/docs/models`.
+- Release 5 scope review:
+	- Validated Epic 11 issues #351 through #354 for Voice Identity consumption boundaries.
+	- Validated Epic 12 issues #355 through #360 for Home Assistant readiness evidence.
+	- No Release 5 validation step authorized runtime remediation, roadmap expansion, architecture invention, or ownership change.
+	- Release 5 validation treats GitHub issues as execution inputs only.
+- Epic 11 validation summary: PASS
+	- #351 attribution/confidence: PASS. Concierge consumes Voice Identity attribution and confidence outputs as bounded inputs; Voice Identity remains attribution/confidence authority.
+	- #352 enrollment/lifecycle: PASS. Concierge consumes enrollment and lifecycle state only; Voice Identity remains enrollment/lifecycle authority.
+	- #353 permission/legacy disposition: PASS. Concierge consumes permission and legacy disposition outcomes only; Concierge does not grant/revoke permissions, infer consent, migrate legacy identity data, dispose legacy identity data, or determine legacy disposition.
+	- #354 diagnostics/explainability/provenance: PASS. Concierge consumes diagnostics, explainability, and provenance references only; Concierge does not generate Voice Identity diagnostics authority, explainability authority, provenance authority, repair hints, readiness, or identity state.
+	- Epic 11 principle validation: PASS. Voice Identity remains authority; Concierge remains bounded consumer/orchestrator/explainability surface.
+- Epic 12 validation summary: PASS as readiness-evidence validation, with gaps preserved
+	- #355 HACS readiness evidence: PASS. HACS baseline evidence and gaps are documented; missing quality-scale, migration, and accessibility proof remain classified as insufficient where applicable.
+	- #356 IQS readiness evidence: PASS. IQS/Platinum readiness was not overstated; full Platinum/IQS proof, quality-scale artifact, migration handler, accessibility verification, runtime stability, and service validation gaps remain documented.
+	- #357 diagnostics/repairs readiness evidence: PASS. Diagnostics and repairs readiness evidence is documented; vocabulary ambiguity recent-event export and live diagnostics/repairs UI captures remain insufficient.
+	- #358 translation/accessibility readiness evidence: PASS. Baseline translations/accessibility evidence is documented; service translation inventory is NOT READY, and diagnostics localization/accessibility validation gaps remain insufficient.
+	- #359 config/options flow readiness evidence: PASS. Config/options evidence is documented; dedicated Options Flow test coverage is NOT READY, and live options runtime evidence remains insufficient.
+	- #360 testing/migration/release/packaging/documentation readiness evidence: PASS. Evidence is documented; full-suite health, migration handler/tests, options-flow tests, diagnostics full health, quality-scale artifact readiness, and full validation readiness are NOT READY.
+- Issue-by-issue validation summary:
+	- #351: PASS. Durable tracker evidence exists; focused Voice Identity service regression remains covered by `test_services.py -k voice_identity`.
+	- #352: PASS. Durable tracker evidence exists; enrollment/lifecycle consumption and diagnostics visibility remain boundary-preserving.
+	- #353: PASS. Durable tracker evidence exists; permission and legacy disposition non-rights remain explicit.
+	- #354: PASS. Durable tracker evidence exists; diagnostics/explainability/provenance consumption remains consumption-only.
+	- #355: PASS. Durable HACS evidence exists; no unsupported HACS/Platinum claim introduced.
+	- #356: PASS. Durable IQS evidence exists; Platinum/IQS gaps remain explicit.
+	- #357: PASS. Durable diagnostics/repairs evidence exists; known diagnostics runtime gap remains explicit.
+	- #358: PASS. Durable translation/accessibility evidence exists; NOT READY and insufficient evidence findings remain explicit.
+	- #359: PASS. Durable config/options evidence exists; NOT READY Options Flow test coverage remains explicit.
+	- #360: PASS. Durable testing/migration/release/packaging/docs evidence exists; release-blocking evidence gaps remain explicit.
+- Remaining readiness gaps preserved:
+	- `quality_scale.yaml` readiness.
+	- `async_migrate_entry` readiness.
+	- Migration test coverage.
+	- Dedicated Options Flow test coverage.
+	- Full-suite health.
+	- Complete diagnostics test health.
+	- Service translation inventory completeness.
+	- Diagnostics localization evidence.
+	- Accessibility verification artifacts.
+	- Full runtime stability proof.
+	- Full service validation proof.
+	- Vocabulary ambiguity runtime diagnostics proof.
+	- Current successful remote CI/HACS/hassfest run evidence.
+	- Release tag/publication evidence.
+	- Built artifact evidence.
+	- Changelog/release notes evidence.
+	- Post-release validation evidence.
+	- Installation/configuration/troubleshooting documentation depth.
+- Testing evidence:
+	- Architecture guardrails command: `wsl -d Ubuntu -- /home/tomtom/.venvs/concierge312/bin/python /mnt/r/HomesPlatformRepos/concierge/scripts/validate_architecture_guardrails.py` -> PASS (`Architecture guardrails validated.`).
+	- Epic 11 service boundary command: `wsl -d Ubuntu -- /home/tomtom/.venvs/concierge312/bin/python -m pytest -q /mnt/r/HomesPlatformRepos/concierge/tests/test_services.py -k voice_identity` -> PASS (`7 passed, 60 deselected`).
+	- Epic 11 diagnostics boundary command: `wsl -d Ubuntu -- /home/tomtom/.venvs/concierge312/bin/python -m pytest -q /mnt/r/HomesPlatformRepos/concierge/tests/test_diagnostics.py -k voice_identity` -> PASS (`3 passed, 6 deselected`).
+	- Epic 12 config/repairs command: `wsl -d Ubuntu -- /home/tomtom/.venvs/concierge312/bin/python -m pytest -q /mnt/r/HomesPlatformRepos/concierge/tests/test_config_flow.py /mnt/r/HomesPlatformRepos/concierge/tests/test_repairs.py` -> PASS (`8 passed`).
+	- Epic 12 diagnostics/repairs command: `wsl -d Ubuntu -- /home/tomtom/.venvs/concierge312/bin/python -m pytest -q /mnt/r/HomesPlatformRepos/concierge/tests/test_diagnostics.py /mnt/r/HomesPlatformRepos/concierge/tests/test_repairs.py` -> `14 passed, 1 failed`; failing test is `tests/test_diagnostics.py::test_diagnostics_expose_vocabulary_ambiguity_visibility`, where `recent_ambiguity_event_count` remains `0`.
+	- Prior #360 broad pytest evidence remains NOT READY for full-suite health, with observed failures documented under #360.
+	- Pytest cache write warnings under `/mnt/r/HomesPlatformRepos/concierge/.pytest_cache` remain non-failing environment warnings.
+- Runtime validation evidence:
+	- #353 post-deploy Home Assistant restart/log evidence remains the available Release 5 runtime baseline for runtime code changes.
+	- #354 runtime implementation was deployed to HA dev under #354 evidence.
+	- #355 through #361 are readiness/validation documentation evidence and did not require HA dev deploy or restart.
+	- No #361 runtime deployment, restart, diagnostics export capture, repair UI capture, release publication, or migration execution was performed.
+- Governance validation: PASS
+	- Readiness gaps are explicitly documented and not converted into false PASS claims.
+	- Release 5 does not claim Platinum readiness, full IQS certification, full release readiness, or full public-quality completion where evidence is incomplete.
+	- Remaining gaps are candidates for future governed issues, not hidden Release 5 closure assumptions.
+- Ownership boundary assessment: PASS
+	- Concierge remains responsible for orchestration, consumption, Home Assistant integration surfaces, diagnostics exposure, and explainability exposure.
+	- Voice Identity remains authoritative for attribution, confidence, enrollment, lifecycle, permission semantics, consent semantics, diagnostics generation, explainability generation, provenance generation, and repair/readiness semantics where Voice Identity owns them.
+	- Asset Intelligence remains out of Release 5 scope and ownership unchanged.
+	- HTBW governance remains authoritative for architecture, contracts, models, and governance artifacts.
+- Home Assistant standards assessment: PASS
+	- Release 5 implementation and readiness evidence uses Home Assistant-native service, config flow, options flow, selector, diagnostics, repairs, translation, HACS, hassfest, and pytest-homeassistant-custom-component patterns.
+	- No generic config flow, non-native repair behavior, custom architecture authority, or roadmap expansion was introduced under Release 5 validation.
+- Evidence-equivalence review:
+	- Focused Epic 11 service/diagnostics tests are equivalent for validating Voice Identity consumption boundaries, not for claiming full-suite health.
+	- Focused Epic 12 readiness tests are equivalent for config-flow/repairs and baseline diagnostics readiness surfaces, not for claiming complete diagnostics event export quality.
+	- Tracker evidence is equivalent for governance closure evidence, not for live runtime screenshots, remote CI success, release publication, or migration execution.
+	- Existing implementation evidence for options flow, migration strategy, and release strategy is not equivalent to dedicated options tests, migration handler/tests, or release artifacts; those gaps remain documented.
+- PASS/FAIL recommendation: PASS for Issue #361 Release 5 governed implementation validation.
+	- Epic 11 validation is complete and boundary-preserving.
+	- Epic 12 validation is complete as evidence-backed readiness validation with explicit NOT READY and INSUFFICIENT EVIDENCE findings.
+	- #351 through #360 have durable tracker evidence.
+	- No ownership drift, architecture drift, roadmap expansion, or unsupported readiness claim was identified.
+	- Remaining gaps are preserved as future governed work candidates and are not closure assumptions.

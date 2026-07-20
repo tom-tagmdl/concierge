@@ -2181,6 +2181,825 @@ def _select_signal_entries(state) -> list[dict[str, Any]]:
     return selected
 
 
+def _extract_voice_identity_identity_context(raw_context: Any) -> dict[str, Any] | None:
+    """Return a normalized Voice Identity identity-context payload when present."""
+    if not isinstance(raw_context, dict):
+        return None
+
+    candidates: list[Any] = [
+        raw_context.get("voice_identity_identity_context"),
+        raw_context.get("identity_context"),
+    ]
+    candidates.append(raw_context)
+
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        source = str(candidate.get("source", "") or "").strip().lower()
+        has_shape = any(
+            key in candidate
+            for key in (
+                "state",
+                "person_id",
+                "voice_profile_id",
+                "confidence",
+                "confidence_band",
+                "reason_code",
+            )
+        )
+        if has_shape and (not source or source == "voice_identity"):
+            return {
+                "state": str(candidate.get("state", "") or "").strip().lower(),
+                "person_id": str(candidate.get("person_id", "") or "").strip() or None,
+                "voice_profile_id": str(candidate.get("voice_profile_id", "") or "").strip() or None,
+                "confidence": candidate.get("confidence"),
+                "confidence_band": str(candidate.get("confidence_band", "") or "").strip().lower() or None,
+                "reason_code": str(candidate.get("reason_code", "") or "").strip().lower() or "unknown",
+                "source": "voice_identity",
+            }
+
+    return None
+
+
+def _extract_voice_identity_enrollment_lifecycle_context(raw_context: Any) -> dict[str, Any] | None:
+    """Return a normalized Voice Identity enrollment/lifecycle payload when present."""
+    if not isinstance(raw_context, dict):
+        return None
+
+    candidates: list[Any] = [
+        raw_context.get("voice_identity_enrollment_lifecycle_context"),
+        raw_context.get("voice_identity_enrollment_context"),
+        raw_context.get("enrollment_lifecycle_context"),
+    ]
+    identity_context = raw_context.get("identity_context")
+    if isinstance(identity_context, dict):
+        candidates.append(identity_context)
+    candidates.append(raw_context)
+
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        source = str(candidate.get("source", "") or "").strip().lower()
+        has_shape = any(
+            key in candidate
+            for key in (
+                "enrollment_state",
+                "enrollment_readiness",
+                "enrollment_lifecycle_state",
+                "lifecycle_state",
+                "voice_profile_lifecycle_state",
+                "identity_lifecycle_state",
+                "speaker_embedding_id",
+            )
+        )
+        if has_shape and (not source or source == "voice_identity"):
+            lifecycle_state = str(
+                candidate.get("enrollment_lifecycle_state")
+                or candidate.get("lifecycle_state")
+                or ""
+            ).strip().lower()
+            return {
+                "enrollment_state": str(candidate.get("enrollment_state", "") or "").strip().lower() or None,
+                "enrollment_readiness": str(candidate.get("enrollment_readiness", "") or "").strip().lower() or None,
+                "enrollment_lifecycle_state": lifecycle_state or None,
+                "voice_profile_lifecycle_state": str(candidate.get("voice_profile_lifecycle_state", "") or "").strip().lower() or None,
+                "identity_lifecycle_state": str(candidate.get("identity_lifecycle_state", "") or "").strip().lower() or None,
+                "voice_profile_id": str(candidate.get("voice_profile_id", "") or "").strip() or None,
+                "speaker_embedding_id": str(candidate.get("speaker_embedding_id", "") or "").strip() or None,
+                "reason_code": str(candidate.get("reason_code", "") or "").strip().lower() or "unknown",
+                "source": "voice_identity",
+            }
+
+    return None
+
+
+def _extract_voice_identity_permission_context(raw_context: Any) -> dict[str, Any] | None:
+    """Return a normalized Voice Identity permission/consent payload when present."""
+    if not isinstance(raw_context, dict):
+        return None
+
+    candidates: list[Any] = [
+        raw_context.get("voice_identity_permission_context"),
+        raw_context.get("permission_context"),
+        raw_context.get("consent_context"),
+    ]
+    identity_context = raw_context.get("identity_context")
+    if isinstance(identity_context, dict):
+        candidates.append(identity_context)
+    candidates.append(raw_context)
+
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        source = str(candidate.get("source", "") or "").strip().lower()
+        has_shape = any(
+            key in candidate
+            for key in (
+                "permission_state",
+                "permission_outcome",
+                "permission_reason_code",
+                "consent_state",
+                "consent_outcome",
+                "eligibility_state",
+                "gating_reason",
+            )
+        )
+        if has_shape and (not source or source == "voice_identity"):
+            return {
+                "permission_state": str(candidate.get("permission_state", "") or "").strip().lower() or None,
+                "permission_outcome": str(candidate.get("permission_outcome", "") or "").strip().lower() or None,
+                "consent_state": str(candidate.get("consent_state", "") or "").strip().lower() or None,
+                "consent_outcome": str(candidate.get("consent_outcome", "") or "").strip().lower() or None,
+                "eligibility_state": str(candidate.get("eligibility_state", "") or "").strip().lower() or None,
+                "gating_reason": str(candidate.get("gating_reason", "") or "").strip().lower() or None,
+                "reason_code": str(
+                    candidate.get("permission_reason_code")
+                    or candidate.get("reason_code")
+                    or ""
+                ).strip().lower() or "unknown",
+                "lineage_ref": str(candidate.get("lineage_ref", "") or "").strip() or None,
+                "source": "voice_identity",
+            }
+
+    return None
+
+
+def _extract_voice_identity_legacy_disposition_context(raw_context: Any) -> dict[str, Any] | None:
+    """Return a normalized Voice Identity legacy-disposition payload when present."""
+    if not isinstance(raw_context, dict):
+        return None
+
+    candidates: list[Any] = [
+        raw_context.get("voice_identity_legacy_disposition_context"),
+        raw_context.get("legacy_disposition_context"),
+        raw_context.get("legacy_context"),
+    ]
+    identity_context = raw_context.get("identity_context")
+    if isinstance(identity_context, dict):
+        candidates.append(identity_context)
+    candidates.append(raw_context)
+
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        source = str(candidate.get("source", "") or "").strip().lower()
+        has_shape = any(
+            key in candidate
+            for key in (
+                "legacy_disposition_state",
+                "legacy_disposition_outcome",
+                "legacy_reference",
+                "replacement_reference",
+                "replacement_ref",
+                "legacy_reason_code",
+            )
+        )
+        if has_shape and (not source or source == "voice_identity"):
+            return {
+                "legacy_disposition_state": str(candidate.get("legacy_disposition_state", "") or "").strip().lower() or None,
+                "legacy_disposition_outcome": str(candidate.get("legacy_disposition_outcome", "") or "").strip().lower() or None,
+                "legacy_reference": str(candidate.get("legacy_reference", "") or "").strip() or None,
+                "replacement_reference": str(
+                    candidate.get("replacement_reference")
+                    or candidate.get("replacement_ref")
+                    or ""
+                ).strip() or None,
+                "reason_code": str(
+                    candidate.get("legacy_reason_code")
+                    or candidate.get("reason_code")
+                    or ""
+                ).strip().lower() or "unknown",
+                "lineage_ref": str(candidate.get("lineage_ref", "") or "").strip() or None,
+                "source": "voice_identity",
+            }
+
+    return None
+
+
+def _extract_voice_identity_diagnostics_context(raw_context: Any) -> dict[str, Any] | None:
+    """Return a normalized Voice Identity diagnostics payload when present."""
+    if not isinstance(raw_context, dict):
+        return None
+
+    candidates: list[Any] = [
+        raw_context.get("voice_identity_diagnostics_context"),
+        raw_context.get("diagnostics_context"),
+        raw_context.get("diagnostic_context"),
+    ]
+    identity_context = raw_context.get("identity_context")
+    if isinstance(identity_context, dict):
+        candidates.append(identity_context)
+    candidates.append(raw_context)
+
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        source = str(candidate.get("source", "") or "").strip().lower()
+        has_shape = any(
+            key in candidate
+            for key in (
+                "diagnostic_available",
+                "diagnostics_available",
+                "diagnostic_reason_code",
+                "health_status",
+                "attribution_readiness",
+                "compatibility_readiness",
+                "repair_available",
+                "repair_hint_code",
+                "suggested_next_action_code",
+            )
+        )
+        if has_shape and (not source or source == "voice_identity"):
+            diagnostic_available = candidate.get("diagnostic_available")
+            if diagnostic_available is None:
+                diagnostic_available = candidate.get("diagnostics_available")
+            return {
+                "diagnostic_available": bool(diagnostic_available),
+                "diagnostic_reason_code": str(
+                    candidate.get("diagnostic_reason_code")
+                    or candidate.get("reason_code")
+                    or ""
+                ).strip().lower() or "unknown",
+                "health_status": str(candidate.get("health_status", "") or "").strip().lower() or None,
+                "attribution_readiness": str(candidate.get("attribution_readiness", "") or "").strip().lower() or None,
+                "compatibility_readiness": str(candidate.get("compatibility_readiness", "") or "").strip().lower() or None,
+                "repair_available": bool(candidate.get("repair_available", False)),
+                "repair_hint_code": str(candidate.get("repair_hint_code", "") or "").strip().lower() or None,
+                "suggested_next_action_code": str(
+                    candidate.get("suggested_next_action_code", "") or ""
+                ).strip().lower() or None,
+                "provenance_source": str(candidate.get("provenance_source", "") or "").strip() or None,
+                "source_reference": str(candidate.get("source_reference", "") or "").strip() or None,
+                "lineage_ref": str(candidate.get("lineage_ref", "") or "").strip() or None,
+                "source": "voice_identity",
+            }
+
+    return None
+
+
+def _extract_voice_identity_explainability_context(raw_context: Any) -> dict[str, Any] | None:
+    """Return a normalized Voice Identity explainability payload when present."""
+    if not isinstance(raw_context, dict):
+        return None
+
+    candidates: list[Any] = [
+        raw_context.get("voice_identity_explainability_context"),
+        raw_context.get("explainability_context"),
+        raw_context.get("explanation_context"),
+    ]
+    identity_context = raw_context.get("identity_context")
+    if isinstance(identity_context, dict):
+        candidates.append(identity_context)
+    candidates.append(raw_context)
+
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        source = str(candidate.get("source", "") or "").strip().lower()
+        has_shape = any(
+            key in candidate
+            for key in (
+                "consumed_outcome",
+                "authority_source",
+                "provenance_source",
+                "source_reference",
+                "lineage_ref",
+                "attribution_source",
+                "confidence_source",
+                "enrollment_source",
+                "lifecycle_source",
+                "permission_source",
+                "legacy_disposition_source",
+                "unavailable_state",
+            )
+        )
+        if has_shape and (not source or source == "voice_identity"):
+            return {
+                "consumed_outcome": str(candidate.get("consumed_outcome", "") or "").strip().lower() or None,
+                "authority_source": str(candidate.get("authority_source", "") or "").strip() or "voice_identity",
+                "provenance_source": str(candidate.get("provenance_source", "") or "").strip() or None,
+                "source_reference": str(candidate.get("source_reference", "") or "").strip() or None,
+                "lineage_ref": str(candidate.get("lineage_ref", "") or "").strip() or None,
+                "attribution_source": str(candidate.get("attribution_source", "") or "").strip() or None,
+                "confidence_source": str(candidate.get("confidence_source", "") or "").strip() or None,
+                "enrollment_source": str(candidate.get("enrollment_source", "") or "").strip() or None,
+                "lifecycle_source": str(candidate.get("lifecycle_source", "") or "").strip() or None,
+                "permission_source": str(candidate.get("permission_source", "") or "").strip() or None,
+                "legacy_disposition_source": str(candidate.get("legacy_disposition_source", "") or "").strip() or None,
+                "unavailable_state": str(candidate.get("unavailable_state", "") or "").strip().lower() or None,
+                "reason_code": str(candidate.get("reason_code", "") or "").strip().lower() or "unknown",
+                "source": "voice_identity",
+            }
+
+    return None
+
+
+def _build_voice_identity_attribution_confidence_consumption(
+    *,
+    raw_context: Any,
+) -> dict[str, Any]:
+    """Return bounded consumption projection for Voice Identity attribution and confidence."""
+    identity_context = _extract_voice_identity_identity_context(raw_context)
+    enrollment_lifecycle_context = _extract_voice_identity_enrollment_lifecycle_context(raw_context)
+    permission_context = _extract_voice_identity_permission_context(raw_context)
+    legacy_disposition_context = _extract_voice_identity_legacy_disposition_context(raw_context)
+    diagnostics_context = _extract_voice_identity_diagnostics_context(raw_context)
+    explainability_context = _extract_voice_identity_explainability_context(raw_context)
+
+    attribution_available = bool(
+        identity_context
+        and (
+            identity_context.get("state") is not None
+            or identity_context.get("person_id") is not None
+            or identity_context.get("voice_profile_id") is not None
+        )
+    )
+
+    confidence_value: float | None = None
+    if identity_context and identity_context.get("confidence") is not None:
+        try:
+            confidence_value = float(identity_context["confidence"])
+        except (TypeError, ValueError):
+            confidence_value = None
+
+    confidence_band = (
+        identity_context.get("confidence_band") if identity_context is not None else None
+    )
+    confidence_available = bool(confidence_value is not None or confidence_band)
+
+    attribution_reason = (
+        str(identity_context.get("reason_code", "unknown") or "unknown")
+        if identity_context is not None
+        else "attribution_data_unavailable"
+    )
+    confidence_reason = (
+        str(identity_context.get("reason_code", "unknown") or "unknown")
+        if confidence_available and identity_context is not None
+        else "confidence_data_unavailable"
+    )
+    enrollment_consumed = bool(
+        enrollment_lifecycle_context
+        and (
+            enrollment_lifecycle_context.get("enrollment_state") is not None
+            or enrollment_lifecycle_context.get("enrollment_readiness") is not None
+            or enrollment_lifecycle_context.get("voice_profile_id") is not None
+            or enrollment_lifecycle_context.get("speaker_embedding_id") is not None
+        )
+    )
+    lifecycle_consumed = bool(
+        enrollment_lifecycle_context
+        and (
+            enrollment_lifecycle_context.get("enrollment_lifecycle_state") is not None
+            or enrollment_lifecycle_context.get("voice_profile_lifecycle_state") is not None
+            or enrollment_lifecycle_context.get("identity_lifecycle_state") is not None
+        )
+    )
+    enrollment_reason = (
+        str(enrollment_lifecycle_context.get("reason_code", "unknown") or "unknown")
+        if enrollment_consumed and enrollment_lifecycle_context is not None
+        else "enrollment_state_unavailable"
+    )
+    lifecycle_reason = (
+        str(enrollment_lifecycle_context.get("reason_code", "unknown") or "unknown")
+        if lifecycle_consumed and enrollment_lifecycle_context is not None
+        else "lifecycle_state_unavailable"
+    )
+    permission_consumed = bool(
+        permission_context
+        and (
+            permission_context.get("permission_state") is not None
+            or permission_context.get("permission_outcome") is not None
+            or permission_context.get("consent_state") is not None
+            or permission_context.get("eligibility_state") is not None
+        )
+    )
+    permission_reason = (
+        str(permission_context.get("reason_code", "unknown") or "unknown")
+        if permission_consumed and permission_context is not None
+        else "permission_state_unavailable"
+    )
+    legacy_disposition_consumed = bool(
+        legacy_disposition_context
+        and (
+            legacy_disposition_context.get("legacy_disposition_state") is not None
+            or legacy_disposition_context.get("legacy_disposition_outcome") is not None
+            or legacy_disposition_context.get("legacy_reference") is not None
+            or legacy_disposition_context.get("replacement_reference") is not None
+        )
+    )
+    legacy_disposition_reason = (
+        str(legacy_disposition_context.get("reason_code", "unknown") or "unknown")
+        if legacy_disposition_consumed and legacy_disposition_context is not None
+        else "legacy_disposition_unavailable"
+    )
+    diagnostics_consumed = bool(
+        diagnostics_context
+        and (
+            diagnostics_context.get("diagnostic_available")
+            or diagnostics_context.get("diagnostic_reason_code") is not None
+            or diagnostics_context.get("health_status") is not None
+            or diagnostics_context.get("attribution_readiness") is not None
+            or diagnostics_context.get("compatibility_readiness") is not None
+            or diagnostics_context.get("repair_hint_code") is not None
+        )
+    )
+    diagnostics_reason = (
+        str(diagnostics_context.get("diagnostic_reason_code", "unknown") or "unknown")
+        if diagnostics_consumed and diagnostics_context is not None
+        else "diagnostics_surface_unavailable"
+    )
+    explainability_consumed = bool(
+        explainability_context
+        and (
+            explainability_context.get("consumed_outcome") is not None
+            or explainability_context.get("provenance_source") is not None
+            or explainability_context.get("source_reference") is not None
+            or explainability_context.get("lineage_ref") is not None
+            or explainability_context.get("unavailable_state") is not None
+        )
+    )
+    explainability_reason = (
+        str(explainability_context.get("reason_code", "unknown") or "unknown")
+        if explainability_consumed and explainability_context is not None
+        else "explainability_surface_unavailable"
+    )
+
+    return {
+        "boundary_version": 1,
+        "boundary_path": "governed_voice_identity_attribution_confidence_consumption",
+        "concierge_role": "bounded_consumer_orchestrator",
+        "voice_identity_authority_external": True,
+        "consumption_only": True,
+        "consume_attribution_outcomes_only": True,
+        "consume_confidence_outcomes_only": True,
+        "derive_attribution_authority": False,
+        "derive_confidence_authority": False,
+        "calculate_attribution": False,
+        "calculate_confidence": False,
+        "manage_identity_lifecycle": False,
+        "manage_enrollment": False,
+        "attribution": {
+            "consumed": attribution_available,
+            "state": (
+                identity_context.get("state") if identity_context is not None else "unavailable"
+            ),
+            "person_id": identity_context.get("person_id") if identity_context is not None else None,
+            "voice_profile_id": (
+                identity_context.get("voice_profile_id") if identity_context is not None else None
+            ),
+            "reason_code": attribution_reason,
+            "source": (
+                identity_context.get("source") if identity_context is not None else "voice_identity_unavailable"
+            ),
+        },
+        "confidence": {
+            "consumed": confidence_available,
+            "value": confidence_value,
+            "band": confidence_band,
+            "reason_code": confidence_reason,
+            "source": (
+                identity_context.get("source") if identity_context is not None else "voice_identity_unavailable"
+            ),
+        },
+        "enrollment_lifecycle": {
+            "boundary_version": 1,
+            "boundary_path": "governed_voice_identity_enrollment_lifecycle_consumption",
+            "voice_identity_authority_external": True,
+            "consumption_only": True,
+            "consume_enrollment_state_only": True,
+            "consume_lifecycle_state_only": True,
+            "manage_enrollment_lifecycle": False,
+            "manage_voice_profile_lifecycle": False,
+            "manage_identity_lifecycle": False,
+            "create_voice_profiles": False,
+            "approve_enrollment": False,
+            "reject_enrollment": False,
+            "change_enrollment_state": False,
+            "infer_enrollment_state": False,
+            "enrollment": {
+                "consumed": enrollment_consumed,
+                "state": (
+                    enrollment_lifecycle_context.get("enrollment_state")
+                    if enrollment_lifecycle_context is not None
+                    else "unavailable"
+                ) or "unavailable",
+                "readiness": (
+                    enrollment_lifecycle_context.get("enrollment_readiness")
+                    if enrollment_lifecycle_context is not None
+                    else None
+                ),
+                "voice_profile_id": (
+                    enrollment_lifecycle_context.get("voice_profile_id")
+                    if enrollment_lifecycle_context is not None
+                    else None
+                ),
+                "speaker_embedding_id": (
+                    enrollment_lifecycle_context.get("speaker_embedding_id")
+                    if enrollment_lifecycle_context is not None
+                    else None
+                ),
+                "reason_code": enrollment_reason,
+                "source": (
+                    enrollment_lifecycle_context.get("source")
+                    if enrollment_lifecycle_context is not None
+                    else "voice_identity_unavailable"
+                ),
+            },
+            "lifecycle": {
+                "consumed": lifecycle_consumed,
+                "enrollment_lifecycle_state": (
+                    enrollment_lifecycle_context.get("enrollment_lifecycle_state")
+                    if enrollment_lifecycle_context is not None
+                    else "unavailable"
+                ) or "unavailable",
+                "voice_profile_lifecycle_state": (
+                    enrollment_lifecycle_context.get("voice_profile_lifecycle_state")
+                    if enrollment_lifecycle_context is not None
+                    else None
+                ),
+                "identity_lifecycle_state": (
+                    enrollment_lifecycle_context.get("identity_lifecycle_state")
+                    if enrollment_lifecycle_context is not None
+                    else None
+                ),
+                "reason_code": lifecycle_reason,
+                "source": (
+                    enrollment_lifecycle_context.get("source")
+                    if enrollment_lifecycle_context is not None
+                    else "voice_identity_unavailable"
+                ),
+            },
+        },
+        "permission_boundary": {
+            "boundary_version": 1,
+            "boundary_path": "governed_voice_identity_permission_consumption",
+            "voice_identity_authority_external": True,
+            "consumption_only": True,
+            "consume_permission_outcomes_only": True,
+            "consume_consent_outcomes_only": True,
+            "derive_permission_authority": False,
+            "create_permission_policy": False,
+            "define_eligibility_rules": False,
+            "determine_permission_outcomes": False,
+            "override_voice_identity_permission_policy": False,
+            "grant_permission": False,
+            "revoke_permission": False,
+            "approve_consent": False,
+            "infer_consent": False,
+            "infer_permission_state": False,
+            "permission": {
+                "consumed": permission_consumed,
+                "state": (
+                    permission_context.get("permission_state")
+                    if permission_context is not None
+                    else "unavailable"
+                ) or "unavailable",
+                "outcome": (
+                    permission_context.get("permission_outcome")
+                    if permission_context is not None
+                    else None
+                ),
+                "consent_state": (
+                    permission_context.get("consent_state")
+                    if permission_context is not None
+                    else None
+                ),
+                "consent_outcome": (
+                    permission_context.get("consent_outcome")
+                    if permission_context is not None
+                    else None
+                ),
+                "eligibility_state": (
+                    permission_context.get("eligibility_state")
+                    if permission_context is not None
+                    else None
+                ),
+                "gating_reason": (
+                    permission_context.get("gating_reason")
+                    if permission_context is not None
+                    else None
+                ),
+                "lineage_ref": (
+                    permission_context.get("lineage_ref")
+                    if permission_context is not None
+                    else None
+                ),
+                "reason_code": permission_reason,
+                "source": (
+                    permission_context.get("source")
+                    if permission_context is not None
+                    else "voice_identity_unavailable"
+                ),
+            },
+        },
+        "legacy_disposition_boundary": {
+            "boundary_version": 1,
+            "boundary_path": "governed_voice_identity_legacy_disposition_consumption",
+            "voice_identity_authority_external": True,
+            "consumption_only": True,
+            "consume_legacy_disposition_outcomes_only": True,
+            "manage_legacy_fingerprint_resolution": False,
+            "migrate_legacy_identity_data": False,
+            "dispose_legacy_identity_data": False,
+            "determine_legacy_disposition": False,
+            "infer_legacy_disposition_state": False,
+            "claim_voiceprint_ownership": False,
+            "claim_embedding_ownership": False,
+            "establish_identity_authority": False,
+            "determine_enrollment_state": False,
+            "legacy_disposition": {
+                "consumed": legacy_disposition_consumed,
+                "state": (
+                    legacy_disposition_context.get("legacy_disposition_state")
+                    if legacy_disposition_context is not None
+                    else "unavailable"
+                ) or "unavailable",
+                "outcome": (
+                    legacy_disposition_context.get("legacy_disposition_outcome")
+                    if legacy_disposition_context is not None
+                    else None
+                ),
+                "legacy_reference": (
+                    legacy_disposition_context.get("legacy_reference")
+                    if legacy_disposition_context is not None
+                    else None
+                ),
+                "replacement_reference": (
+                    legacy_disposition_context.get("replacement_reference")
+                    if legacy_disposition_context is not None
+                    else None
+                ),
+                "lineage_ref": (
+                    legacy_disposition_context.get("lineage_ref")
+                    if legacy_disposition_context is not None
+                    else None
+                ),
+                "reason_code": legacy_disposition_reason,
+                "source": (
+                    legacy_disposition_context.get("source")
+                    if legacy_disposition_context is not None
+                    else "voice_identity_unavailable"
+                ),
+            },
+        },
+        "diagnostics_boundary": {
+            "boundary_version": 1,
+            "boundary_path": "governed_voice_identity_diagnostics_consumption",
+            "voice_identity_authority_external": True,
+            "consumption_only": True,
+            "consume_diagnostics_outputs_only": True,
+            "consume_repair_hints_only": True,
+            "diagnostics_authority_source": "voice_identity",
+            "generate_diagnostics_authority": False,
+            "rewrite_voice_identity_diagnostics": False,
+            "calculate_health_status": False,
+            "calculate_readiness": False,
+            "generate_repair_hints": False,
+            "diagnostics": {
+                "consumed": diagnostics_consumed,
+                "diagnostic_available": (
+                    diagnostics_context.get("diagnostic_available")
+                    if diagnostics_context is not None
+                    else False
+                ),
+                "diagnostic_reason_code": diagnostics_reason,
+                "health_status": (
+                    diagnostics_context.get("health_status")
+                    if diagnostics_context is not None
+                    else "unavailable"
+                ) or "unavailable",
+                "attribution_readiness": (
+                    diagnostics_context.get("attribution_readiness")
+                    if diagnostics_context is not None
+                    else None
+                ),
+                "compatibility_readiness": (
+                    diagnostics_context.get("compatibility_readiness")
+                    if diagnostics_context is not None
+                    else None
+                ),
+                "repair_available": (
+                    diagnostics_context.get("repair_available")
+                    if diagnostics_context is not None
+                    else False
+                ),
+                "repair_hint_code": (
+                    diagnostics_context.get("repair_hint_code")
+                    if diagnostics_context is not None
+                    else None
+                ),
+                "suggested_next_action_code": (
+                    diagnostics_context.get("suggested_next_action_code")
+                    if diagnostics_context is not None
+                    else None
+                ),
+                "provenance_source": (
+                    diagnostics_context.get("provenance_source")
+                    if diagnostics_context is not None
+                    else None
+                ),
+                "source_reference": (
+                    diagnostics_context.get("source_reference")
+                    if diagnostics_context is not None
+                    else None
+                ),
+                "lineage_ref": (
+                    diagnostics_context.get("lineage_ref")
+                    if diagnostics_context is not None
+                    else None
+                ),
+                "source": (
+                    diagnostics_context.get("source")
+                    if diagnostics_context is not None
+                    else "voice_identity_unavailable"
+                ),
+            },
+        },
+        "explainability_boundary": {
+            "boundary_version": 1,
+            "boundary_path": "governed_voice_identity_explainability_consumption",
+            "voice_identity_authority_external": True,
+            "consumption_only": True,
+            "consume_explainability_outputs_only": True,
+            "consume_provenance_references_only": True,
+            "explainability_authority_source": "voice_identity",
+            "generate_explainability_authority": False,
+            "replace_voice_identity_provenance": False,
+            "create_explainability_lineage": False,
+            "infer_identity_state": False,
+            "explainability": {
+                "consumed": explainability_consumed,
+                "consumed_outcome": (
+                    explainability_context.get("consumed_outcome")
+                    if explainability_context is not None
+                    else None
+                ),
+                "authority_source": (
+                    explainability_context.get("authority_source")
+                    if explainability_context is not None
+                    else "voice_identity"
+                ),
+                "provenance_source": (
+                    explainability_context.get("provenance_source")
+                    if explainability_context is not None
+                    else None
+                ),
+                "source_reference": (
+                    explainability_context.get("source_reference")
+                    if explainability_context is not None
+                    else None
+                ),
+                "lineage_ref": (
+                    explainability_context.get("lineage_ref")
+                    if explainability_context is not None
+                    else None
+                ),
+                "attribution_source": (
+                    explainability_context.get("attribution_source")
+                    if explainability_context is not None
+                    else None
+                ),
+                "confidence_source": (
+                    explainability_context.get("confidence_source")
+                    if explainability_context is not None
+                    else None
+                ),
+                "enrollment_source": (
+                    explainability_context.get("enrollment_source")
+                    if explainability_context is not None
+                    else None
+                ),
+                "lifecycle_source": (
+                    explainability_context.get("lifecycle_source")
+                    if explainability_context is not None
+                    else None
+                ),
+                "permission_source": (
+                    explainability_context.get("permission_source")
+                    if explainability_context is not None
+                    else None
+                ),
+                "legacy_disposition_source": (
+                    explainability_context.get("legacy_disposition_source")
+                    if explainability_context is not None
+                    else None
+                ),
+                "unavailable_state": (
+                    explainability_context.get("unavailable_state")
+                    if explainability_context is not None
+                    else "unavailable"
+                ) or "unavailable",
+                "reason_code": explainability_reason,
+                "source": (
+                    explainability_context.get("source")
+                    if explainability_context is not None
+                    else "voice_identity_unavailable"
+                ),
+            },
+        },
+    }
+
+
 def _assemble_foundation_context(
     state,
     *,
@@ -2477,6 +3296,9 @@ def _build_execute_envelope(
         requested_target=str(call.data["target"]),
         resolved_target=resolved_target,
     )
+    voice_identity_consumption = _build_voice_identity_attribution_confidence_consumption(
+        raw_context=call.data.get("context"),
+    )
     return {
         "envelope_version": 1,
         "execution_kind": "orchestration",
@@ -2511,6 +3333,7 @@ def _build_execute_envelope(
         "experience_restoration_boundary": experience_restoration_boundary,
         "experience_restoration_outcome": experience_restoration_outcome,
         "e3a_preservation_alignment": e3a_preservation_alignment,
+        "voice_identity_attribution_confidence_consumption": voice_identity_consumption,
         "planning": {
             "plan_kind": plan_kind,
             "target_type": target_type,
@@ -2659,6 +3482,9 @@ def _build_execute_direct_envelope(
         requested_target=call.data.get("entity_id"),
         resolved_target=call.data.get("entity_id"),
     )
+    voice_identity_consumption = _build_voice_identity_attribution_confidence_consumption(
+        raw_context=call.data.get("context"),
+    )
     return {
         "envelope_version": 1,
         "execution_kind": "direct",
@@ -2710,6 +3536,7 @@ def _build_execute_direct_envelope(
         "experience_restoration_boundary": experience_restoration_boundary,
         "experience_restoration_outcome": experience_restoration_outcome,
         "e3a_preservation_alignment": e3a_preservation_alignment,
+        "voice_identity_attribution_confidence_consumption": voice_identity_consumption,
         "planning": {
             "plan_kind": "direct_service_call",
             "requested_service": call.data["service"],
@@ -4588,6 +5415,38 @@ def _build_execution_envelope_ref(execution_envelope: dict[str, Any]) -> dict[st
     restoration_outcome = dict(execution_envelope.get("experience_restoration_outcome", {}))
     preservation_alignment = dict(execution_envelope.get("e3a_preservation_alignment", {}))
     restoration_controls = dict(restoration.get("governance_controls", {}))
+    voice_identity_consumption = dict(
+        execution_envelope.get("voice_identity_attribution_confidence_consumption", {})
+    )
+    voice_identity_attribution = dict(voice_identity_consumption.get("attribution", {}))
+    voice_identity_confidence = dict(voice_identity_consumption.get("confidence", {}))
+    voice_identity_enrollment_lifecycle = dict(
+        voice_identity_consumption.get("enrollment_lifecycle", {})
+    )
+    voice_identity_enrollment = dict(voice_identity_enrollment_lifecycle.get("enrollment", {}))
+    voice_identity_lifecycle = dict(voice_identity_enrollment_lifecycle.get("lifecycle", {}))
+    voice_identity_permission_boundary = dict(
+        voice_identity_consumption.get("permission_boundary", {})
+    )
+    voice_identity_permission = dict(voice_identity_permission_boundary.get("permission", {}))
+    voice_identity_legacy_boundary = dict(
+        voice_identity_consumption.get("legacy_disposition_boundary", {})
+    )
+    voice_identity_legacy_disposition = dict(
+        voice_identity_legacy_boundary.get("legacy_disposition", {})
+    )
+    voice_identity_diagnostics_boundary = dict(
+        voice_identity_consumption.get("diagnostics_boundary", {})
+    )
+    voice_identity_diagnostics = dict(
+        voice_identity_diagnostics_boundary.get("diagnostics", {})
+    )
+    voice_identity_explainability_boundary = dict(
+        voice_identity_consumption.get("explainability_boundary", {})
+    )
+    voice_identity_explainability = dict(
+        voice_identity_explainability_boundary.get("explainability", {})
+    )
     selected_outcome_raw = restoration_outcome.get("selected_outcome", {})
     selected_outcome = selected_outcome_raw if isinstance(selected_outcome_raw, dict) else {}
     continuity_constraints = dict(continuity.get("orchestration_constraints", {}))
@@ -4846,6 +5705,240 @@ def _build_execution_envelope_ref(execution_envelope: dict[str, Any]) -> dict[st
         "e3a_preservation_alignment_reason": preservation_alignment.get("alignment_reason"),
         "e3a_preservation_consumes_restoration_outcomes": bool(
             preservation_alignment.get("consumes_restoration_outcomes", False)
+        ),
+        "voice_identity_consumption_boundary_path": voice_identity_consumption.get("boundary_path"),
+        "voice_identity_authority_external": bool(
+            voice_identity_consumption.get("voice_identity_authority_external", False)
+        ),
+        "voice_identity_consumption_only": bool(
+            voice_identity_consumption.get("consumption_only", False)
+        ),
+        "voice_identity_derives_attribution_authority": bool(
+            voice_identity_consumption.get("derive_attribution_authority", False)
+        ),
+        "voice_identity_derives_confidence_authority": bool(
+            voice_identity_consumption.get("derive_confidence_authority", False)
+        ),
+        "voice_identity_calculates_attribution": bool(
+            voice_identity_consumption.get("calculate_attribution", False)
+        ),
+        "voice_identity_calculates_confidence": bool(
+            voice_identity_consumption.get("calculate_confidence", False)
+        ),
+        "voice_identity_manages_identity_lifecycle": bool(
+            voice_identity_consumption.get("manage_identity_lifecycle", False)
+        ),
+        "voice_identity_manages_enrollment": bool(
+            voice_identity_consumption.get("manage_enrollment", False)
+        ),
+        "voice_identity_attribution_consumed": bool(
+            voice_identity_attribution.get("consumed", False)
+        ),
+        "voice_identity_attribution_state": voice_identity_attribution.get("state"),
+        "voice_identity_attribution_reason_code": voice_identity_attribution.get("reason_code"),
+        "voice_identity_confidence_consumed": bool(
+            voice_identity_confidence.get("consumed", False)
+        ),
+        "voice_identity_confidence_value": voice_identity_confidence.get("value"),
+        "voice_identity_confidence_band": voice_identity_confidence.get("band"),
+        "voice_identity_confidence_reason_code": voice_identity_confidence.get("reason_code"),
+        "voice_identity_enrollment_lifecycle_boundary_path": voice_identity_enrollment_lifecycle.get("boundary_path"),
+        "voice_identity_enrollment_lifecycle_consumption_only": bool(
+            voice_identity_enrollment_lifecycle.get("consumption_only", False)
+        ),
+        "voice_identity_enrollment_authority_external": bool(
+            voice_identity_enrollment_lifecycle.get("voice_identity_authority_external", False)
+        ),
+        "voice_identity_enrollment_state_consumed": bool(
+            voice_identity_enrollment.get("consumed", False)
+        ),
+        "voice_identity_enrollment_state": voice_identity_enrollment.get("state"),
+        "voice_identity_enrollment_readiness": voice_identity_enrollment.get("readiness"),
+        "voice_identity_enrollment_reason_code": voice_identity_enrollment.get("reason_code"),
+        "voice_identity_lifecycle_state_consumed": bool(
+            voice_identity_lifecycle.get("consumed", False)
+        ),
+        "voice_identity_enrollment_lifecycle_state": voice_identity_lifecycle.get("enrollment_lifecycle_state"),
+        "voice_identity_voice_profile_lifecycle_state": voice_identity_lifecycle.get("voice_profile_lifecycle_state"),
+        "voice_identity_identity_lifecycle_state": voice_identity_lifecycle.get("identity_lifecycle_state"),
+        "voice_identity_lifecycle_reason_code": voice_identity_lifecycle.get("reason_code"),
+        "voice_identity_manages_enrollment_lifecycle": bool(
+            voice_identity_enrollment_lifecycle.get("manage_enrollment_lifecycle", False)
+        ),
+        "voice_identity_manages_voice_profile_lifecycle": bool(
+            voice_identity_enrollment_lifecycle.get("manage_voice_profile_lifecycle", False)
+        ),
+        "voice_identity_creates_voice_profiles": bool(
+            voice_identity_enrollment_lifecycle.get("create_voice_profiles", False)
+        ),
+        "voice_identity_changes_enrollment_state": bool(
+            voice_identity_enrollment_lifecycle.get("change_enrollment_state", False)
+        ),
+        "voice_identity_infers_enrollment_state": bool(
+            voice_identity_enrollment_lifecycle.get("infer_enrollment_state", False)
+        ),
+        "voice_identity_permission_boundary_path": voice_identity_permission_boundary.get("boundary_path"),
+        "voice_identity_permission_consumption_only": bool(
+            voice_identity_permission_boundary.get("consumption_only", False)
+        ),
+        "voice_identity_permission_authority_external": bool(
+            voice_identity_permission_boundary.get("voice_identity_authority_external", False)
+        ),
+        "voice_identity_permission_state_consumed": bool(
+            voice_identity_permission.get("consumed", False)
+        ),
+        "voice_identity_permission_state": voice_identity_permission.get("state"),
+        "voice_identity_permission_outcome": voice_identity_permission.get("outcome"),
+        "voice_identity_consent_state": voice_identity_permission.get("consent_state"),
+        "voice_identity_consent_outcome": voice_identity_permission.get("consent_outcome"),
+        "voice_identity_permission_eligibility_state": voice_identity_permission.get("eligibility_state"),
+        "voice_identity_permission_gating_reason": voice_identity_permission.get("gating_reason"),
+        "voice_identity_permission_reason_code": voice_identity_permission.get("reason_code"),
+        "voice_identity_permission_lineage_ref": voice_identity_permission.get("lineage_ref"),
+        "voice_identity_derives_permission_authority": bool(
+            voice_identity_permission_boundary.get("derive_permission_authority", False)
+        ),
+        "voice_identity_creates_permission_policy": bool(
+            voice_identity_permission_boundary.get("create_permission_policy", False)
+        ),
+        "voice_identity_defines_eligibility_rules": bool(
+            voice_identity_permission_boundary.get("define_eligibility_rules", False)
+        ),
+        "voice_identity_determines_permission_outcomes": bool(
+            voice_identity_permission_boundary.get("determine_permission_outcomes", False)
+        ),
+        "voice_identity_overrides_permission_policy": bool(
+            voice_identity_permission_boundary.get("override_voice_identity_permission_policy", False)
+        ),
+        "voice_identity_grants_permission": bool(
+            voice_identity_permission_boundary.get("grant_permission", False)
+        ),
+        "voice_identity_revokes_permission": bool(
+            voice_identity_permission_boundary.get("revoke_permission", False)
+        ),
+        "voice_identity_approves_consent": bool(
+            voice_identity_permission_boundary.get("approve_consent", False)
+        ),
+        "voice_identity_infers_consent": bool(
+            voice_identity_permission_boundary.get("infer_consent", False)
+        ),
+        "voice_identity_infers_permission_state": bool(
+            voice_identity_permission_boundary.get("infer_permission_state", False)
+        ),
+        "voice_identity_legacy_disposition_boundary_path": voice_identity_legacy_boundary.get("boundary_path"),
+        "voice_identity_legacy_disposition_consumption_only": bool(
+            voice_identity_legacy_boundary.get("consumption_only", False)
+        ),
+        "voice_identity_legacy_disposition_authority_external": bool(
+            voice_identity_legacy_boundary.get("voice_identity_authority_external", False)
+        ),
+        "voice_identity_legacy_disposition_consumed": bool(
+            voice_identity_legacy_disposition.get("consumed", False)
+        ),
+        "voice_identity_legacy_disposition_state": voice_identity_legacy_disposition.get("state"),
+        "voice_identity_legacy_disposition_outcome": voice_identity_legacy_disposition.get("outcome"),
+        "voice_identity_legacy_reference": voice_identity_legacy_disposition.get("legacy_reference"),
+        "voice_identity_legacy_replacement_reference": voice_identity_legacy_disposition.get("replacement_reference"),
+        "voice_identity_legacy_disposition_reason_code": voice_identity_legacy_disposition.get("reason_code"),
+        "voice_identity_legacy_disposition_lineage_ref": voice_identity_legacy_disposition.get("lineage_ref"),
+        "voice_identity_manages_legacy_fingerprint_resolution": bool(
+            voice_identity_legacy_boundary.get("manage_legacy_fingerprint_resolution", False)
+        ),
+        "voice_identity_migrates_legacy_identity_data": bool(
+            voice_identity_legacy_boundary.get("migrate_legacy_identity_data", False)
+        ),
+        "voice_identity_disposes_legacy_identity_data": bool(
+            voice_identity_legacy_boundary.get("dispose_legacy_identity_data", False)
+        ),
+        "voice_identity_determines_legacy_disposition": bool(
+            voice_identity_legacy_boundary.get("determine_legacy_disposition", False)
+        ),
+        "voice_identity_infers_legacy_disposition_state": bool(
+            voice_identity_legacy_boundary.get("infer_legacy_disposition_state", False)
+        ),
+        "voice_identity_claims_voiceprint_ownership": bool(
+            voice_identity_legacy_boundary.get("claim_voiceprint_ownership", False)
+        ),
+        "voice_identity_claims_embedding_ownership": bool(
+            voice_identity_legacy_boundary.get("claim_embedding_ownership", False)
+        ),
+        "voice_identity_establishes_identity_authority": bool(
+            voice_identity_legacy_boundary.get("establish_identity_authority", False)
+        ),
+        "voice_identity_determines_enrollment_state": bool(
+            voice_identity_legacy_boundary.get("determine_enrollment_state", False)
+        ),
+        "voice_identity_diagnostics_boundary_path": voice_identity_diagnostics_boundary.get("boundary_path"),
+        "voice_identity_diagnostics_consumption_only": bool(
+            voice_identity_diagnostics_boundary.get("consumption_only", False)
+        ),
+        "voice_identity_diagnostics_authority_external": bool(
+            voice_identity_diagnostics_boundary.get("voice_identity_authority_external", False)
+        ),
+        "voice_identity_diagnostics_consumed": bool(
+            voice_identity_diagnostics.get("consumed", False)
+        ),
+        "voice_identity_diagnostic_available": bool(
+            voice_identity_diagnostics.get("diagnostic_available", False)
+        ),
+        "voice_identity_diagnostic_reason_code": voice_identity_diagnostics.get("diagnostic_reason_code"),
+        "voice_identity_health_status": voice_identity_diagnostics.get("health_status"),
+        "voice_identity_attribution_readiness": voice_identity_diagnostics.get("attribution_readiness"),
+        "voice_identity_compatibility_readiness": voice_identity_diagnostics.get("compatibility_readiness"),
+        "voice_identity_repair_available": bool(
+            voice_identity_diagnostics.get("repair_available", False)
+        ),
+        "voice_identity_repair_hint_code": voice_identity_diagnostics.get("repair_hint_code"),
+        "voice_identity_suggested_next_action_code": voice_identity_diagnostics.get("suggested_next_action_code"),
+        "voice_identity_diagnostics_provenance_source": voice_identity_diagnostics.get("provenance_source"),
+        "voice_identity_diagnostics_source_reference": voice_identity_diagnostics.get("source_reference"),
+        "voice_identity_diagnostics_lineage_ref": voice_identity_diagnostics.get("lineage_ref"),
+        "voice_identity_generates_diagnostics_authority": bool(
+            voice_identity_diagnostics_boundary.get("generate_diagnostics_authority", False)
+        ),
+        "voice_identity_rewrites_diagnostics": bool(
+            voice_identity_diagnostics_boundary.get("rewrite_voice_identity_diagnostics", False)
+        ),
+        "voice_identity_calculates_health_status": bool(
+            voice_identity_diagnostics_boundary.get("calculate_health_status", False)
+        ),
+        "voice_identity_calculates_readiness": bool(
+            voice_identity_diagnostics_boundary.get("calculate_readiness", False)
+        ),
+        "voice_identity_generates_repair_hints": bool(
+            voice_identity_diagnostics_boundary.get("generate_repair_hints", False)
+        ),
+        "voice_identity_explainability_boundary_path": voice_identity_explainability_boundary.get("boundary_path"),
+        "voice_identity_explainability_consumption_only": bool(
+            voice_identity_explainability_boundary.get("consumption_only", False)
+        ),
+        "voice_identity_explainability_authority_external": bool(
+            voice_identity_explainability_boundary.get("voice_identity_authority_external", False)
+        ),
+        "voice_identity_explainability_consumed": bool(
+            voice_identity_explainability.get("consumed", False)
+        ),
+        "voice_identity_explainability_consumed_outcome": voice_identity_explainability.get("consumed_outcome"),
+        "voice_identity_explainability_authority_source": voice_identity_explainability.get("authority_source"),
+        "voice_identity_explainability_provenance_source": voice_identity_explainability.get("provenance_source"),
+        "voice_identity_explainability_source_reference": voice_identity_explainability.get("source_reference"),
+        "voice_identity_explainability_lineage_ref": voice_identity_explainability.get("lineage_ref"),
+        "voice_identity_explainability_attribution_source": voice_identity_explainability.get("attribution_source"),
+        "voice_identity_explainability_confidence_source": voice_identity_explainability.get("confidence_source"),
+        "voice_identity_explainability_enrollment_source": voice_identity_explainability.get("enrollment_source"),
+        "voice_identity_explainability_lifecycle_source": voice_identity_explainability.get("lifecycle_source"),
+        "voice_identity_explainability_permission_source": voice_identity_explainability.get("permission_source"),
+        "voice_identity_explainability_legacy_disposition_source": voice_identity_explainability.get("legacy_disposition_source"),
+        "voice_identity_explainability_unavailable_state": voice_identity_explainability.get("unavailable_state"),
+        "voice_identity_explainability_reason_code": voice_identity_explainability.get("reason_code"),
+        "voice_identity_generates_explainability_authority": bool(
+            voice_identity_explainability_boundary.get("generate_explainability_authority", False)
+        ),
+        "voice_identity_replaces_provenance": bool(
+            voice_identity_explainability_boundary.get("replace_voice_identity_provenance", False)
+        ),
+        "voice_identity_creates_explainability_lineage": bool(
+            voice_identity_explainability_boundary.get("create_explainability_lineage", False)
         ),
     }
 

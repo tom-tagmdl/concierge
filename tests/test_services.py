@@ -3658,3 +3658,537 @@ async def test_update_person_profile_records_activity_with_person_scope(
         and item.get("resolved_person_id") == "tom"
         for item in activities
     )
+
+
+async def test_execute_consumes_voice_identity_attribution_and_confidence_outcomes(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """Execute should consume Voice Identity attribution/confidence outcomes as bounded inputs."""
+    result = await hass.services.async_call(
+        DOMAIN,
+        "execute",
+        {
+            "target": "light.kitchen",
+            "intent_class": "home_control",
+            "context": {
+                "identity_context": {
+                    "state": "known",
+                    "person_id": "person.tom",
+                    "voice_profile_id": "vp_tom",
+                    "confidence": 0.93,
+                    "confidence_band": "high",
+                    "reason_code": "recognized",
+                    "source": "voice_identity",
+                }
+            },
+        },
+        blocking=True,
+        return_response=True,
+    )
+
+    consumption = result["execution_envelope"]["voice_identity_attribution_confidence_consumption"]
+    assert consumption["boundary_path"] == "governed_voice_identity_attribution_confidence_consumption"
+    assert consumption["voice_identity_authority_external"] is True
+    assert consumption["consumption_only"] is True
+    assert consumption["attribution"]["consumed"] is True
+    assert consumption["attribution"]["state"] == "known"
+    assert consumption["attribution"]["person_id"] == "person.tom"
+    assert consumption["attribution"]["voice_profile_id"] == "vp_tom"
+    assert consumption["confidence"]["consumed"] is True
+    assert consumption["confidence"]["value"] == pytest.approx(0.93)
+    assert consumption["confidence"]["band"] == "high"
+
+
+async def test_execute_consumes_voice_identity_enrollment_and_lifecycle_state(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """Execute should consume Voice Identity enrollment/lifecycle state as bounded inputs."""
+    result = await hass.services.async_call(
+        DOMAIN,
+        "execute",
+        {
+            "target": "light.kitchen",
+            "intent_class": "home_control",
+            "context": {
+                "voice_identity_enrollment_lifecycle_context": {
+                    "enrollment_state": "active",
+                    "enrollment_readiness": "ready",
+                    "enrollment_lifecycle_state": "active",
+                    "voice_profile_lifecycle_state": "active",
+                    "identity_lifecycle_state": "active",
+                    "voice_profile_id": "vp_tom",
+                    "speaker_embedding_id": "emb_tom_001",
+                    "reason_code": "voice_identity_ready",
+                    "source": "voice_identity",
+                }
+            },
+        },
+        blocking=True,
+        return_response=True,
+    )
+
+    enrollment_lifecycle = result["execution_envelope"][
+        "voice_identity_attribution_confidence_consumption"
+    ]["enrollment_lifecycle"]
+    assert enrollment_lifecycle["boundary_path"] == "governed_voice_identity_enrollment_lifecycle_consumption"
+    assert enrollment_lifecycle["voice_identity_authority_external"] is True
+    assert enrollment_lifecycle["consumption_only"] is True
+    assert enrollment_lifecycle["enrollment"]["consumed"] is True
+    assert enrollment_lifecycle["enrollment"]["state"] == "active"
+    assert enrollment_lifecycle["enrollment"]["readiness"] == "ready"
+    assert enrollment_lifecycle["enrollment"]["speaker_embedding_id"] == "emb_tom_001"
+    assert enrollment_lifecycle["lifecycle"]["consumed"] is True
+    assert enrollment_lifecycle["lifecycle"]["enrollment_lifecycle_state"] == "active"
+    assert enrollment_lifecycle["lifecycle"]["voice_profile_lifecycle_state"] == "active"
+    assert enrollment_lifecycle["lifecycle"]["identity_lifecycle_state"] == "active"
+
+
+async def test_execute_consumes_voice_identity_permission_and_consent_outcomes(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """Execute should consume Voice Identity permission/consent outcomes as bounded inputs."""
+    result = await hass.services.async_call(
+        DOMAIN,
+        "execute",
+        {
+            "target": "light.kitchen",
+            "intent_class": "home_control",
+            "context": {
+                "voice_identity_permission_context": {
+                    "permission_state": "allowed",
+                    "permission_outcome": "permitted",
+                    "consent_state": "granted",
+                    "consent_outcome": "valid",
+                    "eligibility_state": "eligible",
+                    "gating_reason": "policy_allows",
+                    "permission_reason_code": "permission_ready",
+                    "lineage_ref": "vi-permission-001",
+                    "source": "voice_identity",
+                }
+            },
+        },
+        blocking=True,
+        return_response=True,
+    )
+
+    permission_boundary = result["execution_envelope"][
+        "voice_identity_attribution_confidence_consumption"
+    ]["permission_boundary"]
+    assert permission_boundary["boundary_path"] == "governed_voice_identity_permission_consumption"
+    assert permission_boundary["voice_identity_authority_external"] is True
+    assert permission_boundary["consumption_only"] is True
+    assert permission_boundary["permission"]["consumed"] is True
+    assert permission_boundary["permission"]["state"] == "allowed"
+    assert permission_boundary["permission"]["outcome"] == "permitted"
+    assert permission_boundary["permission"]["consent_state"] == "granted"
+    assert permission_boundary["permission"]["consent_outcome"] == "valid"
+    assert permission_boundary["permission"]["lineage_ref"] == "vi-permission-001"
+
+
+async def test_execute_consumes_voice_identity_legacy_disposition_outcomes(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """Execute should consume Voice Identity legacy disposition outcomes as bounded inputs."""
+    result = await hass.services.async_call(
+        DOMAIN,
+        "execute",
+        {
+            "target": "light.kitchen",
+            "intent_class": "home_control",
+            "context": {
+                "voice_identity_legacy_disposition_context": {
+                    "legacy_disposition_state": "superseded",
+                    "legacy_disposition_outcome": "replacement_reference_consumed",
+                    "legacy_reference": "legacy-fingerprint-001",
+                    "replacement_reference": "voiceprint-v2-001",
+                    "legacy_reason_code": "replacement_reference_available",
+                    "lineage_ref": "vi-legacy-001",
+                    "source": "voice_identity",
+                }
+            },
+        },
+        blocking=True,
+        return_response=True,
+    )
+
+    legacy_boundary = result["execution_envelope"][
+        "voice_identity_attribution_confidence_consumption"
+    ]["legacy_disposition_boundary"]
+    assert legacy_boundary["boundary_path"] == "governed_voice_identity_legacy_disposition_consumption"
+    assert legacy_boundary["voice_identity_authority_external"] is True
+    assert legacy_boundary["consumption_only"] is True
+    assert legacy_boundary["legacy_disposition"]["consumed"] is True
+    assert legacy_boundary["legacy_disposition"]["state"] == "superseded"
+    assert legacy_boundary["legacy_disposition"]["outcome"] == "replacement_reference_consumed"
+    assert legacy_boundary["legacy_disposition"]["legacy_reference"] == "legacy-fingerprint-001"
+    assert legacy_boundary["legacy_disposition"]["replacement_reference"] == "voiceprint-v2-001"
+
+
+async def test_execute_reports_unavailable_permission_state_when_missing_permission_fields(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """Execute should explicitly report unavailable permission state when Voice Identity omits it."""
+    result = await hass.services.async_call(
+        DOMAIN,
+        "execute",
+        {
+            "target": "light.kitchen",
+            "intent_class": "home_control",
+            "context": {
+                "voice_identity_permission_context": {
+                    "reason_code": "permission_projection_missing",
+                    "source": "voice_identity",
+                }
+            },
+        },
+        blocking=True,
+        return_response=True,
+    )
+
+    permission = result["execution_envelope"]["voice_identity_attribution_confidence_consumption"][
+        "permission_boundary"
+    ]["permission"]
+    assert permission["consumed"] is False
+    assert permission["state"] == "unavailable"
+    assert permission["reason_code"] == "permission_state_unavailable"
+
+
+async def test_execute_reports_unavailable_legacy_disposition_when_missing_disposition_fields(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """Execute should explicitly report unavailable legacy disposition when Voice Identity omits it."""
+    result = await hass.services.async_call(
+        DOMAIN,
+        "execute",
+        {
+            "target": "light.kitchen",
+            "intent_class": "home_control",
+            "context": {
+                "voice_identity_legacy_disposition_context": {
+                    "reason_code": "legacy_projection_missing",
+                    "source": "voice_identity",
+                }
+            },
+        },
+        blocking=True,
+        return_response=True,
+    )
+
+    legacy_disposition = result["execution_envelope"]["voice_identity_attribution_confidence_consumption"][
+        "legacy_disposition_boundary"
+    ]["legacy_disposition"]
+    assert legacy_disposition["consumed"] is False
+    assert legacy_disposition["state"] == "unavailable"
+    assert legacy_disposition["reason_code"] == "legacy_disposition_unavailable"
+
+
+async def test_execute_consumes_voice_identity_diagnostics_and_explainability_outputs(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """Execute should consume Voice Identity diagnostics/explainability as bounded outputs."""
+    result = await hass.services.async_call(
+        DOMAIN,
+        "execute",
+        {
+            "target": "light.kitchen",
+            "intent_class": "home_control",
+            "context": {
+                "voice_identity_diagnostics_context": {
+                    "diagnostic_available": True,
+                    "diagnostic_reason_code": "voice_identity_ready",
+                    "health_status": "healthy",
+                    "attribution_readiness": "ready",
+                    "compatibility_readiness": "ready",
+                    "repair_available": True,
+                    "repair_hint_code": "refresh_voice_profile",
+                    "suggested_next_action_code": "retry_after_refresh",
+                    "provenance_source": "voice_identity_diagnostics",
+                    "source_reference": "vi-diagnostics-001",
+                    "lineage_ref": "vi-diagnostics-lineage-001",
+                    "source": "voice_identity",
+                },
+                "voice_identity_explainability_context": {
+                    "consumed_outcome": "attribution_abstained",
+                    "authority_source": "voice_identity",
+                    "provenance_source": "voice_identity_attribution",
+                    "source_reference": "vi-explainability-001",
+                    "lineage_ref": "vi-explainability-lineage-001",
+                    "attribution_source": "voice_identity_attribution_service",
+                    "confidence_source": "voice_identity_confidence_band",
+                    "enrollment_source": "voice_identity_enrollment_registry",
+                    "lifecycle_source": "voice_identity_lifecycle_registry",
+                    "permission_source": "voice_identity_permission_policy",
+                    "legacy_disposition_source": "voice_identity_legacy_disposition",
+                    "reason_code": "voice_identity_explained",
+                    "source": "voice_identity",
+                },
+            },
+        },
+        blocking=True,
+        return_response=True,
+    )
+
+    boundary = result["execution_envelope"]["voice_identity_attribution_confidence_consumption"]
+    diagnostics_boundary = boundary["diagnostics_boundary"]
+    assert diagnostics_boundary["boundary_path"] == "governed_voice_identity_diagnostics_consumption"
+    assert diagnostics_boundary["voice_identity_authority_external"] is True
+    assert diagnostics_boundary["consumption_only"] is True
+    assert diagnostics_boundary["diagnostics"]["consumed"] is True
+    assert diagnostics_boundary["diagnostics"]["diagnostic_available"] is True
+    assert diagnostics_boundary["diagnostics"]["health_status"] == "healthy"
+    assert diagnostics_boundary["diagnostics"]["repair_hint_code"] == "refresh_voice_profile"
+    assert diagnostics_boundary["diagnostics"]["provenance_source"] == "voice_identity_diagnostics"
+    assert diagnostics_boundary["diagnostics"]["lineage_ref"] == "vi-diagnostics-lineage-001"
+    explainability_boundary = boundary["explainability_boundary"]
+    assert explainability_boundary["boundary_path"] == "governed_voice_identity_explainability_consumption"
+    assert explainability_boundary["voice_identity_authority_external"] is True
+    assert explainability_boundary["consumption_only"] is True
+    assert explainability_boundary["explainability"]["consumed"] is True
+    assert explainability_boundary["explainability"]["consumed_outcome"] == "attribution_abstained"
+    assert explainability_boundary["explainability"]["authority_source"] == "voice_identity"
+    assert explainability_boundary["explainability"]["provenance_source"] == "voice_identity_attribution"
+    assert explainability_boundary["explainability"]["permission_source"] == "voice_identity_permission_policy"
+    assert explainability_boundary["explainability"]["legacy_disposition_source"] == "voice_identity_legacy_disposition"
+
+
+async def test_execute_reports_unavailable_voice_identity_diagnostics_and_explainability_surfaces(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """Execute should report unavailable diagnostics/explainability without inventing Voice Identity state."""
+    result = await hass.services.async_call(
+        DOMAIN,
+        "execute",
+        {
+            "target": "light.kitchen",
+            "intent_class": "home_control",
+            "context": {
+                "voice_identity_diagnostics_context": {
+                    "source": "voice_identity",
+                },
+                "voice_identity_explainability_context": {
+                    "source": "voice_identity",
+                },
+            },
+        },
+        blocking=True,
+        return_response=True,
+    )
+
+    boundary = result["execution_envelope"]["voice_identity_attribution_confidence_consumption"]
+    diagnostics = boundary["diagnostics_boundary"]["diagnostics"]
+    assert diagnostics["consumed"] is False
+    assert diagnostics["diagnostic_available"] is False
+    assert diagnostics["health_status"] == "unavailable"
+    assert diagnostics["diagnostic_reason_code"] == "diagnostics_surface_unavailable"
+    assert diagnostics["source"] == "voice_identity_unavailable"
+    explainability = boundary["explainability_boundary"]["explainability"]
+    assert explainability["consumed"] is False
+    assert explainability["unavailable_state"] == "unavailable"
+    assert explainability["reason_code"] == "explainability_surface_unavailable"
+    assert explainability["source"] == "voice_identity_unavailable"
+
+
+async def test_execute_reports_unavailable_enrollment_state_when_missing_enrollment_fields(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """Execute should explicitly report unavailable enrollment state when Voice Identity omits it."""
+    result = await hass.services.async_call(
+        DOMAIN,
+        "execute",
+        {
+            "target": "light.kitchen",
+            "intent_class": "home_control",
+            "context": {
+                "voice_identity_enrollment_lifecycle_context": {
+                    "enrollment_lifecycle_state": "active",
+                    "reason_code": "voice_identity_ready",
+                    "source": "voice_identity",
+                }
+            },
+        },
+        blocking=True,
+        return_response=True,
+    )
+
+    enrollment = result["execution_envelope"]["voice_identity_attribution_confidence_consumption"][
+        "enrollment_lifecycle"
+    ]["enrollment"]
+    assert enrollment["consumed"] is False
+    assert enrollment["state"] == "unavailable"
+    assert enrollment["reason_code"] == "enrollment_state_unavailable"
+
+
+async def test_execute_reports_unavailable_lifecycle_state_when_missing_lifecycle_fields(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """Execute should explicitly report unavailable lifecycle state when Voice Identity omits it."""
+    result = await hass.services.async_call(
+        DOMAIN,
+        "execute",
+        {
+            "target": "light.kitchen",
+            "intent_class": "home_control",
+            "context": {
+                "voice_identity_enrollment_lifecycle_context": {
+                    "enrollment_state": "active",
+                    "enrollment_readiness": "ready",
+                    "voice_profile_id": "vp_tom",
+                    "reason_code": "voice_identity_ready",
+                    "source": "voice_identity",
+                }
+            },
+        },
+        blocking=True,
+        return_response=True,
+    )
+
+    lifecycle = result["execution_envelope"]["voice_identity_attribution_confidence_consumption"][
+        "enrollment_lifecycle"
+    ]["lifecycle"]
+    assert lifecycle["consumed"] is False
+    assert lifecycle["enrollment_lifecycle_state"] == "unavailable"
+    assert lifecycle["reason_code"] == "lifecycle_state_unavailable"
+
+
+async def test_execute_reports_unavailable_attribution_data_when_missing_identity_context(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """Execute should report unavailable attribution data when no identity-context payload is provided."""
+    result = await hass.services.async_call(
+        DOMAIN,
+        "execute",
+        {
+            "target": "light.kitchen",
+            "intent_class": "home_control",
+            "context": {"channel": "voice"},
+        },
+        blocking=True,
+        return_response=True,
+    )
+
+    attribution = result["execution_envelope"]["voice_identity_attribution_confidence_consumption"][
+        "attribution"
+    ]
+    assert attribution["consumed"] is False
+    assert attribution["state"] == "unavailable"
+    assert attribution["reason_code"] == "attribution_data_unavailable"
+
+
+async def test_execute_reports_unavailable_confidence_data_when_missing_confidence_fields(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """Execute should report unavailable confidence data when attribution context omits confidence outputs."""
+    result = await hass.services.async_call(
+        DOMAIN,
+        "execute",
+        {
+            "target": "light.kitchen",
+            "intent_class": "home_control",
+            "context": {
+                "identity_context": {
+                    "state": "known",
+                    "person_id": "person.tom",
+                    "voice_profile_id": "vp_tom",
+                    "reason_code": "recognized",
+                    "source": "voice_identity",
+                }
+            },
+        },
+        blocking=True,
+        return_response=True,
+    )
+
+    confidence = result["execution_envelope"]["voice_identity_attribution_confidence_consumption"][
+        "confidence"
+    ]
+    assert confidence["consumed"] is False
+    assert confidence["value"] is None
+    assert confidence["band"] is None
+    assert confidence["reason_code"] == "confidence_data_unavailable"
+
+
+async def test_execute_preserves_voice_identity_authority_boundary_for_consumption(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """Execute must preserve Voice Identity authority boundaries while consuming outcomes."""
+    result = await hass.services.async_call(
+        DOMAIN,
+        "execute",
+        {
+            "target": "light.kitchen",
+            "intent_class": "home_control",
+            "context": {
+                "identity_context": {
+                    "state": "low_confidence",
+                    "confidence": 0.42,
+                    "confidence_band": "low",
+                    "reason_code": "low_confidence",
+                    "source": "voice_identity",
+                }
+            },
+        },
+        blocking=True,
+        return_response=True,
+    )
+
+    boundary = result["execution_envelope"]["voice_identity_attribution_confidence_consumption"]
+    assert boundary["derive_attribution_authority"] is False
+    assert boundary["derive_confidence_authority"] is False
+    assert boundary["calculate_attribution"] is False
+    assert boundary["calculate_confidence"] is False
+    assert boundary["manage_identity_lifecycle"] is False
+    assert boundary["manage_enrollment"] is False
+    enrollment_lifecycle = boundary["enrollment_lifecycle"]
+    assert enrollment_lifecycle["manage_enrollment_lifecycle"] is False
+    assert enrollment_lifecycle["manage_voice_profile_lifecycle"] is False
+    assert enrollment_lifecycle["manage_identity_lifecycle"] is False
+    assert enrollment_lifecycle["create_voice_profiles"] is False
+    assert enrollment_lifecycle["approve_enrollment"] is False
+    assert enrollment_lifecycle["reject_enrollment"] is False
+    assert enrollment_lifecycle["change_enrollment_state"] is False
+    assert enrollment_lifecycle["infer_enrollment_state"] is False
+    permission_boundary = boundary["permission_boundary"]
+    assert permission_boundary["derive_permission_authority"] is False
+    assert permission_boundary["create_permission_policy"] is False
+    assert permission_boundary["define_eligibility_rules"] is False
+    assert permission_boundary["determine_permission_outcomes"] is False
+    assert permission_boundary["override_voice_identity_permission_policy"] is False
+    assert permission_boundary["grant_permission"] is False
+    assert permission_boundary["revoke_permission"] is False
+    assert permission_boundary["approve_consent"] is False
+    assert permission_boundary["infer_consent"] is False
+    assert permission_boundary["infer_permission_state"] is False
+    legacy_boundary = boundary["legacy_disposition_boundary"]
+    assert legacy_boundary["manage_legacy_fingerprint_resolution"] is False
+    assert legacy_boundary["migrate_legacy_identity_data"] is False
+    assert legacy_boundary["dispose_legacy_identity_data"] is False
+    assert legacy_boundary["determine_legacy_disposition"] is False
+    assert legacy_boundary["infer_legacy_disposition_state"] is False
+    assert legacy_boundary["claim_voiceprint_ownership"] is False
+    assert legacy_boundary["claim_embedding_ownership"] is False
+    assert legacy_boundary["establish_identity_authority"] is False
+    assert legacy_boundary["determine_enrollment_state"] is False
+    diagnostics_boundary = boundary["diagnostics_boundary"]
+    assert diagnostics_boundary["generate_diagnostics_authority"] is False
+    assert diagnostics_boundary["rewrite_voice_identity_diagnostics"] is False
+    assert diagnostics_boundary["calculate_health_status"] is False
+    assert diagnostics_boundary["calculate_readiness"] is False
+    assert diagnostics_boundary["generate_repair_hints"] is False
+    explainability_boundary = boundary["explainability_boundary"]
+    assert explainability_boundary["generate_explainability_authority"] is False
+    assert explainability_boundary["replace_voice_identity_provenance"] is False
+    assert explainability_boundary["create_explainability_lineage"] is False
+    assert explainability_boundary["infer_identity_state"] is False

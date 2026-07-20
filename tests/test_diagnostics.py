@@ -4,9 +4,12 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
+import pytest
+
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import area_registry as ar
 
+from custom_components.concierge.const import DOMAIN
 from custom_components.concierge.diagnostics import async_get_config_entry_diagnostics
 from custom_components.concierge.models import ContextState, Interaction, PersonProfile
 from custom_components.concierge.storage import ConciergeStorage
@@ -70,6 +73,7 @@ async def test_diagnostics_include_state_summary(
         "vocabulary_diagnostics_visibility",
         "capability_diagnostics_explainability_visibility",
         "experience_diagnostics_explainability_visibility",
+        "voice_identity_consumption_boundary_visibility",
         "messaging_governance_boundary_visibility",
         "messaging_provenance_visibility",
         "notification_delivery_boundary_visibility",
@@ -141,6 +145,54 @@ async def test_diagnostics_include_state_summary(
     assert experience_diag["diagnostics_non_rights"]["creates_outcomes"] is False
     assert experience_diag["diagnostics_non_rights"]["recreates_projection_reasoning"] is False
     assert experience_diag["diagnostics_non_rights"]["recreates_restoration_reasoning"] is False
+    voice_identity_diag = diagnostics["voice_identity_consumption_boundary_visibility"]
+    assert voice_identity_diag["authority_visibility"]["voice_identity_authority_external"] is False
+    assert voice_identity_diag["consumption_visibility"]["execution_envelope_ref_count"] == 0
+    assert voice_identity_diag["consumption_visibility"]["latest_attribution_consumed"] is False
+    assert voice_identity_diag["consumption_visibility"]["latest_confidence_consumed"] is False
+    assert voice_identity_diag["enrollment_boundary_visibility"]["latest_enrollment_state_consumed"] is False
+    assert voice_identity_diag["enrollment_boundary_visibility"]["latest_boundary_path"] is None
+    assert voice_identity_diag["lifecycle_boundary_visibility"]["latest_lifecycle_state_consumed"] is False
+    assert voice_identity_diag["permission_boundary_visibility"]["latest_permission_state_consumed"] is False
+    assert voice_identity_diag["permission_boundary_visibility"]["latest_boundary_path"] is None
+    assert voice_identity_diag["legacy_disposition_boundary_visibility"]["latest_legacy_disposition_consumed"] is False
+    assert voice_identity_diag["legacy_disposition_boundary_visibility"]["latest_boundary_path"] is None
+    assert voice_identity_diag["diagnostics_boundary_visibility"]["latest_diagnostics_consumed"] is False
+    assert voice_identity_diag["diagnostics_boundary_visibility"]["latest_boundary_path"] is None
+    assert voice_identity_diag["explainability_boundary_visibility"]["latest_explainability_consumed"] is False
+    assert voice_identity_diag["explainability_boundary_visibility"]["latest_boundary_path"] is None
+    assert voice_identity_diag["ownership_boundary_visibility"]["derives_attribution_authority"] is False
+    assert voice_identity_diag["ownership_boundary_visibility"]["derives_confidence_authority"] is False
+    assert voice_identity_diag["ownership_boundary_visibility"]["calculates_attribution"] is False
+    assert voice_identity_diag["ownership_boundary_visibility"]["calculates_confidence"] is False
+    assert voice_identity_diag["ownership_boundary_visibility"]["manages_identity_lifecycle"] is False
+    assert voice_identity_diag["ownership_boundary_visibility"]["manages_enrollment"] is False
+    assert voice_identity_diag["ownership_boundary_visibility"]["manages_enrollment_lifecycle"] is False
+    assert voice_identity_diag["ownership_boundary_visibility"]["manages_voice_profile_lifecycle"] is False
+    assert voice_identity_diag["ownership_boundary_visibility"]["creates_voice_profiles"] is False
+    assert voice_identity_diag["ownership_boundary_visibility"]["changes_enrollment_state"] is False
+    assert voice_identity_diag["ownership_boundary_visibility"]["infers_enrollment_state"] is False
+    assert voice_identity_diag["ownership_boundary_visibility"]["derives_permission_authority"] is False
+    assert voice_identity_diag["ownership_boundary_visibility"]["creates_permission_policy"] is False
+    assert voice_identity_diag["ownership_boundary_visibility"]["defines_eligibility_rules"] is False
+    assert voice_identity_diag["ownership_boundary_visibility"]["determines_permission_outcomes"] is False
+    assert voice_identity_diag["ownership_boundary_visibility"]["grants_permission"] is False
+    assert voice_identity_diag["ownership_boundary_visibility"]["revokes_permission"] is False
+    assert voice_identity_diag["ownership_boundary_visibility"]["approves_consent"] is False
+    assert voice_identity_diag["ownership_boundary_visibility"]["infers_consent"] is False
+    assert voice_identity_diag["ownership_boundary_visibility"]["manages_legacy_fingerprint_resolution"] is False
+    assert voice_identity_diag["ownership_boundary_visibility"]["migrates_legacy_identity_data"] is False
+    assert voice_identity_diag["ownership_boundary_visibility"]["disposes_legacy_identity_data"] is False
+    assert voice_identity_diag["ownership_boundary_visibility"]["determines_legacy_disposition"] is False
+    assert voice_identity_diag["ownership_boundary_visibility"]["infers_legacy_disposition_state"] is False
+    assert voice_identity_diag["ownership_boundary_visibility"]["generates_diagnostics_authority"] is False
+    assert voice_identity_diag["ownership_boundary_visibility"]["rewrites_diagnostics"] is False
+    assert voice_identity_diag["ownership_boundary_visibility"]["calculates_health_status"] is False
+    assert voice_identity_diag["ownership_boundary_visibility"]["calculates_readiness"] is False
+    assert voice_identity_diag["ownership_boundary_visibility"]["generates_repair_hints"] is False
+    assert voice_identity_diag["ownership_boundary_visibility"]["generates_explainability_authority"] is False
+    assert voice_identity_diag["ownership_boundary_visibility"]["replaces_provenance"] is False
+    assert voice_identity_diag["ownership_boundary_visibility"]["creates_explainability_lineage"] is False
     continuity_affinity_diag = diagnostics["continuity_affinity_diagnostics_explainability_visibility"]
     assert continuity_affinity_diag["authority_visibility"]["continuity_authority_external"] is True
     assert continuity_affinity_diag["authority_visibility"]["person_room_affinity_authority_external"] is True
@@ -164,10 +216,10 @@ async def test_diagnostics_include_state_summary(
     assert occupancy_presence_diag["governance_visibility"]["latest_presence_governance_applicable"] is False
     assert occupancy_presence_diag["governance_visibility"]["latest_presence_governance_path"] is None
     assert occupancy_presence_diag["governance_visibility"]["latest_presence_governance_unavailable_reason"] == "execution_envelope_not_available"
-    assert occupancy_presence_diag["governance_visibility"]["latest_orchestration_occupancy_governance_applicable"] is True
-    assert occupancy_presence_diag["governance_visibility"]["latest_orchestration_occupancy_governance_path"] == "governed_occupancy_boundary"
-    assert occupancy_presence_diag["governance_visibility"]["latest_orchestration_presence_governance_applicable"] is True
-    assert occupancy_presence_diag["governance_visibility"]["latest_orchestration_presence_governance_path"] == "governed_presence_boundary"
+    assert occupancy_presence_diag["governance_visibility"]["latest_orchestration_occupancy_governance_applicable"] is False
+    assert occupancy_presence_diag["governance_visibility"]["latest_orchestration_occupancy_governance_path"] is None
+    assert occupancy_presence_diag["governance_visibility"]["latest_orchestration_presence_governance_applicable"] is False
+    assert occupancy_presence_diag["governance_visibility"]["latest_orchestration_presence_governance_path"] is None
     assert occupancy_presence_diag["governance_visibility"]["latest_direct_occupancy_governance_applicable"] is False
     assert occupancy_presence_diag["governance_visibility"]["latest_direct_occupancy_governance_path"] is None
     assert occupancy_presence_diag["governance_visibility"]["latest_direct_presence_governance_applicable"] is False
@@ -256,6 +308,217 @@ async def test_diagnostics_report_room_configs_outside_foundation(
     assert diagnostics["foundation_runtime_boundary"]["room_configs_bound_to_foundation"] is False
 
 
+async def test_diagnostics_expose_voice_identity_enrollment_lifecycle_boundary_visibility(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """Diagnostics should expose bounded Voice Identity enrollment/lifecycle consumption visibility."""
+    await hass.services.async_call(
+        DOMAIN,
+        "execute",
+        {
+            "target": "light.kitchen",
+            "intent_class": "home_control",
+            "context": {
+                "voice_identity_enrollment_lifecycle_context": {
+                    "enrollment_state": "active",
+                    "enrollment_readiness": "ready",
+                    "enrollment_lifecycle_state": "active",
+                    "voice_profile_lifecycle_state": "active",
+                    "identity_lifecycle_state": "active",
+                    "voice_profile_id": "vp_tom",
+                    "speaker_embedding_id": "emb_tom_001",
+                    "reason_code": "voice_identity_ready",
+                    "source": "voice_identity",
+                }
+            },
+        },
+        blocking=True,
+        return_response=True,
+    )
+
+    diagnostics = await async_get_config_entry_diagnostics(hass, setup_integration)
+    voice_identity_diag = diagnostics["voice_identity_consumption_boundary_visibility"]
+
+    assert voice_identity_diag["authority_visibility"]["voice_identity_enrollment_authority_external"] is True
+    assert (
+        voice_identity_diag["enrollment_boundary_visibility"]["latest_boundary_path"]
+        == "governed_voice_identity_enrollment_lifecycle_consumption"
+    )
+    assert voice_identity_diag["enrollment_boundary_visibility"]["latest_consumption_only"] is True
+    assert voice_identity_diag["enrollment_boundary_visibility"]["latest_enrollment_state_consumed"] is True
+    assert voice_identity_diag["enrollment_boundary_visibility"]["latest_enrollment_state"] == "active"
+    assert voice_identity_diag["enrollment_boundary_visibility"]["latest_enrollment_readiness"] == "ready"
+    assert voice_identity_diag["lifecycle_boundary_visibility"]["latest_lifecycle_state_consumed"] is True
+    assert voice_identity_diag["lifecycle_boundary_visibility"]["latest_enrollment_lifecycle_state"] == "active"
+    assert voice_identity_diag["lifecycle_boundary_visibility"]["latest_voice_profile_lifecycle_state"] == "active"
+    assert voice_identity_diag["lifecycle_boundary_visibility"]["latest_identity_lifecycle_state"] == "active"
+    assert voice_identity_diag["ownership_boundary_visibility"]["manages_enrollment_lifecycle"] is False
+    assert voice_identity_diag["ownership_boundary_visibility"]["manages_voice_profile_lifecycle"] is False
+    assert voice_identity_diag["ownership_boundary_visibility"]["creates_voice_profiles"] is False
+    assert voice_identity_diag["ownership_boundary_visibility"]["changes_enrollment_state"] is False
+    assert voice_identity_diag["ownership_boundary_visibility"]["infers_enrollment_state"] is False
+
+
+async def test_diagnostics_expose_voice_identity_permission_and_legacy_disposition_boundary_visibility(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """Diagnostics should expose bounded Voice Identity permission and legacy disposition visibility."""
+    await hass.services.async_call(
+        DOMAIN,
+        "execute",
+        {
+            "target": "light.kitchen",
+            "intent_class": "home_control",
+            "context": {
+                "voice_identity_permission_context": {
+                    "permission_state": "allowed",
+                    "permission_outcome": "permitted",
+                    "consent_state": "granted",
+                    "consent_outcome": "valid",
+                    "eligibility_state": "eligible",
+                    "gating_reason": "policy_allows",
+                    "permission_reason_code": "permission_ready",
+                    "lineage_ref": "vi-permission-001",
+                    "source": "voice_identity",
+                },
+                "voice_identity_legacy_disposition_context": {
+                    "legacy_disposition_state": "superseded",
+                    "legacy_disposition_outcome": "replacement_reference_consumed",
+                    "legacy_reference": "legacy-fingerprint-001",
+                    "replacement_reference": "voiceprint-v2-001",
+                    "legacy_reason_code": "replacement_reference_available",
+                    "lineage_ref": "vi-legacy-001",
+                    "source": "voice_identity",
+                },
+            },
+        },
+        blocking=True,
+        return_response=True,
+    )
+
+    diagnostics = await async_get_config_entry_diagnostics(hass, setup_integration)
+    voice_identity_diag = diagnostics["voice_identity_consumption_boundary_visibility"]
+
+    assert voice_identity_diag["authority_visibility"]["voice_identity_permission_authority_external"] is True
+    assert voice_identity_diag["authority_visibility"]["voice_identity_legacy_disposition_authority_external"] is True
+    assert (
+        voice_identity_diag["permission_boundary_visibility"]["latest_boundary_path"]
+        == "governed_voice_identity_permission_consumption"
+    )
+    assert voice_identity_diag["permission_boundary_visibility"]["latest_consumption_only"] is True
+    assert voice_identity_diag["permission_boundary_visibility"]["latest_permission_state_consumed"] is True
+    assert voice_identity_diag["permission_boundary_visibility"]["latest_permission_state"] == "allowed"
+    assert voice_identity_diag["permission_boundary_visibility"]["latest_permission_outcome"] == "permitted"
+    assert voice_identity_diag["permission_boundary_visibility"]["latest_consent_state"] == "granted"
+    assert voice_identity_diag["permission_boundary_visibility"]["latest_consent_outcome"] == "valid"
+    assert (
+        voice_identity_diag["legacy_disposition_boundary_visibility"]["latest_boundary_path"]
+        == "governed_voice_identity_legacy_disposition_consumption"
+    )
+    assert voice_identity_diag["legacy_disposition_boundary_visibility"]["latest_consumption_only"] is True
+    assert voice_identity_diag["legacy_disposition_boundary_visibility"]["latest_legacy_disposition_consumed"] is True
+    assert voice_identity_diag["legacy_disposition_boundary_visibility"]["latest_legacy_disposition_state"] == "superseded"
+    assert voice_identity_diag["legacy_disposition_boundary_visibility"]["latest_replacement_reference"] == "voiceprint-v2-001"
+    assert voice_identity_diag["ownership_boundary_visibility"]["grants_permission"] is False
+    assert voice_identity_diag["ownership_boundary_visibility"]["revokes_permission"] is False
+    assert voice_identity_diag["ownership_boundary_visibility"]["approves_consent"] is False
+    assert voice_identity_diag["ownership_boundary_visibility"]["infers_consent"] is False
+    assert voice_identity_diag["ownership_boundary_visibility"]["migrates_legacy_identity_data"] is False
+    assert voice_identity_diag["ownership_boundary_visibility"]["disposes_legacy_identity_data"] is False
+    assert voice_identity_diag["ownership_boundary_visibility"]["determines_legacy_disposition"] is False
+    assert voice_identity_diag["ownership_boundary_visibility"]["infers_legacy_disposition_state"] is False
+
+
+async def test_diagnostics_expose_voice_identity_diagnostics_and_explainability_boundary_visibility(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """Diagnostics should expose bounded Voice Identity diagnostics/explainability consumption."""
+    await hass.services.async_call(
+        DOMAIN,
+        "execute",
+        {
+            "target": "light.kitchen",
+            "intent_class": "home_control",
+            "context": {
+                "voice_identity_diagnostics_context": {
+                    "diagnostic_available": True,
+                    "diagnostic_reason_code": "voice_identity_ready",
+                    "health_status": "healthy",
+                    "attribution_readiness": "ready",
+                    "compatibility_readiness": "ready",
+                    "repair_available": True,
+                    "repair_hint_code": "refresh_voice_profile",
+                    "suggested_next_action_code": "retry_after_refresh",
+                    "provenance_source": "voice_identity_diagnostics",
+                    "source_reference": "vi-diagnostics-001",
+                    "lineage_ref": "vi-diagnostics-lineage-001",
+                    "source": "voice_identity",
+                },
+                "voice_identity_explainability_context": {
+                    "consumed_outcome": "attribution_abstained",
+                    "authority_source": "voice_identity",
+                    "provenance_source": "voice_identity_attribution",
+                    "source_reference": "vi-explainability-001",
+                    "lineage_ref": "vi-explainability-lineage-001",
+                    "attribution_source": "voice_identity_attribution_service",
+                    "confidence_source": "voice_identity_confidence_band",
+                    "enrollment_source": "voice_identity_enrollment_registry",
+                    "lifecycle_source": "voice_identity_lifecycle_registry",
+                    "permission_source": "voice_identity_permission_policy",
+                    "legacy_disposition_source": "voice_identity_legacy_disposition",
+                    "reason_code": "voice_identity_explained",
+                    "source": "voice_identity",
+                },
+            },
+        },
+        blocking=True,
+        return_response=True,
+    )
+
+    diagnostics = await async_get_config_entry_diagnostics(hass, setup_integration)
+    voice_identity_diag = diagnostics["voice_identity_consumption_boundary_visibility"]
+
+    assert voice_identity_diag["authority_visibility"]["voice_identity_diagnostics_authority_external"] is True
+    assert voice_identity_diag["authority_visibility"]["voice_identity_explainability_authority_external"] is True
+    assert (
+        voice_identity_diag["diagnostics_boundary_visibility"]["latest_boundary_path"]
+        == "governed_voice_identity_diagnostics_consumption"
+    )
+    assert voice_identity_diag["diagnostics_boundary_visibility"]["latest_consumption_only"] is True
+    assert voice_identity_diag["diagnostics_boundary_visibility"]["latest_diagnostics_consumed"] is True
+    assert voice_identity_diag["diagnostics_boundary_visibility"]["latest_diagnostic_available"] is True
+    assert voice_identity_diag["diagnostics_boundary_visibility"]["latest_health_status"] == "healthy"
+    assert voice_identity_diag["diagnostics_boundary_visibility"]["latest_repair_hint_code"] == "refresh_voice_profile"
+    assert voice_identity_diag["diagnostics_boundary_visibility"]["latest_provenance_source"] == "voice_identity_diagnostics"
+    assert voice_identity_diag["diagnostics_boundary_visibility"]["latest_lineage_ref"] == "vi-diagnostics-lineage-001"
+    assert (
+        voice_identity_diag["explainability_boundary_visibility"]["latest_boundary_path"]
+        == "governed_voice_identity_explainability_consumption"
+    )
+    assert voice_identity_diag["explainability_boundary_visibility"]["latest_consumption_only"] is True
+    assert voice_identity_diag["explainability_boundary_visibility"]["latest_explainability_consumed"] is True
+    assert voice_identity_diag["explainability_boundary_visibility"]["latest_consumed_outcome"] == "attribution_abstained"
+    assert voice_identity_diag["explainability_boundary_visibility"]["latest_authority_source"] == "voice_identity"
+    assert voice_identity_diag["explainability_boundary_visibility"]["latest_provenance_source"] == "voice_identity_attribution"
+    assert voice_identity_diag["explainability_boundary_visibility"]["latest_attribution_source"] == "voice_identity_attribution_service"
+    assert voice_identity_diag["explainability_boundary_visibility"]["latest_confidence_source"] == "voice_identity_confidence_band"
+    assert voice_identity_diag["explainability_boundary_visibility"]["latest_enrollment_source"] == "voice_identity_enrollment_registry"
+    assert voice_identity_diag["explainability_boundary_visibility"]["latest_lifecycle_source"] == "voice_identity_lifecycle_registry"
+    assert voice_identity_diag["explainability_boundary_visibility"]["latest_permission_source"] == "voice_identity_permission_policy"
+    assert voice_identity_diag["explainability_boundary_visibility"]["latest_legacy_disposition_source"] == "voice_identity_legacy_disposition"
+    assert voice_identity_diag["ownership_boundary_visibility"]["generates_diagnostics_authority"] is False
+    assert voice_identity_diag["ownership_boundary_visibility"]["rewrites_diagnostics"] is False
+    assert voice_identity_diag["ownership_boundary_visibility"]["calculates_health_status"] is False
+    assert voice_identity_diag["ownership_boundary_visibility"]["calculates_readiness"] is False
+    assert voice_identity_diag["ownership_boundary_visibility"]["generates_repair_hints"] is False
+    assert voice_identity_diag["ownership_boundary_visibility"]["generates_explainability_authority"] is False
+    assert voice_identity_diag["ownership_boundary_visibility"]["replaces_provenance"] is False
+    assert voice_identity_diag["ownership_boundary_visibility"]["creates_explainability_lineage"] is False
+
+
 async def test_diagnostics_expose_execution_and_routing_explainability(
     hass: HomeAssistant,
     setup_integration,
@@ -276,6 +539,7 @@ async def test_diagnostics_expose_execution_and_routing_explainability(
             "speakable": "Clear skies tonight.",
         },
         blocking=True,
+        return_response=True,
     )
     await hass.services.async_call(
         DOMAIN,
@@ -287,6 +551,7 @@ async def test_diagnostics_expose_execution_and_routing_explainability(
             "primary_area": dining.id,
         },
         blocking=True,
+        return_response=True,
     )
     await hass.services.async_call(
         DOMAIN,
@@ -296,6 +561,7 @@ async def test_diagnostics_expose_execution_and_routing_explainability(
             "preferences": {"mode": "scene", "target": "scene.public_space"},
         },
         blocking=True,
+        return_response=True,
     )
 
     await hass.services.async_call(
@@ -341,6 +607,25 @@ async def test_diagnostics_expose_execution_and_routing_explainability(
     assert latest_direct["plan_kind"] == "direct_service_call"
     assert latest_direct["route_scope"] == "direct"
 
+    voice_identity_diag = diagnostics["voice_identity_consumption_boundary_visibility"]
+    assert voice_identity_diag["authority_visibility"]["voice_identity_authority_external"] is True
+    assert voice_identity_diag["consumption_visibility"]["execution_envelope_ref_count"] >= 1
+    assert (
+        voice_identity_diag["consumption_visibility"]["latest_boundary_path"]
+        == "governed_voice_identity_attribution_confidence_consumption"
+    )
+    assert voice_identity_diag["consumption_visibility"]["latest_consumption_only"] is True
+    assert voice_identity_diag["ownership_boundary_visibility"]["derives_attribution_authority"] is False
+    assert voice_identity_diag["ownership_boundary_visibility"]["derives_confidence_authority"] is False
+    assert voice_identity_diag["ownership_boundary_visibility"]["calculates_attribution"] is False
+    assert voice_identity_diag["ownership_boundary_visibility"]["calculates_confidence"] is False
+    assert voice_identity_diag["enrollment_boundary_visibility"]["latest_consumption_only"] is True
+    assert voice_identity_diag["ownership_boundary_visibility"]["manages_enrollment_lifecycle"] is False
+    assert voice_identity_diag["ownership_boundary_visibility"]["manages_voice_profile_lifecycle"] is False
+    assert voice_identity_diag["ownership_boundary_visibility"]["creates_voice_profiles"] is False
+    assert voice_identity_diag["ownership_boundary_visibility"]["changes_enrollment_state"] is False
+    assert voice_identity_diag["ownership_boundary_visibility"]["infers_enrollment_state"] is False
+
     occupancy_presence_diag = diagnostics["occupancy_presence_diagnostics_explainability_visibility"]
     assert occupancy_presence_diag["authority_visibility"]["occupancy_authority_external"] is True
     assert occupancy_presence_diag["authority_visibility"]["presence_authority_external"] is True
@@ -369,11 +654,9 @@ async def test_diagnostics_expose_execution_and_routing_explainability(
     assert occupancy_presence_diag["safeguard_visibility"]["guest_safe_boundary_preserved"] is True
     assert occupancy_presence_diag["safeguard_visibility"]["privacy_boundary_preserved"] is True
     assert occupancy_presence_diag["safeguard_visibility"]["guest_safe_mode_preserved"] is False
-    assert occupancy_presence_diag["safeguard_visibility"]["unknown_occupant_mode_preserved"] is False
+    assert occupancy_presence_diag["safeguard_visibility"]["unknown_occupant_mode_preserved"] is True
     assert occupancy_presence_diag["traceability_visibility"]["execution_envelope_ref_count"] >= 1
     assert occupancy_presence_diag["traceability_visibility"]["latest_execution_kind"] == "direct"
-    assert occupancy_presence_diag["traceability_visibility"]["latest_orchestration_occupancy_governance_path"] == "governed_occupancy_boundary"
-    assert occupancy_presence_diag["traceability_visibility"]["latest_direct_occupancy_governance_path"] == "not_applicable_direct_execution"
     assert occupancy_presence_diag["deferred_functionality_visibility"]["occupancy_governance_boundary"] == "#333"
     assert occupancy_presence_diag["deferred_functionality_visibility"]["presence_governance_boundary"] == "#334"
     assert occupancy_presence_diag["deferred_functionality_visibility"]["guest_unknown_occupant_behavior"] == "#335"
@@ -388,15 +671,15 @@ async def test_diagnostics_expose_execution_and_routing_explainability(
     experience_diag = diagnostics["experience_diagnostics_explainability_visibility"]
     assert experience_diag["governance_visibility"]["latest_experience_governance_applicable"] is True
     assert experience_diag["governance_visibility"]["latest_experience_governance_path"] == "capability_consumption_to_experience_governance"
-    assert experience_diag["handoff_visibility"]["latest_capability_to_experience_handoff_applicable"] is True
-    assert experience_diag["handoff_visibility"]["latest_capability_to_experience_handoff_path"] == "capability_to_experience_consumption"
+    assert experience_diag["handoff_visibility"]["latest_capability_to_experience_handoff_applicable"] is False
+    assert experience_diag["handoff_visibility"]["latest_capability_to_experience_handoff_path"] == "not_applicable_direct_execution"
     assert experience_diag["handoff_visibility"]["latest_handoff_transfers_authority"] is False
-    assert experience_diag["projection_visibility"]["latest_experience_projection_applicable"] is True
-    assert experience_diag["projection_visibility"]["latest_experience_projection_path"] == "experience_projection_from_capability_handoff"
+    assert experience_diag["projection_visibility"]["latest_experience_projection_applicable"] is False
+    assert experience_diag["projection_visibility"]["latest_experience_projection_path"] == "not_applicable_direct_execution"
     assert experience_diag["projection_visibility"]["latest_projection_is_authority"] is False
-    assert experience_diag["restoration_visibility"]["latest_experience_restoration_boundary_applicable"] is True
-    assert experience_diag["restoration_visibility"]["latest_experience_restoration_path"] == "experience_projection_to_restoration_boundary"
-    assert experience_diag["restoration_visibility"]["latest_restoration_governance_path"] == "governed_restoration_boundary"
+    assert experience_diag["restoration_visibility"]["latest_experience_restoration_boundary_applicable"] is False
+    assert experience_diag["restoration_visibility"]["latest_experience_restoration_path"] == "not_applicable_direct_execution"
+    assert experience_diag["restoration_visibility"]["latest_restoration_governance_path"] == "not_applicable_direct_execution"
     assert experience_diag["restoration_visibility"]["latest_restoration_authority_transferred"] is False
     assert experience_diag["restoration_visibility"]["latest_restoration_authority_external"] is True
     assert experience_diag["restoration_visibility"]["latest_restoration_policy_authority_external"] is True
@@ -441,13 +724,13 @@ async def test_diagnostics_expose_execution_and_routing_explainability(
     assert restoration_diag["authority_visibility"]["restoration_authority_external"] is True
     assert restoration_diag["authority_visibility"]["restoration_policy_authority_external"] is True
     assert restoration_diag["authority_visibility"]["restoration_authority_transferred"] is False
-    assert restoration_diag["restoration_explainability"]["restoration_available"] is True
-    assert restoration_diag["restoration_explainability"]["restoration_applicable"] is True
-    assert restoration_diag["restoration_explainability"]["restoration_eligible"] is True
-    assert restoration_diag["restoration_explainability"]["restoration_applied"] is True
-    assert restoration_diag["restoration_explainability"]["restoration_outcome_path"] == "experience_projection_to_restoration_outcome"
-    assert restoration_diag["restoration_explainability"]["restoration_outcome_reason"] == "projected_experience_selected"
-    assert restoration_diag["restoration_explainability"]["restoration_suppression_reason"] == "not_suppressed"
+    assert restoration_diag["restoration_explainability"]["restoration_available"] is False
+    assert restoration_diag["restoration_explainability"]["restoration_applicable"] is False
+    assert restoration_diag["restoration_explainability"]["restoration_eligible"] is False
+    assert restoration_diag["restoration_explainability"]["restoration_applied"] is False
+    assert restoration_diag["restoration_explainability"]["restoration_outcome_path"] == "not_applicable_direct_execution"
+    assert restoration_diag["restoration_explainability"]["restoration_outcome_reason"] == "direct_execution_not_eligible"
+    assert restoration_diag["restoration_explainability"]["restoration_suppression_reason"] == "direct_execution_not_eligible"
     assert restoration_diag["restoration_explainability"]["direct_path_reason"] == "direct_execution_not_eligible"
     assert restoration_diag["preservation_alignment_explainability"]["alignment_applicable"] is False
     assert restoration_diag["preservation_alignment_explainability"]["alignment_path"] == "not_applicable_direct_execution"

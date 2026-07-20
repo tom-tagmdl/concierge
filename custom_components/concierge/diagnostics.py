@@ -683,6 +683,644 @@ def _experience_diagnostics_explainability_visibility(state) -> dict[str, Any]:
     }
 
 
+def _voice_identity_consumption_boundary_visibility(state) -> dict[str, Any]:
+    """Return bounded visibility into Voice Identity attribution/confidence consumption."""
+    execution_envelope_refs: list[dict[str, Any]] = []
+
+    for activity in sorted(
+        state.activities.values(),
+        key=lambda item: str(getattr(item, "started_at", "")),
+        reverse=True,
+    ):
+        for ref in list(getattr(activity, "external_refs", [])):
+            if str(ref.get("ref_type", "") or "") == "execution_envelope":
+                execution_envelope_refs.append(dict(ref))
+
+    latest_envelope = execution_envelope_refs[0] if execution_envelope_refs else None
+
+    return {
+        "authority_visibility": {
+            "voice_identity_authority_external": (
+                bool(latest_envelope.get("voice_identity_authority_external", False))
+                if latest_envelope is not None
+                else False
+            ),
+            "voice_identity_enrollment_authority_external": (
+                bool(latest_envelope.get("voice_identity_enrollment_authority_external", False))
+                if latest_envelope is not None
+                else False
+            ),
+            "voice_identity_permission_authority_external": (
+                bool(latest_envelope.get("voice_identity_permission_authority_external", False))
+                if latest_envelope is not None
+                else False
+            ),
+            "voice_identity_legacy_disposition_authority_external": (
+                bool(latest_envelope.get("voice_identity_legacy_disposition_authority_external", False))
+                if latest_envelope is not None
+                else False
+            ),
+            "voice_identity_diagnostics_authority_external": (
+                bool(latest_envelope.get("voice_identity_diagnostics_authority_external", False))
+                if latest_envelope is not None
+                else False
+            ),
+            "voice_identity_explainability_authority_external": (
+                bool(latest_envelope.get("voice_identity_explainability_authority_external", False))
+                if latest_envelope is not None
+                else False
+            ),
+            "concierge_role": "bounded_consumer_orchestrator",
+        },
+        "consumption_visibility": {
+            "execution_envelope_ref_count": len(execution_envelope_refs),
+            "latest_boundary_path": (
+                latest_envelope.get("voice_identity_consumption_boundary_path")
+                if latest_envelope is not None
+                else None
+            ),
+            "latest_consumption_only": (
+                bool(latest_envelope.get("voice_identity_consumption_only", False))
+                if latest_envelope is not None
+                else False
+            ),
+            "latest_attribution_consumed": (
+                bool(latest_envelope.get("voice_identity_attribution_consumed", False))
+                if latest_envelope is not None
+                else False
+            ),
+            "latest_attribution_state": (
+                latest_envelope.get("voice_identity_attribution_state")
+                if latest_envelope is not None
+                else None
+            ),
+            "latest_attribution_reason_code": (
+                latest_envelope.get("voice_identity_attribution_reason_code")
+                if latest_envelope is not None
+                else None
+            ),
+            "latest_confidence_consumed": (
+                bool(latest_envelope.get("voice_identity_confidence_consumed", False))
+                if latest_envelope is not None
+                else False
+            ),
+            "latest_confidence_value": (
+                latest_envelope.get("voice_identity_confidence_value")
+                if latest_envelope is not None
+                else None
+            ),
+            "latest_confidence_band": (
+                latest_envelope.get("voice_identity_confidence_band")
+                if latest_envelope is not None
+                else None
+            ),
+            "latest_confidence_reason_code": (
+                latest_envelope.get("voice_identity_confidence_reason_code")
+                if latest_envelope is not None
+                else None
+            ),
+        },
+        "enrollment_boundary_visibility": {
+            "latest_boundary_path": (
+                latest_envelope.get("voice_identity_enrollment_lifecycle_boundary_path")
+                if latest_envelope is not None
+                else None
+            ),
+            "latest_consumption_only": (
+                bool(latest_envelope.get("voice_identity_enrollment_lifecycle_consumption_only", False))
+                if latest_envelope is not None
+                else False
+            ),
+            "latest_enrollment_state_consumed": (
+                bool(latest_envelope.get("voice_identity_enrollment_state_consumed", False))
+                if latest_envelope is not None
+                else False
+            ),
+            "latest_enrollment_state": (
+                latest_envelope.get("voice_identity_enrollment_state")
+                if latest_envelope is not None
+                else None
+            ),
+            "latest_enrollment_readiness": (
+                latest_envelope.get("voice_identity_enrollment_readiness")
+                if latest_envelope is not None
+                else None
+            ),
+            "latest_enrollment_reason_code": (
+                latest_envelope.get("voice_identity_enrollment_reason_code")
+                if latest_envelope is not None
+                else None
+            ),
+        },
+        "lifecycle_boundary_visibility": {
+            "latest_lifecycle_state_consumed": (
+                bool(latest_envelope.get("voice_identity_lifecycle_state_consumed", False))
+                if latest_envelope is not None
+                else False
+            ),
+            "latest_enrollment_lifecycle_state": (
+                latest_envelope.get("voice_identity_enrollment_lifecycle_state")
+                if latest_envelope is not None
+                else None
+            ),
+            "latest_voice_profile_lifecycle_state": (
+                latest_envelope.get("voice_identity_voice_profile_lifecycle_state")
+                if latest_envelope is not None
+                else None
+            ),
+            "latest_identity_lifecycle_state": (
+                latest_envelope.get("voice_identity_identity_lifecycle_state")
+                if latest_envelope is not None
+                else None
+            ),
+            "latest_lifecycle_reason_code": (
+                latest_envelope.get("voice_identity_lifecycle_reason_code")
+                if latest_envelope is not None
+                else None
+            ),
+        },
+        "permission_boundary_visibility": {
+            "latest_boundary_path": (
+                latest_envelope.get("voice_identity_permission_boundary_path")
+                if latest_envelope is not None
+                else None
+            ),
+            "latest_consumption_only": (
+                bool(latest_envelope.get("voice_identity_permission_consumption_only", False))
+                if latest_envelope is not None
+                else False
+            ),
+            "latest_permission_state_consumed": (
+                bool(latest_envelope.get("voice_identity_permission_state_consumed", False))
+                if latest_envelope is not None
+                else False
+            ),
+            "latest_permission_state": (
+                latest_envelope.get("voice_identity_permission_state")
+                if latest_envelope is not None
+                else None
+            ),
+            "latest_permission_outcome": (
+                latest_envelope.get("voice_identity_permission_outcome")
+                if latest_envelope is not None
+                else None
+            ),
+            "latest_consent_state": (
+                latest_envelope.get("voice_identity_consent_state")
+                if latest_envelope is not None
+                else None
+            ),
+            "latest_consent_outcome": (
+                latest_envelope.get("voice_identity_consent_outcome")
+                if latest_envelope is not None
+                else None
+            ),
+            "latest_eligibility_state": (
+                latest_envelope.get("voice_identity_permission_eligibility_state")
+                if latest_envelope is not None
+                else None
+            ),
+            "latest_gating_reason": (
+                latest_envelope.get("voice_identity_permission_gating_reason")
+                if latest_envelope is not None
+                else None
+            ),
+            "latest_permission_reason_code": (
+                latest_envelope.get("voice_identity_permission_reason_code")
+                if latest_envelope is not None
+                else None
+            ),
+        },
+        "legacy_disposition_boundary_visibility": {
+            "latest_boundary_path": (
+                latest_envelope.get("voice_identity_legacy_disposition_boundary_path")
+                if latest_envelope is not None
+                else None
+            ),
+            "latest_consumption_only": (
+                bool(latest_envelope.get("voice_identity_legacy_disposition_consumption_only", False))
+                if latest_envelope is not None
+                else False
+            ),
+            "latest_legacy_disposition_consumed": (
+                bool(latest_envelope.get("voice_identity_legacy_disposition_consumed", False))
+                if latest_envelope is not None
+                else False
+            ),
+            "latest_legacy_disposition_state": (
+                latest_envelope.get("voice_identity_legacy_disposition_state")
+                if latest_envelope is not None
+                else None
+            ),
+            "latest_legacy_disposition_outcome": (
+                latest_envelope.get("voice_identity_legacy_disposition_outcome")
+                if latest_envelope is not None
+                else None
+            ),
+            "latest_legacy_reference": (
+                latest_envelope.get("voice_identity_legacy_reference")
+                if latest_envelope is not None
+                else None
+            ),
+            "latest_replacement_reference": (
+                latest_envelope.get("voice_identity_legacy_replacement_reference")
+                if latest_envelope is not None
+                else None
+            ),
+            "latest_legacy_disposition_reason_code": (
+                latest_envelope.get("voice_identity_legacy_disposition_reason_code")
+                if latest_envelope is not None
+                else None
+            ),
+        },
+        "diagnostics_boundary_visibility": {
+            "latest_boundary_path": (
+                latest_envelope.get("voice_identity_diagnostics_boundary_path")
+                if latest_envelope is not None
+                else None
+            ),
+            "latest_consumption_only": (
+                bool(latest_envelope.get("voice_identity_diagnostics_consumption_only", False))
+                if latest_envelope is not None
+                else False
+            ),
+            "latest_diagnostics_consumed": (
+                bool(latest_envelope.get("voice_identity_diagnostics_consumed", False))
+                if latest_envelope is not None
+                else False
+            ),
+            "latest_diagnostic_available": (
+                bool(latest_envelope.get("voice_identity_diagnostic_available", False))
+                if latest_envelope is not None
+                else False
+            ),
+            "latest_diagnostic_reason_code": (
+                latest_envelope.get("voice_identity_diagnostic_reason_code")
+                if latest_envelope is not None
+                else None
+            ),
+            "latest_health_status": (
+                latest_envelope.get("voice_identity_health_status")
+                if latest_envelope is not None
+                else None
+            ),
+            "latest_attribution_readiness": (
+                latest_envelope.get("voice_identity_attribution_readiness")
+                if latest_envelope is not None
+                else None
+            ),
+            "latest_compatibility_readiness": (
+                latest_envelope.get("voice_identity_compatibility_readiness")
+                if latest_envelope is not None
+                else None
+            ),
+            "latest_repair_available": (
+                bool(latest_envelope.get("voice_identity_repair_available", False))
+                if latest_envelope is not None
+                else False
+            ),
+            "latest_repair_hint_code": (
+                latest_envelope.get("voice_identity_repair_hint_code")
+                if latest_envelope is not None
+                else None
+            ),
+            "latest_suggested_next_action_code": (
+                latest_envelope.get("voice_identity_suggested_next_action_code")
+                if latest_envelope is not None
+                else None
+            ),
+            "latest_provenance_source": (
+                latest_envelope.get("voice_identity_diagnostics_provenance_source")
+                if latest_envelope is not None
+                else None
+            ),
+            "latest_source_reference": (
+                latest_envelope.get("voice_identity_diagnostics_source_reference")
+                if latest_envelope is not None
+                else None
+            ),
+            "latest_lineage_ref": (
+                latest_envelope.get("voice_identity_diagnostics_lineage_ref")
+                if latest_envelope is not None
+                else None
+            ),
+        },
+        "explainability_boundary_visibility": {
+            "latest_boundary_path": (
+                latest_envelope.get("voice_identity_explainability_boundary_path")
+                if latest_envelope is not None
+                else None
+            ),
+            "latest_consumption_only": (
+                bool(latest_envelope.get("voice_identity_explainability_consumption_only", False))
+                if latest_envelope is not None
+                else False
+            ),
+            "latest_explainability_consumed": (
+                bool(latest_envelope.get("voice_identity_explainability_consumed", False))
+                if latest_envelope is not None
+                else False
+            ),
+            "latest_consumed_outcome": (
+                latest_envelope.get("voice_identity_explainability_consumed_outcome")
+                if latest_envelope is not None
+                else None
+            ),
+            "latest_authority_source": (
+                latest_envelope.get("voice_identity_explainability_authority_source")
+                if latest_envelope is not None
+                else None
+            ),
+            "latest_provenance_source": (
+                latest_envelope.get("voice_identity_explainability_provenance_source")
+                if latest_envelope is not None
+                else None
+            ),
+            "latest_source_reference": (
+                latest_envelope.get("voice_identity_explainability_source_reference")
+                if latest_envelope is not None
+                else None
+            ),
+            "latest_lineage_ref": (
+                latest_envelope.get("voice_identity_explainability_lineage_ref")
+                if latest_envelope is not None
+                else None
+            ),
+            "latest_attribution_source": (
+                latest_envelope.get("voice_identity_explainability_attribution_source")
+                if latest_envelope is not None
+                else None
+            ),
+            "latest_confidence_source": (
+                latest_envelope.get("voice_identity_explainability_confidence_source")
+                if latest_envelope is not None
+                else None
+            ),
+            "latest_enrollment_source": (
+                latest_envelope.get("voice_identity_explainability_enrollment_source")
+                if latest_envelope is not None
+                else None
+            ),
+            "latest_lifecycle_source": (
+                latest_envelope.get("voice_identity_explainability_lifecycle_source")
+                if latest_envelope is not None
+                else None
+            ),
+            "latest_permission_source": (
+                latest_envelope.get("voice_identity_explainability_permission_source")
+                if latest_envelope is not None
+                else None
+            ),
+            "latest_legacy_disposition_source": (
+                latest_envelope.get("voice_identity_explainability_legacy_disposition_source")
+                if latest_envelope is not None
+                else None
+            ),
+            "latest_unavailable_state": (
+                latest_envelope.get("voice_identity_explainability_unavailable_state")
+                if latest_envelope is not None
+                else None
+            ),
+            "latest_reason_code": (
+                latest_envelope.get("voice_identity_explainability_reason_code")
+                if latest_envelope is not None
+                else None
+            ),
+        },
+        "ownership_boundary_visibility": {
+            "derives_attribution_authority": (
+                bool(latest_envelope.get("voice_identity_derives_attribution_authority", False))
+                if latest_envelope is not None
+                else False
+            ),
+            "derives_confidence_authority": (
+                bool(latest_envelope.get("voice_identity_derives_confidence_authority", False))
+                if latest_envelope is not None
+                else False
+            ),
+            "calculates_attribution": (
+                bool(latest_envelope.get("voice_identity_calculates_attribution", False))
+                if latest_envelope is not None
+                else False
+            ),
+            "calculates_confidence": (
+                bool(latest_envelope.get("voice_identity_calculates_confidence", False))
+                if latest_envelope is not None
+                else False
+            ),
+            "manages_identity_lifecycle": (
+                bool(latest_envelope.get("voice_identity_manages_identity_lifecycle", False))
+                if latest_envelope is not None
+                else False
+            ),
+            "manages_enrollment": (
+                bool(latest_envelope.get("voice_identity_manages_enrollment", False))
+                if latest_envelope is not None
+                else False
+            ),
+            "manages_enrollment_lifecycle": (
+                bool(latest_envelope.get("voice_identity_manages_enrollment_lifecycle", False))
+                if latest_envelope is not None
+                else False
+            ),
+            "manages_voice_profile_lifecycle": (
+                bool(latest_envelope.get("voice_identity_manages_voice_profile_lifecycle", False))
+                if latest_envelope is not None
+                else False
+            ),
+            "creates_voice_profiles": (
+                bool(latest_envelope.get("voice_identity_creates_voice_profiles", False))
+                if latest_envelope is not None
+                else False
+            ),
+            "changes_enrollment_state": (
+                bool(latest_envelope.get("voice_identity_changes_enrollment_state", False))
+                if latest_envelope is not None
+                else False
+            ),
+            "infers_enrollment_state": (
+                bool(latest_envelope.get("voice_identity_infers_enrollment_state", False))
+                if latest_envelope is not None
+                else False
+            ),
+            "derives_permission_authority": (
+                bool(latest_envelope.get("voice_identity_derives_permission_authority", False))
+                if latest_envelope is not None
+                else False
+            ),
+            "creates_permission_policy": (
+                bool(latest_envelope.get("voice_identity_creates_permission_policy", False))
+                if latest_envelope is not None
+                else False
+            ),
+            "defines_eligibility_rules": (
+                bool(latest_envelope.get("voice_identity_defines_eligibility_rules", False))
+                if latest_envelope is not None
+                else False
+            ),
+            "determines_permission_outcomes": (
+                bool(latest_envelope.get("voice_identity_determines_permission_outcomes", False))
+                if latest_envelope is not None
+                else False
+            ),
+            "overrides_permission_policy": (
+                bool(latest_envelope.get("voice_identity_overrides_permission_policy", False))
+                if latest_envelope is not None
+                else False
+            ),
+            "grants_permission": (
+                bool(latest_envelope.get("voice_identity_grants_permission", False))
+                if latest_envelope is not None
+                else False
+            ),
+            "revokes_permission": (
+                bool(latest_envelope.get("voice_identity_revokes_permission", False))
+                if latest_envelope is not None
+                else False
+            ),
+            "approves_consent": (
+                bool(latest_envelope.get("voice_identity_approves_consent", False))
+                if latest_envelope is not None
+                else False
+            ),
+            "infers_consent": (
+                bool(latest_envelope.get("voice_identity_infers_consent", False))
+                if latest_envelope is not None
+                else False
+            ),
+            "infers_permission_state": (
+                bool(latest_envelope.get("voice_identity_infers_permission_state", False))
+                if latest_envelope is not None
+                else False
+            ),
+            "manages_legacy_fingerprint_resolution": (
+                bool(latest_envelope.get("voice_identity_manages_legacy_fingerprint_resolution", False))
+                if latest_envelope is not None
+                else False
+            ),
+            "migrates_legacy_identity_data": (
+                bool(latest_envelope.get("voice_identity_migrates_legacy_identity_data", False))
+                if latest_envelope is not None
+                else False
+            ),
+            "disposes_legacy_identity_data": (
+                bool(latest_envelope.get("voice_identity_disposes_legacy_identity_data", False))
+                if latest_envelope is not None
+                else False
+            ),
+            "determines_legacy_disposition": (
+                bool(latest_envelope.get("voice_identity_determines_legacy_disposition", False))
+                if latest_envelope is not None
+                else False
+            ),
+            "infers_legacy_disposition_state": (
+                bool(latest_envelope.get("voice_identity_infers_legacy_disposition_state", False))
+                if latest_envelope is not None
+                else False
+            ),
+            "claims_voiceprint_ownership": (
+                bool(latest_envelope.get("voice_identity_claims_voiceprint_ownership", False))
+                if latest_envelope is not None
+                else False
+            ),
+            "claims_embedding_ownership": (
+                bool(latest_envelope.get("voice_identity_claims_embedding_ownership", False))
+                if latest_envelope is not None
+                else False
+            ),
+            "establishes_identity_authority": (
+                bool(latest_envelope.get("voice_identity_establishes_identity_authority", False))
+                if latest_envelope is not None
+                else False
+            ),
+            "determines_enrollment_state": (
+                bool(latest_envelope.get("voice_identity_determines_enrollment_state", False))
+                if latest_envelope is not None
+                else False
+            ),
+            "generates_diagnostics_authority": (
+                bool(latest_envelope.get("voice_identity_generates_diagnostics_authority", False))
+                if latest_envelope is not None
+                else False
+            ),
+            "rewrites_diagnostics": (
+                bool(latest_envelope.get("voice_identity_rewrites_diagnostics", False))
+                if latest_envelope is not None
+                else False
+            ),
+            "calculates_health_status": (
+                bool(latest_envelope.get("voice_identity_calculates_health_status", False))
+                if latest_envelope is not None
+                else False
+            ),
+            "calculates_readiness": (
+                bool(latest_envelope.get("voice_identity_calculates_readiness", False))
+                if latest_envelope is not None
+                else False
+            ),
+            "generates_repair_hints": (
+                bool(latest_envelope.get("voice_identity_generates_repair_hints", False))
+                if latest_envelope is not None
+                else False
+            ),
+            "generates_explainability_authority": (
+                bool(latest_envelope.get("voice_identity_generates_explainability_authority", False))
+                if latest_envelope is not None
+                else False
+            ),
+            "replaces_provenance": (
+                bool(latest_envelope.get("voice_identity_replaces_provenance", False))
+                if latest_envelope is not None
+                else False
+            ),
+            "creates_explainability_lineage": (
+                bool(latest_envelope.get("voice_identity_creates_explainability_lineage", False))
+                if latest_envelope is not None
+                else False
+            ),
+        },
+        "diagnostics_non_rights": {
+            "creates_authority": False,
+            "calculates_attribution": False,
+            "calculates_confidence": False,
+            "manages_identity_lifecycle": False,
+            "manages_enrollment": False,
+            "manages_enrollment_lifecycle": False,
+            "manages_voice_profile_lifecycle": False,
+            "creates_voice_profiles": False,
+            "changes_enrollment_state": False,
+            "infers_enrollment_state": False,
+            "derives_permission_authority": False,
+            "creates_permission_policy": False,
+            "defines_eligibility_rules": False,
+            "determines_permission_outcomes": False,
+            "overrides_permission_policy": False,
+            "grants_permission": False,
+            "revokes_permission": False,
+            "approves_consent": False,
+            "infers_consent": False,
+            "infers_permission_state": False,
+            "manages_legacy_fingerprint_resolution": False,
+            "migrates_legacy_identity_data": False,
+            "disposes_legacy_identity_data": False,
+            "determines_legacy_disposition": False,
+            "infers_legacy_disposition_state": False,
+            "claims_voiceprint_ownership": False,
+            "claims_embedding_ownership": False,
+            "establishes_identity_authority": False,
+            "determines_enrollment_state": False,
+            "generates_diagnostics_authority": False,
+            "rewrites_diagnostics": False,
+            "calculates_health_status": False,
+            "calculates_readiness": False,
+            "generates_repair_hints": False,
+            "generates_explainability_authority": False,
+            "replaces_provenance": False,
+            "creates_explainability_lineage": False,
+        },
+    }
+
+
 def _messaging_governance_boundary_visibility(state) -> dict[str, Any]:
     """Return bounded messaging governance visibility from recorded activity refs."""
     messaging_boundary_refs: list[dict[str, Any]] = []
@@ -2493,6 +3131,7 @@ async def async_get_config_entry_diagnostics(
         "vocabulary_diagnostics_visibility": _vocabulary_diagnostics_visibility(state),
         "capability_diagnostics_explainability_visibility": _capability_diagnostics_explainability_visibility(state),
         "experience_diagnostics_explainability_visibility": _experience_diagnostics_explainability_visibility(state),
+        "voice_identity_consumption_boundary_visibility": _voice_identity_consumption_boundary_visibility(state),
         "messaging_governance_boundary_visibility": _messaging_governance_boundary_visibility(state),
         "messaging_provenance_visibility": _messaging_provenance_visibility(state),
         "notification_delivery_boundary_visibility": _notification_delivery_boundary_visibility(state),
