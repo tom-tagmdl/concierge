@@ -24,6 +24,9 @@ globalThis.document = globalThis.document || {
 globalThis.window = globalThis.window || {
   location: { origin: "http://localhost" },
   isSecureContext: true,
+  requestAnimationFrame(callback) {
+    if (typeof callback === "function") callback();
+  },
   addEventListener() {
     // no-op
   },
@@ -277,6 +280,118 @@ test("normal hass updates still rerender when no enrollment modal is active", ()
   app.hass = { auth: { data: {} } };
 
   assert.equal(renderCalls, 1);
+});
+
+test("room_devices save maps selected device-group entities into room selection fields", async () => {
+  const app = new ConciergeApp();
+  const serviceCalls = [];
+
+  app._hass = {
+    callService: async (domain, service, payload) => {
+      serviceCalls.push({ domain, service, payload });
+    },
+  };
+  app._roomCatalog = {
+    "area.kitchen": {
+      voice_device_entity_ids: [{ entity_id: "assist_satellite.kitchen" }],
+      speaker_entity_ids: [{ entity_id: "media_player.kitchen_speaker" }],
+      media_player_entity_ids: [{ entity_id: "media_player.kitchen_speaker" }],
+      light_entity_ids: [{ entity_id: "light.kitchen" }],
+      lamp_entity_ids: [{ entity_id: "light.kitchen_lamp" }],
+      shade_entity_ids: [{ entity_id: "cover.kitchen_shade" }],
+      room_sensor_entity_ids: [{ entity_id: "sensor.kitchen_temperature" }],
+      room_health_entity_ids: [{ entity_id: "sensor.kitchen_room_health" }],
+      human_health_entity_ids: [{ entity_id: "sensor.kitchen_human_health" }],
+      tv_entity_ids: [{ entity_id: "media_player.kitchen_tv" }],
+      dashboard_entity_ids: [{ entity_id: "sensor.kitchen_dashboard" }],
+      other_entity_ids: [{ entity_id: "switch.kitchen_misc" }],
+    },
+  };
+  app._collectRoomDeviceGroups = () => [
+    {
+      group_name: "Living",
+      entity_ids: [
+        "assist_satellite.kitchen",
+        "media_player.kitchen_speaker",
+        "light.kitchen",
+        "sensor.unknown",
+      ],
+    },
+  ];
+  app._selectedAreaId = null;
+  app.querySelector = () => null;
+  app._clearRoomSectionDraft = () => {};
+  app._clearActiveFormDraft = () => {};
+  app._roomDeviceGroupEntityIds = ConciergeApp.prototype._roomDeviceGroupEntityIds;
+
+  await app._saveRoomSection("area.kitchen", "room_devices");
+
+  assert.equal(serviceCalls.length, 1);
+  const { domain, service, payload } = serviceCalls[0];
+  assert.equal(domain, "concierge");
+  assert.equal(service, "update_room_config");
+  assert.deepEqual(payload.voice_device_entity_ids, ["assist_satellite.kitchen"]);
+  assert.deepEqual(payload.speaker_entity_ids, ["media_player.kitchen_speaker"]);
+  assert.deepEqual(payload.media_player_entity_ids, ["media_player.kitchen_speaker"]);
+  assert.deepEqual(payload.light_entity_ids, ["light.kitchen"]);
+  assert.deepEqual(payload.device_groups, [
+    {
+      group_name: "Living",
+      entity_ids: [
+        "assist_satellite.kitchen",
+        "media_player.kitchen_speaker",
+        "light.kitchen",
+        "sensor.unknown",
+      ],
+    },
+  ]);
+  assert.deepEqual(payload.other_entity_ids, []);
+});
+
+test("merged room save keeps mapped voice and speaker field persistence", async () => {
+  const app = new ConciergeApp();
+  const serviceCalls = [];
+
+  app._hass = {
+    callService: async (domain, service, payload) => {
+      serviceCalls.push({ domain, service, payload });
+    },
+  };
+  app._composites = {};
+  app._compositeCatalog = {
+    "composite.main": {
+      voice_device_entity_ids: [{ entity_id: "assist_satellite.main" }],
+      speaker_entity_ids: [{ entity_id: "media_player.main_speaker" }],
+      media_player_entity_ids: [{ entity_id: "media_player.main_speaker" }],
+      light_entity_ids: [{ entity_id: "light.main" }],
+      shade_entity_ids: [{ entity_id: "cover.main" }],
+      room_sensor_entity_ids: [{ entity_id: "sensor.main" }],
+    },
+  };
+  app._collectRoomDeviceGroups = () => [
+    {
+      group_name: "Merged",
+      entity_ids: ["assist_satellite.main", "media_player.main_speaker", "cover.main"],
+    },
+  ];
+  app.querySelector = () => null;
+  app._load = async () => {};
+  app._render = () => {};
+  app._clearRoomSectionDraft = () => {};
+  app._clearActiveFormDraft = () => {};
+  app._updateRoomSectionDraftActions = () => {};
+  app._roomDeviceGroupEntityIds = ConciergeApp.prototype._roomDeviceGroupEntityIds;
+
+  await app._saveCompositeSection("composite.main", "room_devices");
+
+  assert.equal(serviceCalls.length, 1);
+  const { domain, service, payload } = serviceCalls[0];
+  assert.equal(domain, "concierge");
+  assert.equal(service, "update_composite_config");
+  assert.deepEqual(payload.voice_device_entity_ids, ["assist_satellite.main"]);
+  assert.deepEqual(payload.speaker_entity_ids, ["media_player.main_speaker"]);
+  assert.deepEqual(payload.media_player_entity_ids, ["media_player.main_speaker"]);
+  assert.deepEqual(payload.shade_entity_ids, ["cover.main"]);
 });
 
 test("capture provider setter ignores unavailable provider selections", () => {

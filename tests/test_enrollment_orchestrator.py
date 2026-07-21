@@ -755,6 +755,94 @@ async def test_orchestrator_complete_enrollment_generation_failure_preserves_pro
     assert state.voice_profiles["tom_voice"].speaker_embedding_id == "vp_existing_001"
 
 
+async def test_orchestrator_complete_enrollment_missing_runtime_operation_fails_closed(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """Missing runtime operations should fail closed with generation failure."""
+    storage = ConciergeStorage(hass)
+    await storage.async_update_person_profile(
+        PersonProfile(person_id="person.tom", name="Tom", voice_profile_id="tom_voice"),
+        set_as_default=True,
+    )
+    await storage.async_update_voice_profile(
+        VoiceProfile(
+            voice_profile_id="tom_voice",
+            name="Tom Voice",
+            enrollment_state="capturing",
+            enrollment_source="people_setup",
+        )
+    )
+
+    runtime = hass.data.get("voice_identity")
+    assert isinstance(runtime, dict)
+    runtime_entries = [value for value in runtime.values() if isinstance(value, dict)]
+    assert runtime_entries
+    for entry_runtime in runtime_entries:
+        entry_runtime.pop("generate_voiceprint_operation", None)
+
+    orchestrator = EnrollmentOrchestrator(hass)
+    await orchestrator.start_enrollment(
+        {
+            "person_id": "person.tom",
+            "voice_profile_id": "tom_voice",
+            "voice_name": "Tom Voice",
+            "local_only": True,
+        }
+    )
+    for index, category in enumerate(("command", "question", "conversational")):
+        await orchestrator.record_sample(
+            {
+                "voice_profile_id": "tom_voice",
+                "speech_text": f"Phrase {index + 1}",
+                "phrase_index": index,
+                "source": "guided_enrollment_dialog",
+                "recording_duration_ms": 10000,
+                "prompt_category": category,
+                "capture_distance": "near_field" if index != 1 else "mid_field",
+                "capture_noise": "quiet",
+                "quality_pass": True,
+            }
+        )
+
+    with pytest.raises(Exception, match="generation_failed"):
+        await orchestrator.complete_enrollment(
+            {
+                "voice_profile_id": "tom_voice",
+                "person_id": "person.tom",
+                "min_samples": 3,
+            }
+        )
+
+    session = await storage.async_get_latest_enrollment_session_for_voice_profile("tom_voice")
+    assert session is not None
+    assert str(session.metadata.get("last_generation_failure", "")) == "generation_failed"
+
+
+async def test_orchestrator_generate_operation_missing_returns_operation_not_loaded(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """Operation lookup mismatch should surface operation_not_loaded deterministically."""
+    runtime = hass.data.get("voice_identity")
+    assert isinstance(runtime, dict)
+    runtime_entries = [value for value in runtime.values() if isinstance(value, dict)]
+    assert runtime_entries
+    for entry_runtime in runtime_entries:
+        entry_runtime.pop("generate_voiceprint_operation", None)
+
+    result = await EnrollmentOrchestrator(hass)._async_generate_voiceprint(
+        voice_profile_id="tom_voice",
+        subject_id="person.tom",
+        session_id="session_test",
+        sample_items=[{"sample_id": "sample_1", "recording_path": "/tmp/sample.wav"}],
+    )
+
+    assert result["success"] is False
+    assert result["failure_category"] == "operation_not_loaded"
+    assert result["reason_code"] == "generation_failed"
+
+
 async def test_orchestrator_complete_enrollment_integrates_with_recovery_terminal_state(
     hass: HomeAssistant,
     setup_integration,

@@ -50,6 +50,28 @@ def _normalize_device_groups(value: Any) -> list[dict[str, Any]]:
     return groups
 
 
+def _normalize_source_bindings(value: Any, legacy_ref: Any = None) -> list[dict[str, Any]]:
+    bindings: list[dict[str, Any]] = []
+    if isinstance(value, list):
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            entity_id = str(item.get("entity_id", "") or item.get("entityId", "") or "").strip()
+            if not entity_id:
+                continue
+            label = str(item.get("label", "") or item.get("name", "") or "").strip()
+            bindings.append(
+                {
+                    "label": label,
+                    "entity_id": entity_id,
+                }
+            )
+    legacy_value = str(legacy_ref or "").strip()
+    if legacy_value and not bindings:
+        bindings.append({"label": "", "entity_id": legacy_value})
+    return bindings
+
+
 @dataclass(slots=True)
 class RoomConfig:
     """Room-scoped configuration and alias mappings."""
@@ -115,6 +137,14 @@ class PersonProfile:
     minor_allow_general_qna: bool = False
     minor_allowed_intent_classes: list[str] = field(default_factory=list)
     minor_content_filter_level: str = "strict"
+    email_source_ref: str = ""
+    calendar_source_ref: str = ""
+    task_source_ref: str = ""
+    shopping_source_ref: str = ""
+    email_source_bindings: list[dict[str, Any]] = field(default_factory=list)
+    calendar_source_bindings: list[dict[str, Any]] = field(default_factory=list)
+    task_source_bindings: list[dict[str, Any]] = field(default_factory=list)
+    shopping_source_bindings: list[dict[str, Any]] = field(default_factory=list)
     notes: str = ""
 
 
@@ -387,6 +417,14 @@ class ConciergeState:
                     "minor_allow_general_qna": self.default_person_profile.minor_allow_general_qna,
                     "minor_allowed_intent_classes": self.default_person_profile.minor_allowed_intent_classes,
                     "minor_content_filter_level": self.default_person_profile.minor_content_filter_level,
+                    "email_source_ref": self.default_person_profile.email_source_ref,
+                    "calendar_source_ref": self.default_person_profile.calendar_source_ref,
+                    "task_source_ref": self.default_person_profile.task_source_ref,
+                    "shopping_source_ref": self.default_person_profile.shopping_source_ref,
+                    "email_source_bindings": self.default_person_profile.email_source_bindings,
+                    "calendar_source_bindings": self.default_person_profile.calendar_source_bindings,
+                    "task_source_bindings": self.default_person_profile.task_source_bindings,
+                    "shopping_source_bindings": self.default_person_profile.shopping_source_bindings,
                     "notes": self.default_person_profile.notes,
                 }
                 if self.default_person_profile is not None
@@ -409,6 +447,14 @@ class ConciergeState:
                     "minor_allow_general_qna": profile.minor_allow_general_qna,
                     "minor_allowed_intent_classes": profile.minor_allowed_intent_classes,
                     "minor_content_filter_level": profile.minor_content_filter_level,
+                    "email_source_ref": profile.email_source_ref,
+                    "calendar_source_ref": profile.calendar_source_ref,
+                    "task_source_ref": profile.task_source_ref,
+                    "shopping_source_ref": profile.shopping_source_ref,
+                    "email_source_bindings": profile.email_source_bindings,
+                    "calendar_source_bindings": profile.calendar_source_bindings,
+                    "task_source_bindings": profile.task_source_bindings,
+                    "shopping_source_bindings": profile.shopping_source_bindings,
                     "notes": profile.notes,
                 }
                 for person_id, profile in self.person_profiles.items()
@@ -670,6 +716,26 @@ class ConciergeState:
                     minor_content_filter_level=default_person_data.get(
                         "minor_content_filter_level", "strict"
                     ),
+                    email_source_ref=str(default_person_data.get("email_source_ref", "") or "").strip(),
+                    calendar_source_ref=str(default_person_data.get("calendar_source_ref", "") or "").strip(),
+                    task_source_ref=str(default_person_data.get("task_source_ref", "") or "").strip(),
+                    shopping_source_ref=str(default_person_data.get("shopping_source_ref", "") or "").strip(),
+                    email_source_bindings=_normalize_source_bindings(
+                        default_person_data.get("email_source_bindings", []),
+                        default_person_data.get("email_source_ref", ""),
+                    ),
+                    calendar_source_bindings=_normalize_source_bindings(
+                        default_person_data.get("calendar_source_bindings", []),
+                        default_person_data.get("calendar_source_ref", ""),
+                    ),
+                    task_source_bindings=_normalize_source_bindings(
+                        default_person_data.get("task_source_bindings", []),
+                        default_person_data.get("task_source_ref", ""),
+                    ),
+                    shopping_source_bindings=_normalize_source_bindings(
+                        default_person_data.get("shopping_source_bindings", []),
+                        default_person_data.get("shopping_source_ref", ""),
+                    ),
                     notes=default_person_data.get("notes", ""),
                 )
                 if isinstance(default_person_data, dict)
@@ -692,6 +758,26 @@ class ConciergeState:
                     minor_allow_general_qna=bool(payload.get("minor_allow_general_qna", False)),
                     minor_allowed_intent_classes=list(payload.get("minor_allowed_intent_classes", [])),
                     minor_content_filter_level=payload.get("minor_content_filter_level", "strict"),
+                    email_source_ref=str(payload.get("email_source_ref", "") or "").strip(),
+                    calendar_source_ref=str(payload.get("calendar_source_ref", "") or "").strip(),
+                    task_source_ref=str(payload.get("task_source_ref", "") or "").strip(),
+                    shopping_source_ref=str(payload.get("shopping_source_ref", "") or "").strip(),
+                    email_source_bindings=_normalize_source_bindings(
+                        payload.get("email_source_bindings", []),
+                        payload.get("email_source_ref", ""),
+                    ),
+                    calendar_source_bindings=_normalize_source_bindings(
+                        payload.get("calendar_source_bindings", []),
+                        payload.get("calendar_source_ref", ""),
+                    ),
+                    task_source_bindings=_normalize_source_bindings(
+                        payload.get("task_source_bindings", []),
+                        payload.get("task_source_ref", ""),
+                    ),
+                    shopping_source_bindings=_normalize_source_bindings(
+                        payload.get("shopping_source_bindings", []),
+                        payload.get("shopping_source_ref", ""),
+                    ),
                     notes=payload.get("notes", ""),
                 )
                 for person_id, payload in person_profiles_data.items()

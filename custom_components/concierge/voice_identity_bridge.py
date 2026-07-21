@@ -28,6 +28,25 @@ class _DiscoveryRequest:
     request_metadata: dict[str, bool | int | float | str | None] = field(default_factory=dict)
 
 
+def _select_voice_identity_runtime_bucket(domain_data: dict[str, Any]) -> dict[str, Any]:
+    """Return Voice Identity runtime bucket that exposes discovery integration.
+
+    Supports both legacy top-level registration and entry-scoped runtime
+    registration used by production Voice Identity setup.
+    """
+    if _DISCOVERY_INTEGRATION_KEY in domain_data:
+        return domain_data
+
+    for key in sorted(domain_data):
+        candidate = domain_data.get(key)
+        if not isinstance(candidate, dict):
+            continue
+        if _DISCOVERY_INTEGRATION_KEY in candidate:
+            return candidate
+
+    return {}
+
+
 def _status_payload(
     *,
     voice_enrollment_enabled: bool,
@@ -69,7 +88,8 @@ async def async_get_voice_identity_enrollment_status(hass: HomeAssistant) -> dic
             supported_capabilities=(),
         )
 
-    discovery_integration = domain_data.get(_DISCOVERY_INTEGRATION_KEY)
+    runtime_bucket = _select_voice_identity_runtime_bucket(domain_data)
+    discovery_integration = runtime_bucket.get(_DISCOVERY_INTEGRATION_KEY)
     discover = getattr(discovery_integration, "discover", None)
     if not callable(discover):
         return _status_payload(

@@ -8,6 +8,11 @@ from aiohttp import web
 from homeassistant.helpers.device_registry import CONNECTION_BLUETOOTH, CONNECTION_NETWORK_MAC
 
 from custom_components.concierge import panel as panel_module
+from custom_components.concierge.archive_runtime import (
+    CONF_AUDIT_ARCHIVE_ENABLED,
+    CONF_AUDIT_ARCHIVE_DESTINATION_URI,
+)
+from custom_components.concierge.const import CONF_VOICE_IDENTITY_LINKED
 from custom_components.concierge.panel import ConciergeVoiceEnrollmentCaptureView
 from custom_components.concierge.panel import ConciergeVoiceEnrollmentProgressView
 from custom_components.concierge.panel import ConciergeVoiceEnrollmentRecoveryView
@@ -316,5 +321,79 @@ async def test_voice_recovery_view_delegates_to_orchestrator(hass, monkeypatch) 
 
     assert delegated["cancel"]["person_id"] == "person.tom"
     assert delegated["recover"]["voice_profile_id"] == "tom_voice"
+
+
+async def test_global_settings_voice_enrollment_available_when_archive_linkage_and_runtime_ready(
+    hass,
+    setup_integration,
+) -> None:
+    """Global settings should report enrollment capability ready when all prerequisites are satisfied."""
+    options = await panel_module._async_integration_options_with_discovery(hass)
+
+    assert options["capabilities"]["cap_voice_enrollment"] is True
+    assert options["voice_enrollment_reason_code"] == "ready"
+    assert options["voice_enrollment_status_summary"] == "Voice enrollment is ready."
+    assert options["voice_identity"]["voice_enrollment_enabled"] is True
+    assert options["voice_identity"]["voice_enrollment_reason_code"] == "ready"
+
+
+async def test_global_settings_voice_enrollment_unavailable_when_linkage_disabled(
+    hass,
+    setup_integration,
+) -> None:
+    """Global settings should report linkage-disabled posture when Voice Identity linkage is off."""
+    hass.config_entries.async_update_entry(
+        setup_integration,
+        options={
+            **dict(setup_integration.options),
+            CONF_VOICE_IDENTITY_LINKED: False,
+        },
+    )
+
+    options = await panel_module._async_integration_options_with_discovery(hass)
+
+    assert options["capabilities"]["cap_voice_enrollment"] is False
+    assert options["voice_enrollment_reason_code"] == "voice_identity_linkage_disabled"
+    assert "linkage is disabled" in options["voice_enrollment_status_summary"].lower()
+
+
+async def test_global_settings_voice_enrollment_unavailable_when_archive_not_configured(
+    hass,
+    setup_integration,
+) -> None:
+    """Global settings should report archive prerequisite failure when archive export is disabled."""
+    hass.config_entries.async_update_entry(
+        setup_integration,
+        options={
+            **dict(setup_integration.options),
+            CONF_VOICE_IDENTITY_LINKED: True,
+            CONF_AUDIT_ARCHIVE_ENABLED: False,
+            CONF_AUDIT_ARCHIVE_DESTINATION_URI: "",
+        },
+    )
+
+    options = await panel_module._async_integration_options_with_discovery(hass)
+
+    assert options["capabilities"]["cap_voice_enrollment"] is False
+    assert options["voice_enrollment_reason_code"] == "archive_not_configured"
+    assert "attached storage" in options["voice_enrollment_status_summary"].lower()
+
+
+async def test_global_settings_voice_enrollment_unavailable_when_runtime_discovery_unavailable(
+    hass,
+    setup_integration,
+) -> None:
+    """Global settings should surface runtime capability unavailability when discovery integration is missing."""
+    runtime = hass.data.get("voice_identity")
+    assert isinstance(runtime, dict)
+    entry_runtime = runtime.get(setup_integration.entry_id)
+    assert isinstance(entry_runtime, dict)
+    entry_runtime.pop("concierge_discovery_integration", None)
+
+    options = await panel_module._async_integration_options_with_discovery(hass)
+
+    assert options["capabilities"]["cap_voice_enrollment"] is False
+    assert options["voice_enrollment_reason_code"] == "voice_identity_discovery_unavailable"
+    assert "discovery support" in options["voice_enrollment_status_summary"].lower()
     assert "recording_path" not in cancel_response.text
     assert "speech_text" not in recover_response.text

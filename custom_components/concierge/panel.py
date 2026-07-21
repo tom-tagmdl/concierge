@@ -19,6 +19,7 @@ from homeassistant.helpers import (
 )
 
 from .const import DOMAIN
+from .const import CONF_VOICE_IDENTITY_LINKED
 from .const import TTS_PROVIDER_ENTITY_IDS
 from .archive_runtime import (
     archive_options_from_entry,
@@ -138,12 +139,19 @@ def _integration_options_from_entry(hass) -> dict[str, Any]:
     )
 
     archive_options = archive_options_from_entry(entry)
+    archive_ready = bool(archive_options.get("destination_configured") and archive_options.get("archive_enabled"))
+    voice_identity_linked = _coerce_bool(
+        options.get(
+            CONF_VOICE_IDENTITY_LINKED,
+            data.get(CONF_VOICE_IDENTITY_LINKED, False),
+        )
+    )
     cap_ai = bool(ai_enabled and action_provider != _PROVIDER_NONE)
     cap_tts = bool(tts_enabled and tts_provider != _PROVIDER_NONE)
     cap_persona = bool(cap_ai or cap_tts)
     cap_assets = bool(asset_intelligence_provider == _PROVIDER_ASSET_INTELLIGENCE)
-    cap_voice_enrollment = bool(archive_options.get("destination_configured") and archive_options.get("archive_enabled"))
-    cap_extended_history = bool(archive_options.get("destination_configured") and archive_options.get("archive_enabled"))
+    cap_voice_enrollment = bool(archive_ready)
+    cap_extended_history = bool(archive_ready)
 
     return {
         "ai_enabled": ai_enabled,
@@ -153,6 +161,8 @@ def _integration_options_from_entry(hass) -> dict[str, Any]:
         "tts_enabled": tts_enabled,
         "media_provider": media_provider,
         "asset_intelligence_provider": asset_intelligence_provider,
+        "archive_ready": archive_ready,
+        "voice_identity_linked": voice_identity_linked,
         "capabilities": {
             "cap_ai": cap_ai,
             "cap_tts": cap_tts,
@@ -184,15 +194,33 @@ def _integration_options_from_entry(hass) -> dict[str, Any]:
 async def _async_integration_options_with_discovery(hass) -> dict[str, Any]:
     """Return integration options enriched with Voice Identity discovery status."""
     integration_options = _integration_options_from_entry(hass)
-    archive_ready = bool(integration_options.get("capabilities", {}).get("cap_voice_enrollment", False))
+    archive_ready = bool(integration_options.get("archive_ready", False))
+    voice_identity_linked = bool(integration_options.get("voice_identity_linked", False))
 
-    voice_identity_status = await async_get_voice_identity_enrollment_status(hass)
+    if voice_identity_linked:
+        voice_identity_status = await async_get_voice_identity_enrollment_status(hass)
+    else:
+        voice_identity_status = {
+            "voice_enrollment_enabled": False,
+            "voice_enrollment_reason_code": "voice_identity_linkage_disabled",
+            "voice_enrollment_status_summary": "Voice enrollment is unavailable because Voice Identity linkage is disabled.",
+            "voice_identity_connected": False,
+            "voice_identity_available": False,
+            "voice_identity_compatible": False,
+            "voice_identity_discovery_state": "unavailable",
+            "voice_identity_enabled_capabilities": (),
+            "voice_identity_supported_capabilities": (),
+        }
+
     voice_identity_ready = bool(voice_identity_status.get("voice_enrollment_enabled", False))
-    enrollment_enabled = bool(archive_ready and voice_identity_ready)
+    enrollment_enabled = bool(archive_ready and voice_identity_linked and voice_identity_ready)
 
     if not archive_ready:
         reason_code = "archive_not_configured"
         summary = "Voice enrollment requires attached storage and archive export to be enabled in Concierge options."
+    elif not voice_identity_linked:
+        reason_code = "voice_identity_linkage_disabled"
+        summary = "Voice enrollment is unavailable because Voice Identity linkage is disabled."
     elif not voice_identity_ready:
         reason_code = str(voice_identity_status.get("voice_enrollment_reason_code", "voice_identity_unavailable"))
         summary = str(
@@ -810,6 +838,24 @@ def _build_global_catalog(hass) -> dict[str, list[dict[str, str]]]:
     }
 
 
+def _build_source_catalog(hass) -> list[dict[str, str]]:
+    """Build a full entity source catalog for family-scoped picker filtering."""
+    entity_registry = er.async_get(hass)
+    rows = [
+        _to_entity_row(entry, hass)
+        for entry in sorted(
+            entity_registry.entities.values(),
+            key=lambda item: (
+                _entity_integration_label(hass, item).lower(),
+                _entity_name(item).lower(),
+                item.entity_id,
+            ),
+        )
+        if entry.disabled_by is None
+    ]
+    return rows
+
+
 def _build_composite_catalog(
     composites_state: dict[str, dict[str, Any]],
     room_catalog: dict[str, dict[str, list[dict[str, str]]]],
@@ -1013,6 +1059,12 @@ class ConciergeStorageSnapshotView(HomeAssistantView):
                     "minor_allow_general_qna": profile.minor_allow_general_qna,
                     "minor_allowed_intent_classes": profile.minor_allowed_intent_classes,
                     "minor_content_filter_level": profile.minor_content_filter_level,
+                    "email_source_ref": profile.email_source_ref,
+                    "calendar_source_ref": profile.calendar_source_ref,
+                    "shopping_source_ref": profile.shopping_source_ref,
+                    "email_source_bindings": profile.email_source_bindings,
+                    "calendar_source_bindings": profile.calendar_source_bindings,
+                    "shopping_source_bindings": profile.shopping_source_bindings,
                     "notes": profile.notes,
                 }
                 for person_id, profile in state.person_profiles.items()
@@ -1090,6 +1142,12 @@ class ConciergeStorageSnapshotView(HomeAssistantView):
             }
             _LOGGER.exception("Concierge: failed building global catalog")
 
+        try:
+            source_catalog = _build_source_catalog(hass)
+        except Exception:
+            source_catalog = []
+            _LOGGER.exception("Concierge: failed building source catalog")
+
         response = web.json_response(
             {
                 "areas": areas,
@@ -1102,6 +1160,7 @@ class ConciergeStorageSnapshotView(HomeAssistantView):
                 "room_catalog": room_catalog,
                 "composite_catalog": composite_catalog,
                 "global_catalog": global_catalog,
+                "source_catalog": source_catalog,
                 "global_features": global_features,
                 "global_context_usage": global_context_usage,
                 "archive_status": _archive_status_from_options(hass),

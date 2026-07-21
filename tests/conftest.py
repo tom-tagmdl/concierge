@@ -21,6 +21,7 @@ from custom_components.concierge.archive_runtime import (
 from custom_components.concierge.const import (
     CONF_NIGHT_MODE_ENABLED,
     CONF_UPDATE_INTERVAL_SECONDS,
+    CONF_VOICE_IDENTITY_LINKED,
     DEFAULT_NIGHT_MODE_ENABLED,
     DEFAULT_UPDATE_INTERVAL_SECONDS,
     DOMAIN,
@@ -65,6 +66,7 @@ async def setup_integration(hass: HomeAssistant, mock_config_entry: MockConfigEn
         options={
             CONF_AUDIT_ARCHIVE_DESTINATION_URI: "/media/concierge-tests",
             CONF_AUDIT_ARCHIVE_ENABLED: True,
+            CONF_VOICE_IDENTITY_LINKED: True,
         },
     )
     assert await hass.config_entries.async_setup(mock_config_entry.entry_id)
@@ -103,10 +105,13 @@ async def setup_integration(hass: HomeAssistant, mock_config_entry: MockConfigEn
                 status_summary="voiceprint_active",
             )
 
+    discovery_integration = _DiscoveryIntegration()
     hass.data["voice_identity"] = {
-        "concierge_discovery_integration": _DiscoveryIntegration(),
-        "generate_voiceprint_operation": _GenerateVoiceprintOperation(),
-        "get_voiceprint_status_operation": _GetVoiceprintStatusOperation(),
+        mock_config_entry.entry_id: {
+            "concierge_discovery_integration": discovery_integration,
+            "generate_voiceprint_operation": _GenerateVoiceprintOperation(),
+            "get_voiceprint_status_operation": _GetVoiceprintStatusOperation(),
+        },
     }
 
     async def _capture_provider_capabilities(_self):

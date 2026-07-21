@@ -9,6 +9,8 @@ from homeassistant.helpers import issue_registry as ir
 
 from .const import (
     DOMAIN,
+    PERSON_CONTEXT_REPAIRS_PARTIAL,
+    PERSON_CONTEXT_REPAIRS_UNRESOLVED,
     VOICE_ENROLLMENT_PREFLIGHT_STORAGE_CONFIG_CONFLICT,
     VOICE_ENROLLMENT_PREFLIGHT_STORAGE_MISSING,
     VOICE_ENROLLMENT_PREFLIGHT_STORAGE_NOT_CONFIGURED,
@@ -45,6 +47,11 @@ _STORAGE_ISSUE_IDS = {
 _RECONCILIATION_ISSUE_IDS = {
     VOICE_ENROLLMENT_REPAIRS_INVALID_MANIFEST,
     VOICE_ENROLLMENT_REPAIRS_ORPHAN_CLEANUP_FAILED,
+}
+
+_PERSON_CONTEXT_ISSUE_IDS = {
+    PERSON_CONTEXT_REPAIRS_UNRESOLVED,
+    PERSON_CONTEXT_REPAIRS_PARTIAL,
 }
 
 
@@ -232,4 +239,43 @@ async def async_clear_reconciliation_issue(hass, issue_id: str | None = None) ->
         await _async_clear_issue(hass, issue_id)
         return
     for candidate in _RECONCILIATION_ISSUE_IDS:
+        await _async_clear_issue(hass, candidate)
+
+
+def _person_context_issue_for_state(person_context_state: str) -> str:
+    normalized = str(person_context_state or "").strip().lower()
+    if normalized == "person_context_partial":
+        return PERSON_CONTEXT_REPAIRS_PARTIAL
+    return PERSON_CONTEXT_REPAIRS_UNRESOLVED
+
+
+async def async_create_or_update_person_context_issue(
+    hass,
+    *,
+    person_context_state: str,
+    reason_code: str,
+    active_person_state: str,
+    resolved_person_id: str | None,
+) -> str:
+    """Publish a runtime person-context issue for fail-closed unresolved/partial identity state."""
+    issue_id = _person_context_issue_for_state(person_context_state)
+    await _async_create_or_update_issue(
+        hass,
+        issue_id=issue_id,
+        placeholders=_sanitized_placeholders(
+            person_context_state=person_context_state,
+            reason_code=reason_code,
+            active_person_state=active_person_state,
+            resolved_person_id=resolved_person_id or "",
+        ),
+    )
+    return issue_id
+
+
+async def async_clear_person_context_issue(hass, issue_id: str | None = None) -> None:
+    """Clear person-context repairs issues."""
+    if issue_id is not None:
+        await _async_clear_issue(hass, issue_id)
+        return
+    for candidate in _PERSON_CONTEXT_ISSUE_IDS:
         await _async_clear_issue(hass, candidate)

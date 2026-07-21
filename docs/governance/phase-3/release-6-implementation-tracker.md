@@ -6,17 +6,776 @@
 ## Included Issues
 
 - #362 - P3-R6-E13-01 Productivity source-of-record boundary implementation
+- #375 - P3-R6-E13-01A Person productivity source binding setup implementation
 - #363 - P3-R6-E13-02 Calendar and email consumption implementation
 - #364 - P3-R6-E13-03 Task and shopping consumption implementation
 - #365 - P3-R6-E13-04 Capture and knowledge consumption implementation
 - #366 - P3-R6-E13-05 Briefing and household status synthesis implementation
 - #367 - P3-R6-E13-06 Productivity diagnostics, provenance, and explainability implementation
 - #368 - P3-R6-E14-01 Provenance ownership and consumption implementation
+- #376 - P3-R6-E14-01A Voice Identity capability linkage setup implementation
+- #377 - P3-R6-E14-01B Voice enrollment capability status display implementation
 - #369 - P3-R6-E14-02 Household coordination boundary implementation
+- #378 - P3-R6-E14-02A Room and merged-room device selection visibility consistency implementation
 - #370 - P3-R6-E14-03 Household status and open-loop coordination implementation
 - #371 - P3-R6-E14-04 Productivity coordination implementation
 - #372 - P3-R6-E14-05 Provenance diagnostics and explainability implementation
 - #373 - P3-R6-VAL-01 Release 6 governed implementation validation
+
+## Issue #381 Implementation Evidence (2026-07-20)
+
+- Issue: #381 - Coordinator Speaker Identity Resolution
+- Scope: enable Coordinator to consume #380 Voice Identity attribution outcomes and resolve governed runtime active-person state without introducing person-aware orchestration behavior.
+- Files changed:
+	- custom_components/concierge/services.py
+	- custom_components/concierge/coordinator.py
+	- custom_components/concierge/diagnostics.py
+	- tests/test_foundation.py
+	- tests/test_diagnostics.py
+	- docs/governance/phase-3/release-6-implementation-tracker.md
+- Current coordinator disabled posture confirmed pre-implementation:
+	- Coordinator foundation summary reported `presence_attribution_enabled: false`.
+	- Coordinator summary guest/multi-occupant boundaries reported `identity_attribution_enabled: false`.
+	- Coordinator did not project deterministic active-person resolution state from #380 attribution envelope outputs.
+- Coordinator active-person resolution implemented:
+	- Added deterministic active-person resolution in coordinator update path by consuming latest execution-envelope Voice Identity outputs.
+	- Implemented resolution states:
+		- `active_person_available`
+		- `active_person_unknown`
+		- `active_person_ambiguous`
+		- `active_person_unavailable`
+	- Resolved state requires consumed attribution + resolved person identifier.
+	- Unknown/ambiguous/unavailable states fail closed and do not create inferred identities.
+- Confidence/readiness gating implemented:
+	- Coordinator respects consumed readiness (`voice_identity_attribution_readiness`) and reason codes.
+	- Low/ambiguous confidence posture resolves to `active_person_ambiguous`.
+	- Unready/unavailable Voice Identity posture resolves to `active_person_unavailable`.
+	- No confidence or attribution recomputation introduced in Concierge.
+- Explainability and diagnostics visibility:
+	- Diagnostics now expose `active_person_resolution` within Voice Identity consumption visibility including state, availability, confidence posture, reason code, and fail-closed posture.
+	- Privacy-safe posture preserved: no raw audio, embeddings, voiceprints, biometric vectors, or model internals exposed.
+- Coordinator posture update evidence:
+	- Coordinator foundation summary now reports attribution-consumption enabled posture:
+		- `presence_attribution_enabled: true`
+		- `guest_unknown_occupant_behavior.identity_attribution_enabled: true`
+		- `multi_occupant_behavior.identity_attribution_enabled: true`
+	- Added coordinator-level `active_person_resolution` projection and summary status fields.
+- Ownership boundary confirmation: PASS
+	- Coordinator consumes approved attribution outputs only.
+	- Coordinator does not generate attribution, confidence, or identity authority.
+	- Voice Identity remains attribution/confidence/model/voiceprint authority.
+- Testing updates:
+	- Added coordinator tests for all required runtime resolution states:
+		- resolved
+		- unknown
+		- ambiguous
+		- unavailable
+	- Added diagnostics test for resolved active-person visibility.
+	- Updated existing coordinator summary expectations for attribution-enabled posture.
+- Validation status:
+	- Implementation validation: COMPLETED
+	- Static validation: COMPLETED
+		- `get_errors` reported no diagnostics for touched files.
+		- `r:/HomesPlatformRepos/concierge/.venv/Scripts/python.exe -m py_compile r:/HomesPlatformRepos/concierge/custom_components/concierge/services.py r:/HomesPlatformRepos/concierge/custom_components/concierge/coordinator.py r:/HomesPlatformRepos/concierge/custom_components/concierge/diagnostics.py r:/HomesPlatformRepos/concierge/tests/test_foundation.py r:/HomesPlatformRepos/concierge/tests/test_diagnostics.py` completed successfully.
+	- Runtime pytest validation: INCOMPLETE
+		- Targeted pytest runs remain blocked on this Windows host due `pytest_homeassistant_custom_component` importing `homeassistant.runner` (`fcntl` unavailable).
+- Final evidence status: CONDITIONAL PASS
+	- Coordinator resolution logic and diagnostics visibility are implemented and statically validated.
+	- Full PASS requires runtime pytest execution in a compatible environment.
+
+## Issue #383 Implementation Evidence (2026-07-20)
+
+- Issue: #383 - Runtime Person Context Resolution and Binding
+- Scope: implement the governed runtime person-context layer that resolves an active speaker identity into the correct Concierge person profile and approved productivity, presence, mobility, and policy references.
+- Canonical identity resolution strategy:
+	- Canonical person-profile key remains `person_id`.
+	- Runtime resolution first tries exact `person_id` matching against the consumed active-person `resolved_person_id`.
+	- If no exact key match exists, runtime resolution safely falls back to a unique `voice_profile_id` reference match.
+	- Multiple fallback candidates fail closed as `person_profile_ambiguous`.
+	- No new identity authority was introduced.
+- Files changed:
+	- custom_components/concierge/services.py
+	- tests/test_services.py
+	- docs/governance/phase-3/release-6-implementation-tracker.md
+- Resolution strategy implemented:
+	- Added a bounded runtime person-context resolver that projects identity, productivity, presence, mobility, and policy references from the matched person profile.
+	- Surfaced the runtime person context in execute and summary envelopes and threaded it through the person-aware productivity boundaries.
+	- Replaced the brittle direct `state.person_profiles.get(resolved_person_id)` dependency in routing with the runtime person-context projection.
+- Profile mapping behavior:
+	- Exact `person_id` matches resolve as the canonical path.
+	- `voice_profile_id` can resolve a unique profile when the exact person key is absent.
+	- Missing or ambiguous profile resolution fails closed.
+- Person Context shape:
+	- identity: `person_profile_ref`, `voice_profile_ref`, `home_assistant_person_ref`, `resolved_person_id`
+	- productivity: `email_source_refs`, `calendar_source_refs`, `shopping_source_refs`, `task_source_refs`
+	- presence: `ble_device_refs`, `presence_entity_refs`, `location_ref`
+	- mobility: `mobile_device_refs`, `read_later_target`, `notification_target_refs`
+	- policy: `allowed_intent_abilities`, `content_filter_level`, `minor_controls`, `step_up_requirements`, `consent_state`
+- Productivity binding behavior:
+	- Productivity bindings resolve only from configured profile references.
+	- No provider content is copied or owned by Concierge.
+	- Missing productivity bindings report `person_context_partial` with `productivity_bindings_missing`.
+- Presence/device binding behavior:
+	- BLE, Aqara, mobile notification, and location references are surfaced as configured references only.
+	- Missing presence/device bindings report `person_context_partial` with `presence_bindings_missing`.
+- Policy context behavior:
+	- Allowed intent abilities, content-filter level, minor/guardian controls, step-up posture, and consent state are surfaced from the resolved profile.
+	- Missing policy metadata reports `person_context_partial` with `policy_context_missing`.
+- Diagnostics/privacy confirmation: PASS
+	- Diagnostics expose resolution state, matched profile reference, binding availability, and fail-closed posture only.
+	- Diagnostics do not expose audio, embeddings, voiceprints, biometric vectors, or provider contents.
+- Testing completed:
+	- Added coverage for canonical exact-match resolution and runtime person-context projection.
+	- Added coverage for voice-profile-reference fallback when the stored person key differs from the consumed active-person id.
+	- Added coverage for missing-profile fail-closed behavior.
+	- Added coverage for partial profile states when presence or productivity bindings are absent.
+- Ownership boundary confirmation: PASS
+	- Concierge remains a bounded consumer/orchestrator.
+	- Voice Identity remains attribution/confidence authority.
+	- Home Assistant person/device truth remains external.
+	- Productivity source-of-record ownership remains external.
+- Conflict review: PASS
+	- No ADR, contract, model, or existing-implementation conflict was introduced.
+- Ownership drift review: PASS
+	- No competing person authority or biometric authority was created.
+- Durable evidence:
+	- This tracker entry records the canonical identity strategy, resolution behavior, binding surfaces, diagnostics posture, and fail-closed state.
+- Final status: CONDITIONAL PASS
+	- Runtime person context resolution and binding are implemented and statically validated.
+	- Full runtime test verification still depends on the environment used for Home Assistant execution.
+
+## Issue #382 Implementation Evidence (2026-07-20)
+
+- Issue: #382 - Person-aware orchestration consumption and routing decisions
+- Scope: enable Concierge to consume resolved active-person outcomes and apply person-aware productivity routing decisions for calendar, email, task, and shopping without changing authority ownership.
+- Files changed:
+	- custom_components/concierge/services.py
+	- tests/test_services.py
+	- tests/test_diagnostics.py
+	- docs/governance/phase-3/release-6-implementation-tracker.md
+- Implementation summary:
+	- Added governed person-aware productivity routing decision surface with explicit fail-closed posture.
+	- Execute envelope now projects:
+		- `active_person_resolution`
+		- `person_aware_productivity_routing`
+		- person-aware routing visibility for calendar/email and task/shopping boundaries.
+	- Routing enablement now requires active-person availability (`active_person_available`) from consumed Voice Identity outcomes.
+	- Unknown, ambiguous, and unavailable active-person states disable person-aware routing with explicit reason codes.
+	- Person-aware domain selection behavior:
+		- calendar/email: requires configured and available person source refs.
+		- shopping: requires configured person shopping source ref.
+		- task: person scope is selected without creating task source-of-record ownership.
+	- Execution-envelope refs now include person-aware routing enablement and reason-code explainability markers.
+- Ownership boundary confirmation: PASS
+	- Concierge remains a bounded consumer/orchestrator.
+	- Voice Identity remains attribution/confidence authority.
+	- Productivity systems remain source-of-record authorities.
+	- No source-of-record or identity authority transfer introduced.
+- Diagnostics and explainability confirmation: PASS
+	- Diagnostics now expose person-aware routing posture and reason codes in boundary visibility without exposing sensitive source content.
+	- Fail-closed reason codes are visible for unavailable/ambiguous/unknown active-person states.
+- Testing updates:
+	- Added execute test for enabled person-aware routing when active person is available and bound.
+	- Added execute test for fail-closed routing disablement when identity is ambiguous (low confidence).
+	- Extended summary and diagnostics tests to validate person-aware routing explainability surfaces and no-execution fail-closed posture.
+- Validation status:
+	- Implementation validation: COMPLETED
+	- Static validation: COMPLETED
+		- `get_errors` reported no diagnostics for touched files.
+	- Runtime pytest validation: INCOMPLETE
+		- Targeted pytest runs remain blocked on this Windows host due `pytest_homeassistant_custom_component` importing `homeassistant.runner` (`fcntl` unavailable).
+- Final evidence status: CONDITIONAL PASS
+	- Person-aware consumption routing decisions, fail-closed gating, and explainability surfaces are implemented and statically validated.
+	- Full PASS requires runtime pytest evidence in a compatible environment.
+
+### Issue #382 Addendum (2026-07-21)
+
+- Scope refinement:
+	- Complete task-domain source selection under Runtime Person Context so task routing consumes configured person bindings when present.
+	- Preserve fail-closed behavior and prohibit alternate identity resolution paths.
+- Files changed:
+	- custom_components/concierge/models.py
+	- custom_components/concierge/services.py
+	- custom_components/concierge/const.py
+	- custom_components/concierge/repairs.py
+	- custom_components/concierge/strings.json
+	- custom_components/concierge/translations/en.json
+	- tests/test_services.py
+	- tests/test_repairs.py
+	- docs/governance/phase-3/release-6-implementation-tracker.md
+- Implementation delta summary:
+	- Added person-profile task source support (`task_source_ref`, `task_source_bindings`) across model serialization/deserialization and service update schema.
+	- Runtime Person Context now projects `productivity.task_source_refs` from the resolved person profile.
+	- Person-aware task routing now selects `selected_source_ref` with `selection_mode=person_binding` when a task source binding exists; otherwise preserves `person_scope_only` safe fallback.
+	- Release 6 productivity source-binding boundary now reports task configuration presence alongside email/calendar/shopping.
+	- Added runtime person-context repairs surfaces:
+		- `person_context_unresolved`
+		- `person_context_partial`
+	- Execute flow now publishes/clears these repairs based on fail-closed routing posture and reason codes.
+- Ownership and authority confirmation: PASS
+	- Runtime person resolution remains fully consumed from Voice Identity context.
+	- Concierge still does not claim identity, task, calendar, email, or shopping source-of-record ownership.
+	- No alternate identity resolution or provenance authority path introduced.
+- Diagnostics/repair visibility confirmation: PASS
+	- New repair issues expose only state/reason placeholders required for operator remediation.
+	- No sensitive source payloads or canonical record duplication introduced.
+- Validation status:
+	- Static validation: COMPLETED (`get_errors` clean on touched files)
+	- Runtime pytest validation: INCOMPLETE (deferred per current Windows HA pytest constraints)
+- Addendum status: CONDITIONAL PASS
+	- #382 task-source consumption gap is closed with governed, fail-closed behavior.
+	- Runtime pytest evidence remains required for full PASS closure.
+
+## Issue #369 Implementation Evidence (2026-07-21)
+
+- Issue: #369 - P3-R6-E14-02 Household coordination boundary implementation
+- Scope: add an explicit governed household coordination boundary surface that consumes existing Release 6 boundaries (runtime person context, person-aware routing, household status synthesis, provenance ownership/consumption) without introducing new authority ownership.
+- Files changed:
+	- custom_components/concierge/services.py
+	- custom_components/concierge/diagnostics.py
+	- tests/test_services.py
+	- tests/test_diagnostics.py
+	- docs/governance/phase-3/release-6-implementation-tracker.md
+- Implementation summary:
+	- Added `_build_household_coordination_boundary` as a deterministic, consumption-only Release 6 boundary surface.
+	- Boundary composes governed contributor visibility across:
+		- calendar
+		- email
+		- task
+		- shopping
+		- capture
+		- knowledge
+		- briefing
+		- household_status
+	- Boundary projects runtime context explainability from consumed sources only:
+		- active-person resolution posture
+		- runtime person-context state
+		- person-aware routing enablement and domain selection posture
+		- provenance visibility/readiness posture
+	- Boundary wired into both governed runtime surfaces:
+		- execute envelope (`household_coordination_boundary`)
+		- summary response (`household_coordination_boundary`)
+	- Diagnostics integration:
+		- Added top-level diagnostics visibility projection (`household_coordination_boundary_visibility`).
+		- Included household coordination in consolidated `release_6_productivity_diagnostics_visibility` boundary set.
+- Authority and ownership confirmation: PASS
+	- Concierge remains bounded consumer/orchestrator.
+	- No source-of-record ownership introduced.
+	- No identity/voice/provenance authority transfer introduced.
+	- No planning-engine authority introduced.
+- Non-authority assertions enforced:
+	- `claims_coordination_authority: false`
+	- `claims_provenance_authority: false`
+	- `creates_source_of_record: false`
+	- `creates_planning_engine: false`
+- Privacy and diagnostics posture: PASS
+	- Source metadata visibility only; no provider content/body payload exposure.
+	- Safe-fallback posture remains explicit and explainable via reason surfaces.
+- Testing updates:
+	- Added summary and execute assertions for `household_coordination_boundary` presence and governed posture.
+	- Added diagnostics assertions for `household_coordination_boundary_visibility` and updated consolidated Release 6 diagnostics boundary counts.
+	- Updated productivity required-domain diagnostics expectation to include `task`.
+- Validation status:
+	- Static validation: COMPLETED
+		- `get_errors` reported no diagnostics in touched files.
+	- Runtime pytest validation: INCOMPLETE
+		- Deferred in this Windows session per established Home Assistant pytest environment constraints.
+- Final evidence status: CONDITIONAL PASS
+	- Household coordination boundary implementation is complete and governance-aligned in code/tests/docs.
+	- Full runtime pytest PASS remains environment-dependent.
+
+## Issue #378 Implementation Evidence (2026-07-21)
+
+- Issue: #378 - P3-R6-E14-02A Room and merged-room device selection visibility consistency implementation
+- Scope: enforce visibility consistency only, so standard rooms and merged rooms both show selected voice assistants and speakers after save.
+- Files changed:
+	- custom_components/concierge/frontend/panel.js
+	- tests/frontend_voice_enrollment_panel.test.cjs
+	- docs/governance/phase-3/release-6-implementation-tracker.md
+- Required root-cause findings:
+	- Why merged rooms show selected devices:
+		- Merged-room save (`_saveCompositeSection`, `room_devices`) already mapped selected `device_groups` entities into explicit persisted fields (`voice_device_entity_ids`, `speaker_entity_ids`, `media_player_entity_ids`, and peers) before calling `update_composite_config`.
+	- Why standard rooms did not show selected devices:
+		- Standard-room save (`_saveRoomSection`, `room_devices`) persisted only `device_groups` and did not map selected entities into explicit persisted room fields used by visibility surfaces.
+- Implementation summary (P3-R6-E14-02A only):
+	- Updated standard-room `room_devices` save path to map selected device-group entities into explicit room fields using the room catalog membership sets:
+		- `voice_device_entity_ids`
+		- `speaker_entity_ids`
+		- `media_player_entity_ids`
+		- `light_entity_ids`
+		- `lamp_entity_ids`
+		- `shade_entity_ids`
+		- `room_sensor_entity_ids`
+		- `room_health_entity_ids`
+		- `human_health_entity_ids`
+		- `tv_entity_ids`
+		- `dashboard_entity_ids`
+		- `other_entity_ids`
+	- Preserved merged-room save behavior unchanged.
+	- No authority redesign, no ownership transfer, and no cross-boundary behavior expansion introduced.
+- Ownership and authority confirmation: PASS
+	- Concierge remains consumer/orchestrator for UI configuration persistence.
+	- No new source-of-record authority created.
+	- No identity/provenance authority movement introduced.
+- Tests and validation:
+	- Added frontend node tests verifying:
+		- Standard-room `room_devices` save now persists mapped voice/speaker/media selections.
+		- Merged-room save mapping behavior remains intact.
+	- Runtime HA manual validation remains required in dev environment for final UX confirmation.
+- Final evidence status: CONDITIONAL PASS
+	- Scoped visibility-consistency implementation is complete in code and unit tests.
+	- Final pass depends on HA dev runtime confirmation by manual validation.
+
+## Issue #370 Implementation Evidence (2026-07-21)
+
+- Issue: #370 - P3-R6-E14-03 Household status and open-loop coordination implementation
+- Scope: implement household-status and open-loop coordination visibility as governed, informational, explainable, provenance-aware consumption surfaces.
+- Files changed:
+	- custom_components/concierge/services.py
+	- tests/test_services.py
+	- tests/test_diagnostics.py
+	- docs/governance/phase-3/release-6-implementation-tracker.md
+	- docs/governance/phase-3/phase-3-governed-implementation-tracker.md
+- Authority sources reviewed:
+	- ADRs:
+		- homes_that_behave_well/docs/architecture/adr-household-productivity-experience-governance.md
+		- homes_that_behave_well/docs/architecture/adr-provenance-governance.md
+		- homes_that_behave_well/docs/architecture/adr-coordinator-v2-governance.md
+	- Contracts:
+		- homes_that_behave_well/docs/contracts/calendar-email-experience-contract.md
+		- homes_that_behave_well/docs/contracts/task-shopping-experience-contract.md
+		- homes_that_behave_well/docs/contracts/knowledge-briefing-status-synthesis-contract.md
+		- homes_that_behave_well/docs/contracts/multi-item-capture-interpretation-contract.md
+		- homes_that_behave_well/docs/contracts/household-coordination-contract.md
+		- homes_that_behave_well/docs/contracts/provenance-contract.md
+	- Models:
+		- homes_that_behave_well/docs/models/calendar-experience-model.md
+		- homes_that_behave_well/docs/models/email-experience-model.md
+		- homes_that_behave_well/docs/models/task-experience-model.md
+		- homes_that_behave_well/docs/models/shopping-experience-model.md
+		- homes_that_behave_well/docs/models/knowledge-query-experience-model.md
+		- homes_that_behave_well/docs/models/multi-item-capture-result-model.md
+		- homes_that_behave_well/docs/models/briefing-composition-model.md
+		- homes_that_behave_well/docs/models/provenance-model.md
+		- homes_that_behave_well/docs/models/household-coordination-snapshot-model.md
+	- Governing phase-2 artifacts:
+		- docs/governance/phase-2/release-6-productivity-provenance-coordination-build-execution-plan.md
+		- docs/governance/phase-2/e13-productivity-experiences-governed-implementation-readiness.md
+		- docs/governance/phase-2/e14-provenance-and-household-coordination-governed-implementation-readiness.md
+		- docs/governance/phase-2/concierge-v2-end-to-end-governed-implementation-validation.md
+- Existing implementation review findings:
+	- Productivity boundaries consumed from existing Release 6 boundary builders (`calendar_email`, `task_shopping`, `capture_knowledge`, `briefing`, `household_status`) without source-of-record transfer.
+	- Runtime Person Context consumed from existing #383 runtime projection and not recomputed.
+	- Person-aware routing consumed from existing #382 routing surface and not redefined.
+	- Household coordination boundary from #369 remains the primary coordination boundary and now consumes explicit open-loop visibility from household status synthesis.
+- Implementation summary:
+	- Added explicit `open_loop_coordination_visibility` to `household_status_synthesis_boundary` as a derived, informational-only, explainable, provenance-visible projection.
+	- Added explicit `open_loop_coordination_visibility` passthrough in `household_coordination_boundary`, including coordination/runtime context markers.
+	- Open-loop projection is reference-only and bounded:
+		- no planning engine
+		- no workflow engine
+		- no reminder/notification framework
+		- no source-of-record ownership transfer
+- Open-loop behavior implemented:
+	- `open_loop_state`: `active` when pending unresolved/safe-fallback contributors exist; otherwise `clear`.
+	- `pending_open_loop_count` and `unresolved_coordination_domains` projected from governed source-boundary availability/fallback posture.
+	- `open_loop_items` expose domain/type/state/reason/reference-count/provenance-visibility metadata only.
+- Runtime person context consumption confirmation: PASS
+	- Open-loop visibility consumes Runtime Person Context state via existing coordination boundary context and does not introduce independent identity resolution.
+- Provenance validation: PASS
+	- Open-loop projections carry source-domain and provenance visibility references only.
+	- No provenance ownership, attribution, or canonical-record authority was introduced.
+- Explainability assessment: PASS
+	- Open-loop projections explicitly expose pending/reasoned coordination context for household-status and coordination boundaries.
+	- No hidden synthesis or hidden authority behavior was introduced.
+- Diagnostics assessment: PASS
+	- Existing diagnostics visibility surfaces now include and validate open-loop metadata through household-status and coordination boundary projections.
+	- Privacy-safe posture preserved; no provider content payload exposure.
+- Repairs assessment: NOT APPLICABLE
+	- No new repairs were required for this bounded visibility addition.
+	- Existing runtime person-context repairs remain unchanged.
+- Translation assessment: NOT APPLICABLE
+	- No new user-facing strings were introduced.
+- Testing updates:
+	- Added service boundary assertions for household-status open-loop visibility in summary and execute-envelope paths.
+	- Added diagnostics assertions for household-status and household-coordination open-loop visibility metadata.
+	- Regression assertions preserved for #369, #382, and #383 boundary behavior.
+- Ownership boundary confirmation: PASS
+	- Concierge remains bounded consumer/orchestrator.
+	- Productivity systems remain source-of-record authorities.
+	- Provenance authority remains external.
+	- Voice Identity / Runtime Person Context authority remains external.
+- Final evidence status: CONDITIONAL PASS
+	- E14-03 household-status and open-loop coordination visibility slice is implemented and statically validated.
+	- Runtime pytest execution remains environment-constrained in this Windows session.
+
+## Issue #371 Implementation Evidence (2026-07-21)
+
+- Issue: #371 - P3-R6-E14-04 Productivity coordination implementation
+- Scope: implement governed productivity coordination visibility, awareness, and explainability by consuming existing Release 6 productivity, runtime person context, routing, provenance, and household coordination boundaries.
+- Files changed:
+	- custom_components/concierge/services.py
+	- custom_components/concierge/diagnostics.py
+	- tests/test_services.py
+	- tests/test_diagnostics.py
+	- docs/governance/phase-3/release-6-implementation-tracker.md
+	- docs/governance/phase-3/phase-3-governed-implementation-tracker.md
+- Authority sources reviewed:
+	- ADRs:
+		- homes_that_behave_well/docs/architecture/adr-household-productivity-experience-governance.md
+		- homes_that_behave_well/docs/architecture/adr-provenance-governance.md
+		- homes_that_behave_well/docs/architecture/adr-coordinator-v2-governance.md
+	- Contracts:
+		- homes_that_behave_well/docs/contracts/calendar-email-experience-contract.md
+		- homes_that_behave_well/docs/contracts/task-shopping-experience-contract.md
+		- homes_that_behave_well/docs/contracts/knowledge-briefing-status-synthesis-contract.md
+		- homes_that_behave_well/docs/contracts/multi-item-capture-interpretation-contract.md
+		- homes_that_behave_well/docs/contracts/household-coordination-contract.md
+		- homes_that_behave_well/docs/contracts/provenance-contract.md
+	- Models:
+		- homes_that_behave_well/docs/models/calendar-experience-model.md
+		- homes_that_behave_well/docs/models/email-experience-model.md
+		- homes_that_behave_well/docs/models/task-experience-model.md
+		- homes_that_behave_well/docs/models/shopping-experience-model.md
+		- homes_that_behave_well/docs/models/knowledge-query-experience-model.md
+		- homes_that_behave_well/docs/models/multi-item-capture-result-model.md
+		- homes_that_behave_well/docs/models/briefing-composition-model.md
+		- homes_that_behave_well/docs/models/provenance-model.md
+		- homes_that_behave_well/docs/models/household-coordination-snapshot-model.md
+	- Governing phase-2 artifacts:
+		- docs/governance/phase-2/release-6-productivity-provenance-coordination-build-execution-plan.md
+		- docs/governance/phase-2/e13-productivity-experiences-governed-implementation-readiness.md
+		- docs/governance/phase-2/e14-provenance-and-household-coordination-governed-implementation-readiness.md
+		- docs/governance/phase-2/concierge-v2-end-to-end-governed-implementation-validation.md
+- Existing implementation review findings:
+	- Calendar/email, task/shopping, capture/knowledge, household status, and household coordination boundaries already existed and were governing runtime summary/execute outputs.
+	- Runtime Person Context and Person-Aware Routing already existed as consumed, fail-closed boundaries (#383 and #382).
+	- Gap identified: no explicit standalone productivity-coordination boundary surface for cross-domain coordination awareness and explainability.
+- Productivity coordination implementation:
+	- Added `_build_productivity_coordination_boundary` in `services.py` as a deterministic, consumption-only boundary.
+	- Boundary composes approved domain coordination visibility from existing governed boundaries:
+		- calendar/email via calendar-email consumption boundary
+		- task/shopping via task-shopping consumption boundary
+		- capture/knowledge via capture-knowledge consumption boundary
+	- Added explicit coordination-awareness and explainability surfaces:
+		- participating and pending domains
+		- cross-domain coordination state
+		- domain routing input visibility
+		- provenance input visibility
+	- Wired boundary into both runtime surfaces:
+		- `execution_envelope.productivity_coordination_boundary`
+		- `get_summary().productivity_coordination_boundary`
+- Runtime person context consumption confirmation: PASS
+	- Productivity coordination consumes Runtime Person Context and Person-Aware Routing outputs; no new identity resolution layer was introduced.
+- Provenance validation: PASS
+	- Productivity coordination includes provenance input visibility from existing Release 6 provenance ownership/consumption boundary.
+	- No provenance ownership, lineage authority, or attribution authority moved into Concierge.
+- Explainability assessment: PASS
+	- Coordination state, participating domains, routing inputs, productivity inputs, and provenance inputs are explicitly surfaced.
+	- No hidden planner/workflow engine behavior introduced.
+- Diagnostics assessment: PASS
+	- Added `productivity_coordination_boundary_visibility` diagnostics surface.
+	- Included productivity coordination in consolidated `release_6_productivity_diagnostics_visibility` boundary set.
+	- Diagnostics remain privacy-safe metadata surfaces.
+- Repairs assessment: NOT APPLICABLE
+	- No new repair flows were required for this coordination visibility slice.
+- Translation assessment: NOT APPLICABLE
+	- No new user-facing strings were added.
+- Testing updates:
+	- Added service assertions for summary and execute productivity coordination boundary outputs.
+	- Added diagnostics assertions for productivity coordination visibility and consolidated Release 6 diagnostics counts.
+	- Regression checks retain #369, #370, #382, and #383 boundary expectations.
+- Ownership boundary confirmation: PASS
+	- Concierge remains orchestration/coordination composition owner only.
+	- Productivity systems remain source-of-record authorities.
+	- Runtime Person Context remains identity context authority.
+	- Provenance remains provenance authority.
+- Conflict review: PASS
+	- No ADR/contract/model/existing-implementation conflicts identified.
+- Ownership drift review: PASS
+	- No ownership transfer or new authority layer introduced.
+- Final evidence status: CONDITIONAL PASS
+	- E14-04 productivity coordination boundary implementation is complete and statically validated.
+	- Runtime pytest execution remains environment-constrained in this Windows session.
+
+## Issue #372 Implementation Evidence (2026-07-21)
+
+- Issue: #372 - P3-R6-E14-05 Provenance diagnostics and explainability implementation
+- Scope: implement provenance visibility, explainability, and inspectability surfaces for Release 6 using existing governed provenance/productivity/coordination/runtime-person boundaries without creating provenance authority.
+- Files changed:
+	- custom_components/concierge/services.py
+	- custom_components/concierge/diagnostics.py
+	- tests/test_services.py
+	- tests/test_diagnostics.py
+	- docs/governance/phase-3/release-6-implementation-tracker.md
+	- docs/governance/phase-3/phase-3-governed-implementation-tracker.md
+- Authority sources reviewed:
+	- ADRs:
+		- homes_that_behave_well/docs/architecture/adr-household-productivity-experience-governance.md
+		- homes_that_behave_well/docs/architecture/adr-provenance-governance.md
+		- homes_that_behave_well/docs/architecture/adr-coordinator-v2-governance.md
+	- Contracts:
+		- homes_that_behave_well/docs/contracts/calendar-email-experience-contract.md
+		- homes_that_behave_well/docs/contracts/task-shopping-experience-contract.md
+		- homes_that_behave_well/docs/contracts/knowledge-briefing-status-synthesis-contract.md
+		- homes_that_behave_well/docs/contracts/multi-item-capture-interpretation-contract.md
+		- homes_that_behave_well/docs/contracts/household-coordination-contract.md
+		- homes_that_behave_well/docs/contracts/provenance-contract.md
+	- Models:
+		- homes_that_behave_well/docs/models/calendar-experience-model.md
+		- homes_that_behave_well/docs/models/email-experience-model.md
+		- homes_that_behave_well/docs/models/task-experience-model.md
+		- homes_that_behave_well/docs/models/shopping-experience-model.md
+		- homes_that_behave_well/docs/models/knowledge-query-experience-model.md
+		- homes_that_behave_well/docs/models/multi-item-capture-result-model.md
+		- homes_that_behave_well/docs/models/briefing-composition-model.md
+		- homes_that_behave_well/docs/models/provenance-model.md
+		- homes_that_behave_well/docs/models/household-coordination-snapshot-model.md
+	- Governing phase-2 artifacts:
+		- docs/governance/phase-2/release-6-productivity-provenance-coordination-build-execution-plan.md
+		- docs/governance/phase-2/e13-productivity-experiences-governed-implementation-readiness.md
+		- docs/governance/phase-2/e14-provenance-and-household-coordination-governed-implementation-readiness.md
+		- docs/governance/phase-2/concierge-v2-end-to-end-governed-implementation-validation.md
+- Existing implementation review findings (pre-code):
+	- Runtime Person Context (#383): provenance visibility existed only as consumed context posture and was not exposed as a dedicated Release 6 provenance diagnostics slice.
+	- Person-Aware Routing (#382): routing reason visibility existed; provenance explainability linkage across routing and ownership boundaries was missing as a consolidated surface.
+	- Household Coordination (#369): provenance context was visible per execution/summary boundary but lacked dedicated provenance diagnostics inspection structure.
+	- Household Status and Open-Loop (#370): provenance visibility was present but not consolidated into a runtime provenance diagnostics/explainability boundary.
+	- Productivity Coordination (#371): provenance inputs were visible but not exposed through a standalone provenance diagnostics/explainability boundary.
+	- Missing slice identified: unified provenance diagnostics/explainability inspection surface across source boundary, ownership boundary, routing inputs, coordination inputs, and status inputs.
+- Provenance diagnostics implementation:
+	- Added `provenance_diagnostics_explainability_boundary` to summary and execute envelope surfaces in `services.py`.
+	- Added governed builder: `_build_release_6_provenance_diagnostics_explainability_boundary`.
+	- Builder consumes existing governed boundaries and projects metadata-only inspection fields:
+		- provenance source-boundary inspection
+		- ownership/authority visibility counts
+		- provenance availability/lineage readiness
+		- governance context routing scope
+		- privacy-safe diagnostics capability markers
+	- No provenance generation, mutation, or ownership transfer was added.
+- Provenance explainability implementation:
+	- Added explainability projections covering approved inputs:
+		- source boundary inputs
+		- ownership boundary inputs
+		- provenance inputs
+		- routing inputs
+		- coordination inputs
+		- status/open-loop inputs
+		- runtime person context posture
+	- Added top-level diagnostics projection in `diagnostics.py`:
+		- `release_6_provenance_diagnostics_explainability_visibility`
+	- Included this boundary in consolidated Release 6 diagnostics boundary set.
+- Runtime person context consumption confirmation: PASS
+	- New provenance diagnostics boundary consumes existing runtime person context and person-aware routing projections only.
+	- No identity attribution, confidence, or ownership behavior was altered.
+- Diagnostics assessment: PASS
+	- Diagnostics remain metadata-only (`safe_source_metadata_only: true`).
+	- No source contents, provider contents, tokens, or biometric payloads exposed.
+- Repairs assessment: NOT APPLICABLE
+	- Issue #372 scope was satisfied through diagnostics/explainability projection surfaces.
+	- No new repair authority or provenance fabrication behavior introduced.
+- Translation assessment: NOT APPLICABLE
+	- No user-facing strings were added.
+- Testing updates:
+	- Added summary and execute service assertions for `provenance_diagnostics_explainability_boundary`.
+	- Added diagnostics assertions for `release_6_provenance_diagnostics_explainability_visibility`.
+	- Updated Release 6 consolidated diagnostics boundary count assertions.
+	- Regression posture preserved for #369, #370, #371, #382, and #383 boundaries.
+- Ownership boundary confirmation: PASS
+	- Concierge remains bounded consumer/orchestrator.
+	- External provenance authority remains authoritative for lineage/attribution/ownership/source provenance.
+	- No ownership or authority drift introduced.
+- Conflict review: PASS
+	- No ADR/contract/model/existing-implementation conflicts identified.
+- Ownership drift review: PASS
+	- No provenance ownership transfer or new authority path introduced.
+- Final evidence status: CONDITIONAL PASS
+	- E14-05 provenance diagnostics and explainability slice is implemented in governed runtime and diagnostics surfaces with static validation.
+	- Runtime pytest execution remains environment-constrained in this Windows session.
+
+## Issue #380 Implementation Evidence (2026-07-20)
+
+- Issue: #380 - Runtime Attribution Consumption
+- Scope: enable Concierge runtime orchestration to actively consume approved Voice Identity runtime attribution and identity-context services without moving attribution ownership into Concierge.
+- Files changed:
+	- custom_components/concierge/services.py
+	- tests/test_services.py
+	- docs/governance/phase-3/release-6-implementation-tracker.md
+- Runtime services reviewed (Voice Identity authority dependency):
+	- `voice_identity.attribute_speaker`
+		- Request shape (optional): `entry_id`, `audio_ref`, `candidate_scope`, `model_preference`
+		- Response envelope: `success`, `reason_code`, `entry_id`, `attribution`
+		- Attribution payload includes: `status`, `attributed_person_id`, `attributed_profile_id`, `confidence`, `confidence_band`, `reason_code`, diagnostics/repair/readiness posture fields.
+	- `voice_identity.get_identity_context`
+		- Request shape (optional): `entry_id`, `audio_ref`, `candidate_scope`, `model_preference`
+		- Response envelope: `success`, `reason_code`, `entry_id`, `identity_context`
+		- Identity-context payload includes: `state`, `person_id`, `voice_profile_id`, `confidence`, `confidence_band`, `reason_code`, `source`.
+- Attribution consumption implemented:
+	- Added bounded runtime invocation helper in Concierge execute orchestration path.
+	- Concierge now calls `voice_identity.attribute_speaker` when runtime invocation hints are present (`audio_ref`, `candidate_scope`, `model_preference`, or explicit invoke flag) and no authoritative identity context was already provided.
+	- Attribution response is consumed into governed envelope projections only; Concierge does not derive alternate attribution authority.
+- Identity-context consumption implemented:
+	- Concierge now calls `voice_identity.get_identity_context` under the same invocation conditions.
+	- Returned identity context is consumed into `voice_identity_identity_context` / `identity_context` runtime context inputs for envelope assembly.
+	- If identity-context service is unavailable or fails, Concierge fail-closes to an unavailable identity-context projection.
+- Runtime consumption envelope updates:
+	- Existing governed `voice_identity_attribution_confidence_consumption` envelope remains the primary boundary surface.
+	- Active attribution availability is now strict/fail-closed: attribution is only marked consumed when identity state is not unavailable/unknown/low_confidence and a person/profile identifier is present.
+	- Confidence remains separately consumed when confidence value/band is present.
+- Fail-closed behavior validation:
+	- Linkage disabled -> `voice_identity_linkage_disabled` unavailable projection.
+	- Voice Identity not loaded -> `voice_identity_not_loaded` unavailable projection.
+	- Attribution service missing -> `attribution_service_unavailable` unavailable projection.
+	- Identity-context service missing -> `identity_context_service_unavailable` unavailable projection.
+	- No fabricated fallback identity is produced.
+- Diagnostics assessment: PASS
+	- Diagnostics projection remains bounded to availability/readiness/reason surfaces.
+	- No raw audio, embeddings, voiceprints, biometric vectors, or model internals were exposed.
+- Repairs assessment: PASS
+	- No repair execution authority was added.
+	- Runtime fail-closed reason codes support repair visibility without modifying Voice Identity internals.
+- Translation assessment: PASS
+	- No new user-visible strings were introduced.
+- Testing updates:
+	- Added runtime invocation test proving execute calls both Voice Identity services and consumes returned attribution/identity/confidence outcomes.
+	- Added fail-closed test proving execute returns unavailable/no-active-attribution posture when Voice Identity runtime services are unavailable.
+	- Existing execute tests continue to validate passive-context consumption paths.
+- Ownership boundary confirmation: PASS
+	- Concierge consumes approved outputs only.
+	- Voice Identity remains attribution/confidence/voiceprint/embedding authority.
+	- No ownership transfer or drift introduced.
+- Final evidence status: CONDITIONAL PASS
+	- Implementation and test updates are complete in-repo.
+	- Runtime pytest execution remains environment-constrained on this Windows host due Home Assistant plugin `fcntl` dependency.
+
+## Issue #377 Implementation Evidence (2026-07-20, Post-#379 Continuation)
+
+- Issue: #377 - P3-R6-E14-01B Voice enrollment capability status display implementation
+- Scope: correct Global Settings voice enrollment capability display using post-#379 runtime alignment and explicit prerequisite gating (archive, linkage, runtime capability readiness)
+- Files changed:
+	- custom_components/concierge/voice_identity_bridge.py
+	- custom_components/concierge/panel.py
+	- custom_components/concierge/services.py
+	- tests/conftest.py
+	- tests/test_panel.py
+	- tests/test_services.py
+	- tests/test_diagnostics.py
+	- docs/governance/phase-3/release-6-implementation-tracker.md
+- Root cause confirmed:
+	- Capability display discovery consumed only top-level Voice Identity discovery integration.
+	- Production Voice Identity runtime stores discovery integration in entry-scoped runtime buckets.
+	- Linkage state was not enforced in Global Settings capability availability evaluation.
+- Capability evaluation logic updated:
+	- Voice Identity discovery bridge now resolves discovery integration from both legacy top-level and production entry-scoped runtime buckets.
+	- Global Settings capability evaluation now requires all approved prerequisites:
+		- archive destination configured and archive enabled
+		- Voice Identity linkage enabled
+		- Voice Identity runtime discovery reports enrollment capability ready
+	- Unavailable posture now safely reports concrete missing prerequisite reason code.
+- Global Settings behavior:
+	- Available state: `ready` with "Voice enrollment is ready." when archive, linkage, and runtime capability are all ready.
+	- Unavailable states include:
+		- `archive_not_configured`
+		- `voice_identity_linkage_disabled`
+		- Voice Identity runtime readiness reasons from discovery surface (for example `voice_identity_discovery_unavailable`).
+- Diagnostics/privacy review: PASS
+	- Diagnostics remain bounded to readiness/reason visibility only.
+	- No voiceprints, embeddings, audio payloads, or biometric internals were added to diagnostics.
+- Repairs review: PASS
+	- Repair surfaces continue to identify prerequisite readiness states only.
+	- No Voice Identity internal modification or biometric artifact generation behavior was added.
+- Translation review: PASS
+	- No new translation keys were required; user-facing summaries follow existing capability-status messaging patterns.
+- Testing coverage updates:
+	- Updated integration test fixture to production-shaped entry-scoped Voice Identity runtime and explicit linkage-enabled setup baseline.
+	- Added Global Settings capability matrix tests (available + archive/linkage/runtime unavailable paths).
+	- Added backend capability-resolution tests for entry-scoped discovery and linkage-disabled gating.
+	- Updated diagnostics baseline test to explicitly enforce linkage-disabled posture where asserted.
+- Validation status:
+	- Implementation validation: COMPLETED
+	- Static validation: COMPLETED
+		- `get_errors` reported no diagnostics for touched files.
+		- `r:/HomesPlatformRepos/concierge/.venv/Scripts/python.exe -m py_compile r:/HomesPlatformRepos/concierge/custom_components/concierge/voice_identity_bridge.py r:/HomesPlatformRepos/concierge/custom_components/concierge/panel.py r:/HomesPlatformRepos/concierge/custom_components/concierge/services.py r:/HomesPlatformRepos/concierge/tests/conftest.py r:/HomesPlatformRepos/concierge/tests/test_panel.py r:/HomesPlatformRepos/concierge/tests/test_services.py r:/HomesPlatformRepos/concierge/tests/test_diagnostics.py` completed successfully.
+	- Runtime pytest validation: INCOMPLETE
+		- Targeted pytest runs remain blocked in this Windows environment because the Home Assistant pytest plugin imports `homeassistant.runner`, which requires `fcntl`.
+- Ownership boundary confirmation: PASS
+	- Concierge remains capability visibility/explainability owner only.
+	- Voice Identity remains enrollment/voiceprint/lifecycle authority.
+	- No authority transfer or ownership drift was introduced.
+- Final evidence status: CONDITIONAL PASS
+	- Capability display logic and prerequisite gating were corrected and statically validated.
+	- Runtime pytest evidence remains blocked by environment limitations and must be completed in a valid test environment for full PASS closure.
+
+## Issue #379 Implementation Evidence (2026-07-20)
+
+- Issue: #379 - Voice Identity Runtime Operation Discovery Alignment
+- Scope: repair Concierge Voice Identity runtime operation discovery so enrollment completion can locate generation/status operations in production-shaped entry-scoped Voice Identity runtime
+- Files changed:
+	- custom_components/concierge/enrollment_orchestrator.py
+	- tests/conftest.py
+	- tests/test_enrollment_orchestrator.py
+	- docs/governance/phase-3/release-6-implementation-tracker.md
+- Root cause confirmed:
+	- Concierge operation lookup used top-level `hass.data["voice_identity"]` operation keys.
+	- Voice Identity runtime registers operations under `hass.data["voice_identity"][entry.entry_id]`.
+	- The mismatch could drive `operation_not_loaded` -> `generation_failed` during enrollment completion.
+- Runtime discovery alignment implemented:
+	- Added runtime-bucket selection in the Concierge orchestrator that supports both legacy top-level operation keys and production entry-scoped runtime buckets.
+	- Preserved fail-closed behavior when no callable operation is discovered.
+- Production-path testing coverage updates:
+	- Updated fixture runtime shape to provide Voice Identity operations under an entry-scoped runtime bucket.
+	- Added negative-path test for missing runtime operation (`operation_not_loaded` and `generation_failed`).
+	- Added direct operation-missing test for deterministic `operation_not_loaded` projection.
+- Ownership boundary confirmation: PASS
+	- Concierge remains orchestration/enrollment owner only.
+	- Voice Identity remains generation/status/lifecycle authority.
+	- No biometric or voiceprint ownership transfer was introduced.
+- Diagnostics/privacy confirmation: PASS
+	- No new diagnostics payloads exposing voiceprints, embeddings, audio artifacts, or biometric payloads were introduced.
+- Validation status:
+	- Implementation validation: COMPLETED
+	- Static validation: COMPLETED
+		- `get_errors` reported no diagnostics for touched files.
+		- `r:/HomesPlatformRepos/concierge/.venv/Scripts/python.exe -m py_compile r:/HomesPlatformRepos/concierge/custom_components/concierge/enrollment_orchestrator.py r:/HomesPlatformRepos/concierge/tests/conftest.py r:/HomesPlatformRepos/concierge/tests/test_enrollment_orchestrator.py` completed successfully.
+	- Runtime pytest validation: INCOMPLETE
+		- `r:/HomesPlatformRepos/concierge/.venv/Scripts/python.exe -m pytest r:/HomesPlatformRepos/concierge/tests/test_enrollment_orchestrator.py -k "complete_enrollment_uses_voice_identity_generation_result or complete_enrollment_missing_runtime_operation_fails_closed or generate_operation_missing_returns_operation_not_loaded"` failed in this Windows environment because the Home Assistant pytest plugin imports `homeassistant.runner`, which requires `fcntl`.
+- Final evidence status: CONDITIONAL PASS
+	- Root cause and runtime discovery alignment are implemented and statically validated.
+	- Runtime pytest evidence remains blocked by environment limitations and must be completed in a valid test environment for full PASS closure.
+
+## Issue #376 Implementation Evidence (2026-07-20)
+
+- Issue: #376 - P3-R6-E14-01A Voice Identity capability linkage setup implementation
+- Scope: add a governed Concierge setup/options linkage flag for Voice Identity and a privacy-safe diagnostics projection for linked versus unlinked posture, without implementing Voice Identity functionality inside Concierge
+- Files changed:
+	- custom_components/concierge/const.py
+	- custom_components/concierge/config_flow.py
+	- custom_components/concierge/diagnostics.py
+	- custom_components/concierge/translations/en.json
+	- tests/test_config_flow.py
+	- tests/test_diagnostics.py
+	- docs/governance/phase-3/release-6-implementation-tracker.md
+- Implementation summary:
+	- Added a persistent `voice_identity_linked` boolean to Concierge setup and options flows.
+	- Surfaced a read-only `voice_identity_linkage_setup_boundary_visibility` diagnostics projection that reports linked/unlinked posture, loaded state, compatibility/readiness, and safe fallback mode.
+	- Kept Voice Identity ownership external by consuming the existing bridge discovery surface rather than adding any Voice Identity setup or enrollment behavior inside Concierge.
+- Ownership boundary confirmation: PASS
+	- Concierge does not own Voice Identity capability registration, enrollment, or discovery behavior.
+	- The new flag only records whether Concierge should be linked to the external integration.
+- Diagnostics review: PASS
+	- Diagnostics expose linkage posture and fallback state only.
+	- Diagnostics do not expose enrollment contents, biometrics, or provider internals.
+- Translation review: PASS
+	- Added the new setup/options label for the linkage toggle.
+- Validation status:
+	- Implementation validation: COMPLETED
+	- Static validation: COMPLETED
+		- `get_errors` reported no diagnostics for touched files.
+	- Runtime pytest validation: NOT RUN
+		- Runtime pytest execution was not attempted in this pass.
+- Final evidence status: CONDITIONAL PASS
+	- The governed setup linkage and diagnostics surface are implemented and statically validated.
+	- Runtime test evidence can be collected in a follow-up validation pass if required.
 
 ## Authority Source Hardening
 
@@ -31,3 +790,556 @@ No missing authority sources were invented.
 No implementation code was changed.
 
 No roadmap scope was expanded.
+
+## Issue #362 Implementation Evidence (2026-07-20)
+
+- Issue: #362 - P3-R6-E13-01 Productivity source-of-record boundary implementation
+- Scope: establish a governed, non-authoritative Concierge substrate for Release 6 productivity source-of-record boundaries only
+- Files changed:
+	- custom_components/concierge/services.py
+	- custom_components/concierge/diagnostics.py
+	- tests/test_services.py
+	- tests/test_diagnostics.py
+	- docs/governance/phase-3/release-6-implementation-tracker.md
+- Authority review summary: PASS (ADR -> Contract -> Model -> Existing Implementation -> GitHub Issue)
+- Implementation summary:
+	- Added a reusable `productivity_source_of_record_boundary` structure that distinguishes external authoritative sources, Concierge configuration references, consumed projections, generated explanations, and coordination context.
+	- Surfaced the boundary in `get_summary` so downstream Release 6 work can consume a single governed source-of-record substrate.
+	- Surfaced the same boundary in diagnostics as privacy-safe verification metadata with no productivity content exposure.
+- Ownership boundary confirmation: PASS
+	- Concierge remains a bounded consumer/orchestrator.
+	- Calendar, email, task, shopping, capture, and knowledge systems remain externally authoritative.
+	- Briefing and household status remain derived-context inputs and not source ownership transfers.
+	- No duplicate canonical productivity records were introduced.
+- Diagnostics review: PASS
+	- Diagnostics expose boundary availability, configured-reference presence, provenance requirements, and non-rights assertions only.
+	- Diagnostics do not expose email contents, calendar details, task contents, shopping contents, credentials, tokens, or provider internals.
+- Repairs review: NOT APPLICABLE
+	- Issue #362 establishes boundary substrate only and does not introduce new repairable misconfiguration semantics.
+- Translation review: NOT APPLICABLE
+	- No new user-facing config, options, repair, or diagnostics strings were introduced.
+- Validation status:
+	- Implementation validation: COMPLETED
+		- Scope and authority alignment were verified for the Issue #362 boundary substrate changes in services, diagnostics, and aligned tests/docs.
+	- Static validation: COMPLETED
+		- `get_errors` reported no diagnostics for touched files.
+		- `r:/HomesPlatformRepos/concierge/.venv/Scripts/python.exe -m py_compile r:/HomesPlatformRepos/concierge/custom_components/concierge/services.py r:/HomesPlatformRepos/concierge/custom_components/concierge/diagnostics.py r:/HomesPlatformRepos/concierge/tests/test_services.py r:/HomesPlatformRepos/concierge/tests/test_diagnostics.py` completed successfully.
+	- Runtime pytest validation: INCOMPLETE
+		- `r:/HomesPlatformRepos/concierge/.venv/Scripts/python.exe -m pytest -q r:/HomesPlatformRepos/concierge/tests/test_services.py -k summary` -> BLOCKED in Windows venv by Home Assistant pytest plugin import dependency on `fcntl`.
+		- `wsl -d Ubuntu -- /home/tomtom/.venvs/concierge312/bin/python -m pytest -q /mnt/r/HomesPlatformRepos/concierge/tests/test_services.py -k summary` -> BLOCKED because the mapped `R:` repo path is not mounted in WSL on this machine.
+		- Required runtime pytest evidence for Issue #362 is therefore not complete in the current environment.
+- Home Assistant standards confirmation: PASS
+	- Implementation reuses existing HA-native service response and diagnostics patterns.
+	- No generic web UI or non-native configuration path was introduced.
+- Cross-repo ownership drift review: PASS
+	- No HTBW, Voice Identity, Asset Intelligence, or external productivity ownership drift was introduced.
+- Conflict review: PASS
+	- No ADR, contract, model, or existing-implementation conflict was identified.
+- Final evidence status: CONDITIONAL PASS
+	- Implementation and static validation are complete.
+	- Runtime pytest execution evidence is incomplete due environment limitations and must be completed in a valid test environment before closure is upgraded to full PASS.
+
+## Issue #375 Implementation Evidence (2026-07-20)
+
+- Issue: #375 - P3-R6-E13-01A Person productivity source binding setup implementation
+- Scope: establish governed person-to-productivity-source binding setup for email/calendar/shopping references only, without productivity data consumption, request routing, or source-of-record ownership transfer
+- Files changed:
+	- custom_components/concierge/models.py
+	- custom_components/concierge/services.py
+	- custom_components/concierge/diagnostics.py
+	- custom_components/concierge/panel.py
+	- custom_components/concierge/frontend/panel.js
+	- custom_components/concierge/services.yaml
+	- tests/test_services.py
+	- tests/test_diagnostics.py
+	- docs/governance/phase-3/release-6-implementation-tracker.md
+- Authority sources reviewed:
+	- ADRs: adr-household-productivity-experience-governance.md, adr-provenance-governance.md, adr-coordinator-v2-governance.md
+	- Contracts: calendar-email-experience-contract.md, task-shopping-experience-contract.md, knowledge-briefing-status-synthesis-contract.md, household-coordination-contract.md, provenance-contract.md, person-identity-contract.md
+	- Models: calendar-experience-model.md, email-experience-model.md, task-experience-model.md, shopping-experience-model.md, briefing-composition-model.md, provenance-model.md, household-coordination-snapshot-model.md, person-profile-model.md
+	- Governing Phase 2 artifacts: release-6-productivity-provenance-coordination-build-execution-plan.md, e13-productivity-experiences-governed-implementation-readiness.md, e14-provenance-and-household-coordination-governed-implementation-readiness.md, concierge-v2-end-to-end-governed-implementation-validation.md
+	- Existing implementation reviewed: config_flow.py, services.py, diagnostics.py, repairs.py, translations/en.json, panel.py, frontend/panel.js, tests/
+- Implementation summary:
+- Extended person profile model and persistence with explicit reference-only fields: `email_source_ref`, `calendar_source_ref`, and `shopping_source_ref`.
+- Extended `update_person_profile` schema/service and HA service metadata to accept and persist these source references and binding rows.
+- Extended the People setup panel and frontend save flow to capture/edit the configured productivity source bindings through the existing HA-native configuration path.
+- Extended productivity source-of-record boundary surfaces in summary and diagnostics with `person_productivity_source_bindings`, including deterministic safe-fallback visibility.
+- Added fallback visibility states for missing/incomplete and unavailable/removed references without introducing source ownership or data ingestion behavior.
+- Person source binding behavior:
+- Supports explicit per-person source references for email/calendar/shopping.
+- Keeps these as configuration references only; no provider data payloads are consumed/stored.
+- Reports safe fallback posture when bindings are missing/incomplete or unavailable/removed.
+- Ownership boundary confirmation: PASS
+- Concierge stores source references and binding metadata only.
+- External productivity systems remain source-of-record authorities.
+- No mailbox/calendar/task/shopping canonical record ownership transfer was introduced.
+- Source-of-record confirmation: PASS
+- #375 extends the #362 boundary substrate and does not redefine source-of-record authority.
+- No productivity content ingestion or shadow record creation was implemented.
+- Diagnostics assessment: PASS
+- Diagnostics expose only binding presence/status and fallback posture.
+- Diagnostics remain privacy-safe and do not expose source contents, credentials, or provider internals.
+- Repairs assessment: NOT APPLICABLE
+- #375 adds setup/binding representation and diagnostics visibility; no repair flow semantics were required for this bounded step.
+- Translation assessment: PASS
+- No new translation keys were required because setup additions were applied in the existing panel/service patterns without introducing new localized config-flow/repair strings.
+- Validation status:
+- Implementation validation: COMPLETED
+	- Authority order and boundary constraints were applied and reflected in implementation scope.
+- Static validation: COMPLETED
+	- `get_errors` reported no diagnostics for all touched files.
+- Runtime pytest validation: INCOMPLETE
+	- Runtime pytest execution remains blocked in this environment (same Windows/WSL constraints documented for #362).
+	- Required runtime pytest evidence for #375 is not complete in the current environment.
+- Home Assistant standards confirmation: PASS
+- Implementation uses existing HA-native service and panel patterns; no non-native/custom framework path was introduced.
+- Conflict review: PASS
+- No ADR/contract/model conflicts were identified for this bounded implementation.
+- Ownership drift review: PASS
+- No HTBW, Voice Identity, Asset Intelligence, or external productivity ownership drift was introduced.
+- Final evidence status: CONDITIONAL PASS
+- Implementation and static validation are complete.
+- Runtime pytest evidence remains incomplete due environment limitations and must be completed before full PASS closure.
+
+## Issue #368 Implementation Evidence (2026-07-20)
+
+- Issue: #368 - P3-R6-E14-01 Provenance ownership and consumption implementation
+- Scope: establish a governed, reference-only provenance ownership and consumption projection for Release 6 surfaces, without inventing ownership, duplicating canonical records, or claiming provenance authority
+- Files changed:
+	- custom_components/concierge/services.py
+	- custom_components/concierge/diagnostics.py
+	- tests/test_services.py
+	- tests/test_diagnostics.py
+	- docs/governance/phase-3/release-6-implementation-tracker.md
+- Authority review summary: PASS (ADR -> Contract -> Model -> Existing Implementation -> GitHub Issue)
+- Implementation summary:
+	- Added a dedicated Release 6 provenance ownership and consumption boundary that aggregates the existing productivity, calendar/email, task/shopping, capture/knowledge, briefing, and household-status surfaces.
+	- Surfaced the boundary in `get_summary` and diagnostics as a privacy-safe visibility projection with explicit lineage, attribution, ownership, and explainability readiness fields.
+	- Kept provenance lineage-only: no ownership transfer, no duplicate canonical records, and no invented source-of-record authority were introduced.
+- Ownership boundary confirmation: PASS
+	- Concierge remains a bounded consumer/orchestrator.
+	- External source systems remain authoritative.
+	- No provenance ownership transfer or canonical record duplication was introduced.
+- Diagnostics review: PASS
+	- Diagnostics expose only boundary visibility, lineage readiness, attribution visibility, safe fallback posture, and non-rights assertions.
+	- Diagnostics do not expose provider content, tokens, or hidden authority.
+- Repairs review: NOT APPLICABLE
+	- No repair workflow was required for this bounded provenance visibility surface.
+- Translation review: NOT APPLICABLE
+	- No new user-facing config, options, repair, or diagnostics strings were introduced.
+- Validation status:
+	- Implementation validation: COMPLETED
+	- Static validation: COMPLETED
+		- `get_errors` reported no diagnostics for touched files.
+		- `r:/HomesPlatformRepos/concierge/.venv/Scripts/python.exe -m py_compile custom_components/concierge/services.py custom_components/concierge/diagnostics.py tests/test_services.py tests/test_diagnostics.py` completed successfully after repairing the malformed #368 splice.
+- Runtime pytest validation: NOT RUN
+	- The Windows Home Assistant pytest path remains blocked by the known `fcntl` dependency issue.
+- Home Assistant standards confirmation: PASS
+	- Implementation reuses existing HA-native service and diagnostics patterns.
+- Cross-repo ownership drift review: PASS
+	- No HTBW, Voice Identity, Asset Intelligence, or external provenance ownership drift was introduced.
+- Conflict review: PASS
+	- No ADR, contract, model, or existing-implementation conflict was identified.
+- Final evidence status: CONDITIONAL PASS
+	- Implementation and static validation are complete.
+	- Runtime pytest evidence remains incomplete due environment limitations and must be completed in a valid test environment before closure.
+
+## Issue #363 Implementation Evidence (2026-07-20)
+
+- Issue: #363 - P3-R6-E13-02 Calendar and Email Consumption Implementation
+- Scope: establish governed calendar/email consumption boundaries for person-bound references only, without source-of-record ownership transfer, provider content storage, or broad assistant routing
+- Files changed:
+	- custom_components/concierge/services.py
+	- custom_components/concierge/diagnostics.py
+	- tests/test_services.py
+	- tests/test_diagnostics.py
+	- docs/governance/phase-3/release-6-implementation-tracker.md
+- Authority sources reviewed:
+	- ADRs: adr-household-productivity-experience-governance.md, adr-provenance-governance.md, adr-coordinator-v2-governance.md
+	- Contracts: calendar-email-experience-contract.md, task-shopping-experience-contract.md, knowledge-briefing-status-synthesis-contract.md, multi-item-capture-interpretation-contract.md, household-coordination-contract.md, provenance-contract.md
+	- Models: calendar-experience-model.md, email-experience-model.md, task-experience-model.md, shopping-experience-model.md, knowledge-query-experience-model.md, multi-item-capture-result-model.md, briefing-composition-model.md, provenance-model.md, household-coordination-snapshot-model.md
+	- Governing Phase 2 artifacts: release-6-productivity-provenance-coordination-build-execution-plan.md, e13-productivity-experiences-governed-implementation-readiness.md, e14-provenance-and-household-coordination-governed-implementation-readiness.md, concierge-v2-end-to-end-governed-implementation-validation.md
+	- Existing implementation reviewed: services.py, coordinator.py, models.py, config_flow.py, diagnostics.py, repairs.py, translations/en.json, tests/
+- Implementation summary:
+	- Added a dedicated calendar/email consumption boundary projection derived from the existing person productivity bindings.
+	- Surfaced the boundary in `get_summary` as a reference-only, privacy-safe consumer view with explicit safe-fallback posture.
+	- Surfaced the same boundary in diagnostics as a non-sensitive visibility projection that preserves source-of-record boundaries.
+	- Kept the implementation reference-based: no calendar/email payload content, provider secrets, tokens, or ownership transfers were introduced.
+- Person binding dependency confirmation:
+	- Uses the explicit person productivity bindings established by #375.
+	- Consumes only configured calendar and email references for a person.
+	- Falls back safely when configured references are missing, incomplete, or unavailable/removed.
+- Calendar consumption summary:
+	- Calendar is represented as a governed consumer boundary only.
+	- Calendar content is not stored or owned by Concierge.
+	- Calendar provenance and lineage remain external and explicit.
+- Email consumption summary:
+	- Email is represented as a governed consumer boundary only.
+	- Email content is not stored or owned by Concierge.
+	- Email provenance and lineage remain external and explicit.
+- Ownership boundary confirmation: PASS
+	- Concierge does not own calendars, mailboxes, schedules, or messages.
+	- Concierge does not become a calendar or email source of record.
+	- Concierge does not infer hidden provider ownership.
+- Source-of-record confirmation: PASS
+	- Calendar providers remain authoritative.
+	- Email providers remain authoritative.
+	- Concierge consumes governed references and boundary metadata only.
+- Provenance confirmation: PASS
+	- The implementation preserves source lineage and provenance reference requirements.
+	- No alternate provenance semantics were introduced.
+- Diagnostics assessment: PASS
+	- Diagnostics expose only boundary visibility, configured-reference presence, and safe-fallback posture.
+	- Diagnostics do not expose email content, calendar event details, or provider internals.
+- Repairs assessment: NOT APPLICABLE
+	- No repair workflow was required for this bounded consumption surface.
+- Translation assessment: NOT APPLICABLE
+	- No new user-facing strings were introduced beyond existing governed patterns.
+- Testing completed:
+	- Static validation: COMPLETED
+		- `get_errors` reported no diagnostics for touched files.
+	- Runtime pytest validation: BLOCKED
+		- `r:/HomesPlatformRepos/concierge/.venv/Scripts/python.exe -m pytest -q r:/HomesPlatformRepos/concierge/tests/test_services.py -k "summary or diagnostics"` failed because the Windows Home Assistant pytest plugin imports `homeassistant.runner`, which requires `fcntl` and is unavailable in this environment.
+- Durable evidence:
+	- This tracker entry
+- Conflict review: PASS
+	- No ADR, contract, or model conflicts were introduced.
+- Ownership drift review: PASS
+	- No cross-repo ownership drift was introduced.
+- Final status: CONDITIONAL PASS
+	- The governed calendar/email consumption boundary has been implemented and statically validated.
+	- Runtime pytest evidence remains blocked by the environment and must be completed in a valid test environment before closure.
+
+## Issue #364 Implementation Evidence (2026-07-20)
+
+- Issue: #364 - P3-R6-E13-03 Task and shopping consumption implementation
+- Scope: establish governed task/shopping consumption boundaries for reference-only task model context and existing person-bound shopping bindings, without task bindings, provider ownership transfer, or source-of-record drift
+- Files changed:
+	- custom_components/concierge/services.py
+	- custom_components/concierge/diagnostics.py
+	- tests/test_services.py
+	- tests/test_diagnostics.py
+	- docs/governance/phase-3/release-6-implementation-tracker.md
+- Authority sources reviewed:
+	- ADRs: adr-household-productivity-experience-governance.md, adr-provenance-governance.md, adr-coordinator-v2-governance.md
+	- Contracts: calendar-email-experience-contract.md, task-shopping-experience-contract.md, multi-item-capture-interpretation-contract.md, household-coordination-contract.md, provenance-contract.md
+	- Models: task-experience-model.md, shopping-experience-model.md, provenance-model.md, household-coordination-snapshot-model.md
+	- Governing Phase 2 artifacts: release-6-productivity-provenance-coordination-build-execution-plan.md, e13-productivity-experiences-governed-implementation-readiness.md, e14-provenance-and-household-coordination-governed-implementation-readiness.md, concierge-v2-end-to-end-governed-implementation-validation.md
+	- Existing implementation reviewed: services.py, diagnostics.py, models.py, tests/
+- Implementation summary:
+	- Added a dedicated task/shopping consumption boundary projection in `get_summary`.
+	- Reused the existing person shopping bindings from #375 for shopping consumption visibility.
+	- Projected the canonical task model reference categories as reference-only consumption metadata: ownership, assignment, completion, due-awareness, and provenance references.
+	- Added explainable clarification behavior metadata that keeps ambiguity visible and does not infer hidden intent.
+	- Surfaced the same boundary in diagnostics as a privacy-safe visibility projection.
+- Task consumption summary:
+	- Task consumption is reference-only and does not introduce task bindings.
+	- Task provider ownership remains external.
+	- Task model references are exposed as governed context categories only.
+- Shopping consumption summary:
+	- Shopping consumption reuses the existing setup-only shopping bindings from #375.
+	- Shopping content is not stored or owned by Concierge.
+	- Shopping provenance and lineage remain external and explicit.
+- Clarification behavior summary:
+	- Ambiguity remains visible.
+	- Clarification is explainable and confirmation-oriented.
+	- Hidden intent inference is explicitly prohibited.
+- Ownership boundary confirmation: PASS
+	- Concierge does not own tasks, task lifecycle truth, shopping items, or shopping lists.
+	- Concierge does not become a task or shopping source of record.
+	- Concierge does not invent task bindings.
+- Source-of-record confirmation: PASS
+	- Task systems remain authoritative.
+	- Shopping systems remain authoritative.
+	- Concierge consumes governed references and boundary metadata only.
+- Provenance confirmation: PASS
+	- The implementation preserves source lineage and provenance reference requirements.
+	- No alternate provenance semantics were introduced.
+- Diagnostics assessment: PASS
+	- Diagnostics expose only boundary visibility, configured-reference presence, clarification posture, and safe metadata.
+	- Diagnostics do not expose task contents, shopping contents, or provider internals.
+- Repairs assessment: NOT APPLICABLE
+	- No repair workflow was required for this bounded consumption surface.
+- Translation assessment: NOT APPLICABLE
+	- No new user-facing strings were introduced beyond existing governed patterns.
+- Testing completed:
+	- Static validation: COMPLETED
+		- `get_errors` reported no diagnostics for touched files.
+		- `r:/HomesPlatformRepos/concierge/.venv/Scripts/python.exe -m py_compile r:/HomesPlatformRepos/concierge/custom_components/concierge/services.py r:/HomesPlatformRepos/concierge/custom_components/concierge/diagnostics.py r:/HomesPlatformRepos/concierge/tests/test_services.py r:/HomesPlatformRepos/concierge/tests/test_diagnostics.py` completed successfully.
+	- Runtime pytest validation: BLOCKED
+		- `r:/HomesPlatformRepos/concierge/.venv/Scripts/python.exe -m pytest -q r:/HomesPlatformRepos/concierge/tests/test_services.py -k "summary_includes_person_productivity_source_bindings or update_person_profile_persists_productivity_source_bindings"` failed because the Windows Home Assistant pytest plugin imports `homeassistant.runner`, which requires `fcntl` and is unavailable in this environment.
+- Durable evidence:
+	- This tracker entry
+- Conflict review: PASS
+	- No ADR, contract, or model conflicts were introduced.
+- Ownership drift review: PASS
+	- No cross-repo ownership drift was introduced.
+- Final status: CONDITIONAL PASS
+	- The governed task/shopping consumption boundary has been implemented and statically validated.
+	- Runtime pytest evidence remains blocked by the environment and must be completed in a valid test environment before closure.
+
+## Issue #365 Implementation Evidence (2026-07-20)
+
+- Issue: #365 - P3-R6-E13-04 Capture and knowledge consumption implementation
+- Scope: establish governed capture/knowledge consumption boundaries for reference-only knowledge and capture context, provenance visibility, and explainable clarification posture, without search-assistant behavior, generalized retrieval, source-of-record drift, or hidden inference
+- Files changed:
+	- custom_components/concierge/services.py
+	- custom_components/concierge/diagnostics.py
+	- tests/test_services.py
+	- tests/test_diagnostics.py
+	- docs/governance/phase-3/release-6-implementation-tracker.md
+- Authority sources reviewed:
+	- ADRs: adr-household-productivity-experience-governance.md, adr-provenance-governance.md, adr-coordinator-v2-governance.md
+	- Contracts: calendar-email-experience-contract.md, multi-item-capture-interpretation-contract.md, household-coordination-contract.md, provenance-contract.md
+	- Models: provenance-model.md, household-coordination-snapshot-model.md, task-experience-model.md, shopping-experience-model.md
+	- Governing Phase 2 artifacts: release-6-productivity-provenance-coordination-build-execution-plan.md, e13-productivity-experiences-governed-implementation-readiness.md, e14-provenance-and-household-coordination-governed-implementation-readiness.md, concierge-v2-end-to-end-governed-implementation-validation.md
+	- Existing implementation reviewed: services.py, diagnostics.py, models.py, tests/
+- Implementation summary:
+	- Added a dedicated capture/knowledge consumption boundary projection in `get_summary`.
+	- Reused `ActivityEvent.external_refs` as the bounded lineage/provenance visibility surface.
+	- Projected governed knowledge reference categories and capture reference categories as reference-only consumption metadata.
+	- Added explainable clarification posture that keeps ambiguity visible and does not infer hidden intent.
+	- Surfaced the same boundary in diagnostics as a privacy-safe visibility projection.
+- Capture/knowledge summary:
+	- Capture and knowledge remain reference-only consumption surfaces.
+	- Concierge does not store canonical knowledge or capture content as source-of-record.
+	- Knowledge and capture authorities remain external and explicit.
+- Provenance confirmation: PASS
+	- The implementation preserves source lineage and provenance reference requirements.
+	- No alternate provenance semantics were introduced.
+- Diagnostics assessment: PASS
+	- Diagnostics expose only boundary visibility, configured-reference presence, clarification posture, and safe metadata.
+	- Diagnostics do not expose capture content, knowledge content, or provider internals.
+- Repairs assessment: NOT APPLICABLE
+	- No repair workflow was required for this bounded consumption surface beyond the file syntax recovery completed in this session.
+- Translation assessment: NOT APPLICABLE
+	- No new user-facing strings were introduced beyond existing governed patterns.
+- Testing completed:
+	- Static validation: COMPLETED
+		- `r:/HomesPlatformRepos/concierge/.venv/Scripts/python.exe -m py_compile r:/HomesPlatformRepos/concierge/custom_components/concierge/services.py r:/HomesPlatformRepos/concierge/custom_components/concierge/diagnostics.py r:/HomesPlatformRepos/concierge/tests/test_services.py r:/HomesPlatformRepos/concierge/tests/test_diagnostics.py` completed successfully.
+	- Runtime pytest validation: BLOCKED
+		- `r:/HomesPlatformRepos/concierge/.venv/Scripts/python.exe -m pytest r:/HomesPlatformRepos/concierge/tests/test_services.py -k "capture_knowledge" r:/HomesPlatformRepos/concierge/tests/test_diagnostics.py -k "capture_knowledge_consumption_boundary_visibility"` failed because the Windows Home Assistant pytest plugin imports `homeassistant.runner`, which requires `fcntl` and is unavailable in this environment.
+- Durable evidence:
+	- This tracker entry
+- Conflict review: PASS
+	- No ADR, contract, or model conflicts were introduced.
+- Ownership drift review: PASS
+	- No cross-repo ownership drift was introduced.
+- Final status: CONDITIONAL PASS
+	- The governed capture/knowledge consumption boundary has been implemented and statically validated.
+	- Runtime pytest evidence remains blocked by the environment and must be completed in a valid test environment before closure.
+
+## Issue #366 Implementation Evidence (2026-07-20)
+
+- Issue: #366 - P3-R6-E13-05 Briefing and household status synthesis implementation
+- Scope: establish governed briefing composition and household status synthesis from approved Release 6 consumption projections, without planning-engine behavior, source-of-record drift, or hidden inference
+- Files changed:
+	- custom_components/concierge/services.py
+	- custom_components/concierge/diagnostics.py
+	- tests/test_services.py
+	- tests/test_diagnostics.py
+	- docs/governance/phase-3/release-6-implementation-tracker.md
+- Authority sources reviewed:
+	- ADRs: adr-household-productivity-experience-governance.md, adr-provenance-governance.md, adr-coordinator-v2-governance.md
+	- Contracts: knowledge-briefing-status-synthesis-contract.md, calendar-email-experience-contract.md, task-shopping-experience-contract.md, multi-item-capture-interpretation-contract.md, household-coordination-contract.md, provenance-contract.md
+	- Models: briefing-composition-model.md, household-coordination-snapshot-model.md, calendar-experience-model.md, email-experience-model.md, task-experience-model.md, shopping-experience-model.md, knowledge-query-experience-model.md, multi-item-capture-result-model.md, provenance-model.md
+	- Governing Phase 2 artifacts: release-6-productivity-provenance-coordination-build-execution-plan.md, e13-productivity-experiences-governed-implementation-readiness.md, e14-provenance-and-household-coordination-governed-implementation-readiness.md, concierge-v2-end-to-end-governed-implementation-validation.md
+	- Existing implementation reviewed: services.py, coordinator.py, models.py, config_flow.py, diagnostics.py, repairs.py, translations/en.json, tests/
+- Implementation summary:
+	- Added governed briefing composition and household status synthesis boundary projections in `get_summary`.
+	- Composed briefing and household-status metadata from the approved Release 6 consumption boundaries for calendar/email, task/shopping, and capture/knowledge.
+	- Preserved provenance visibility, explainability metadata, and safe-fallback posture without introducing a planning engine or source-of-record ownership.
+	- Surfaced both synthesis boundaries in diagnostics as privacy-safe visibility projections.
+- Briefing composition summary:
+	- Briefing remains reference-based and consumes approved Release 6 boundaries only.
+	- Briefing composition exposes section ordering, source references, provenance visibility, and safe-fallback posture.
+	- Briefing does not own source records or create alternate source authority.
+- Household status summary:
+	- Household status remains a derived coordination snapshot.
+	- Household status exposes calendar/task/shopping/capture/knowledge awareness references, provenance visibility, and safe-fallback posture.
+	- Household status does not create planning or coordination authority.
+- Provenance confirmation: PASS
+	- The implementation preserves source lineage and provenance reference requirements.
+	- No alternate attribution or provenance semantics were introduced.
+- Explainability review: PASS
+	- The implementation exposes source domain, source type, and safe-fallback visibility metadata.
+	- It does not implement the full explainability subsystem; that remains deferred.
+- Diagnostics assessment: PASS
+	- Diagnostics expose only boundary availability, provenance visibility, and safe-fallback posture for the new synthesis surfaces.
+	- Diagnostics do not expose provider credentials, provider internals, or private content payloads.
+- Repairs assessment: NOT APPLICABLE
+	- No repair workflow was required beyond the bounded synthesis implementation itself.
+- Translation assessment: NOT APPLICABLE
+	- No new user-facing translation keys were introduced.
+- Testing completed:
+	- Static validation: COMPLETED
+		- `r:/HomesPlatformRepos/concierge/.venv/Scripts/python.exe -m py_compile r:/HomesPlatformRepos/concierge/custom_components/concierge/services.py r:/HomesPlatformRepos/concierge/custom_components/concierge/diagnostics.py r:/HomesPlatformRepos/concierge/tests/test_services.py r:/HomesPlatformRepos/concierge/tests/test_diagnostics.py` completed successfully.
+	- Runtime pytest validation: BLOCKED
+		- `r:/HomesPlatformRepos/concierge/.venv/Scripts/python.exe -m pytest r:/HomesPlatformRepos/concierge/tests/test_services.py -k "briefing_composition or household_status or capture_knowledge" r:/HomesPlatformRepos/concierge/tests/test_diagnostics.py -k "briefing_composition_boundary_visibility or household_status_synthesis_boundary_visibility or capture_knowledge_consumption_boundary_visibility"` failed because the Windows Home Assistant pytest plugin imports `homeassistant.runner`, which requires `fcntl` and is unavailable in this environment.
+- Durable evidence:
+	- This tracker entry
+- Conflict review: PASS
+	- No ADR, contract, or model conflicts were introduced.
+- Ownership drift review: PASS
+	- Concierge remains a bounded consumer/orchestrator and did not become a source-of-record, planning, or coordination authority.
+- Final status: CONDITIONAL PASS
+	- The governed briefing and household status synthesis boundaries have been implemented and statically validated.
+	- Runtime pytest evidence remains blocked by the environment and must be completed in a valid test environment before closure.
+
+## Issue #367 Implementation Evidence (2026-07-20)
+
+- Issue: #367 - P3-R6-E13-06 Productivity diagnostics, provenance, and explainability implementation
+- Scope: unify governed diagnostics visibility across Release 6 boundaries, with provenance lineage, explainability signals, and safe fallback posture, without becoming a diagnostics authority or external-system administration surface
+- Files changed:
+	- custom_components/concierge/diagnostics.py
+	- tests/test_diagnostics.py
+	- docs/governance/phase-3/release-6-implementation-tracker.md
+- Authority sources reviewed:
+	- ADRs: adr-household-productivity-experience-governance.md, adr-provenance-governance.md, adr-coordinator-v2-governance.md
+	- Contracts: provenance-contract.md, knowledge-briefing-status-synthesis-contract.md, calendar-email-experience-contract.md, task-shopping-experience-contract.md, multi-item-capture-interpretation-contract.md, household-coordination-contract.md
+	- Models: provenance-model.md, briefing-composition-model.md, household-coordination-snapshot-model.md, calendar-experience-model.md, email-experience-model.md, task-experience-model.md, shopping-experience-model.md, knowledge-query-experience-model.md, multi-item-capture-result-model.md
+	- Governing Phase 2 artifacts: release-6-productivity-provenance-coordination-build-execution-plan.md, e13-productivity-experiences-governed-implementation-readiness.md, e14-provenance-and-household-coordination-governed-implementation-readiness.md, concierge-v2-end-to-end-governed-implementation-validation.md
+	- Existing implementation reviewed: diagnostics.py, services.py, coordinator.py, models.py, repairs.py, tests/
+- Implementation summary:
+	- Added a consolidated Release 6 diagnostics projection that unifies the existing boundary visibility surfaces without recreating the underlying boundary logic.
+	- Preserved provenance visibility and explainability signals for the source-of-record, consumption, capture/knowledge, briefing, and household-status boundaries.
+	- Kept safe-fallback posture visible and derived from actual boundary state rather than fabricated readiness.
+	- Exposed the aggregate projection in diagnostics alongside the existing per-boundary surfaces for continuity and regression safety.
+- Diagnostics summary:
+	- Diagnostics expose boundary availability, provenance readiness, provenance completeness indicators, and explainability visibility across the Release 6 surfaces.
+	- Diagnostics remain privacy-safe and do not expose provider secrets, contents, or internals.
+	- The unified surface is a visibility projection only and does not create new diagnostic authority.
+- Provenance summary:
+	- Provenance remains lineage-only.
+	- The aggregate diagnostics surface retains source domain, source type, reference availability, and provenance visibility indicators.
+	- No alternate provenance model or attribution system was introduced.
+- Explainability summary:
+	- Explainability remains bounded to source domain, source type, safe fallback, and missing-prerequisite visibility.
+	- No fabricated reasoning or hidden provider internals were introduced.
+	- The full explainability subsystem remains deferred to future work if needed.
+- Repairs summary:
+	- No repairs surface was added.
+	- Existing diagnostics can already identify missing prerequisite boundaries and safe fallback posture, which is sufficient for this release slice.
+- Translation summary:
+	- No new user-visible translation keys were introduced.
+	- Diagnostics continue to use existing governed strings and structures.
+- Testing completed:
+	- Static validation: COMPLETED
+		- `r:/HomesPlatformRepos/concierge/.venv/Scripts/python.exe -m py_compile r:/HomesPlatformRepos/concierge/custom_components/concierge/diagnostics.py r:/HomesPlatformRepos/concierge/tests/test_diagnostics.py` completed successfully.
+	- Runtime pytest validation: BLOCKED
+		- `r:/HomesPlatformRepos/concierge/.venv/Scripts/python.exe -m pytest r:/HomesPlatformRepos/concierge/tests/test_diagnostics.py -k "briefing_composition_boundary_visibility or household_status_synthesis_boundary_visibility or release_6_productivity_diagnostics_visibility"` failed because the Windows Home Assistant pytest plugin imports `homeassistant.runner`, which requires `fcntl` and is unavailable in this environment.
+- Durable evidence:
+	- This tracker entry
+- Conflict review: PASS
+	- No ADR, contract, or model conflicts were introduced.
+- Ownership drift review: PASS
+	- Concierge remains a bounded consumer/orchestrator and did not become a diagnostics authority for external systems.
+- Final status: CONDITIONAL PASS
+	- The governed Release 6 diagnostics/provenance/explainability surface has been unified and statically validated.
+	- Runtime pytest evidence remains blocked by the environment and must be completed in a valid test environment before closure.
+
+## Issue #373 Release 6 Governed Implementation Validation Evidence (2026-07-21)
+
+- Issue: #373 - P3-R6-VAL-01 Release 6 governed implementation validation
+- Validation mode: governed validation gate (docs/evidence-first; no scope expansion)
+- Scope posture:
+	- This section validates completed Release 6 slices (#362, #363, #364, #365, #366, #367, #368, #369, #370, #371, #372, #375, #376, #377, #378, #379, #380, #381, #382, #383).
+	- No new Release 6 implementation slice was introduced for #373.
+
+- Authority sources reviewed:
+	- Canonical ADRs:
+		- homes_that_behave_well/docs/architecture/adr-household-productivity-experience-governance.md
+		- homes_that_behave_well/docs/architecture/adr-provenance-governance.md
+		- homes_that_behave_well/docs/architecture/adr-coordinator-v2-governance.md
+	- Canonical contracts:
+		- homes_that_behave_well/docs/contracts/calendar-email-experience-contract.md
+		- homes_that_behave_well/docs/contracts/task-shopping-experience-contract.md
+		- homes_that_behave_well/docs/contracts/knowledge-briefing-status-synthesis-contract.md
+		- homes_that_behave_well/docs/contracts/multi-item-capture-interpretation-contract.md
+		- homes_that_behave_well/docs/contracts/household-coordination-contract.md
+		- homes_that_behave_well/docs/contracts/provenance-contract.md
+	- Canonical models:
+		- homes_that_behave_well/docs/models/calendar-experience-model.md
+		- homes_that_behave_well/docs/models/email-experience-model.md
+		- homes_that_behave_well/docs/models/task-experience-model.md
+		- homes_that_behave_well/docs/models/shopping-experience-model.md
+		- homes_that_behave_well/docs/models/knowledge-query-experience-model.md
+		- homes_that_behave_well/docs/models/multi-item-capture-result-model.md
+		- homes_that_behave_well/docs/models/briefing-composition-model.md
+		- homes_that_behave_well/docs/models/provenance-model.md
+		- homes_that_behave_well/docs/models/household-coordination-snapshot-model.md
+	- Governing Phase 2 artifacts:
+		- docs/governance/phase-2/release-6-productivity-provenance-coordination-build-execution-plan.md
+		- docs/governance/phase-2/e13-productivity-experiences-governed-implementation-readiness.md
+		- docs/governance/phase-2/e14-provenance-and-household-coordination-governed-implementation-readiness.md
+		- docs/governance/phase-2/concierge-v2-end-to-end-governed-implementation-validation.md
+
+- Completed issue evidence review: PASS
+	- Release 6 implementation evidence sections are present in this tracker for:
+		- #362, #363, #364, #365, #366, #367
+		- #368, #369, #370, #371, #372
+		- #375, #376, #377, #378, #379
+		- #380, #381, #382, #383
+
+- Release 6 scope validation results:
+	- Productivity source-of-record boundaries (#362/#363/#364/#365/#366): PASS
+		- Consumer/orchestrator posture preserved; source-of-record remains external.
+	- Person productivity bindings (#375): PASS
+		- Person-bound source references exposed with safe fallback on missing/partial bindings.
+	- Voice Identity integration chain (#376/#377/#379/#380/#381): PASS
+		- Attribution/confidence/enrollment ownership remains external to Concierge.
+	- Runtime Person Context (#383): PASS
+		- Runtime person context remains the single approved runtime household-person object.
+	- Person-aware orchestration (#382): PASS
+		- Routing remains fail-closed for unknown/ambiguous/unavailable identity states.
+	- Household coordination boundary (#369): PASS
+		- Boundary present, deterministic, consumption-only, provenance visibility preserved.
+	- Household status/open-loop coordination (#370): PASS
+		- `open_loop_supported` and informational-only posture preserved.
+	- Productivity coordination (#371): PASS
+		- Boundary present in summary and execute; non-authority assertions preserved.
+	- Provenance ownership/consumption (#368): PASS
+		- Provenance ownership remains external; no generation/mutation transfer.
+	- Provenance diagnostics/explainability (#372): PASS
+		- Metadata-only diagnostics posture preserved across runtime visibility surfaces.
+
+- Diagnostics validation: PASS
+	- Release 6 diagnostics include expected surfaces for productivity boundaries, household status/coordination, productivity coordination, provenance ownership/consumption, and provenance diagnostics/explainability visibility.
+	- Privacy-safe diagnostics posture preserved (`safe_source_metadata_only: true`, no sensitive provider content exposure).
+
+- Repairs validation: PASS
+	- Repairs remain authority-safe and issue/report focused.
+	- No repair flow creates identities, mutates provenance, or modifies external source-of-record systems.
+
+- Translation and HA standards validation: PASS
+	- User-facing repair/config strings are translation-backed in `custom_components/concierge/translations/en.json`.
+	- Release 6 governance surfaces remain implemented via Home Assistant-native service/diagnostics/repairs/config constructs.
+
+- Static and test validation completed:
+	- Editor/static diagnostics: COMPLETED
+		- `get_errors` returned no diagnostics for Release 6 governance-critical files.
+	- Py-compile validation: ATTEMPTED / ENVIRONMENT OUTPUT CONSTRAINED
+		- Windows terminal session returned continuation prompt output only during this gate pass; no failure traceback was produced.
+	- Runtime pytest validation in this Windows session: ENVIRONMENT-CONSTRAINED
+		- Existing Release 6 sections document Home Assistant pytest plugin constraints on this host (`fcntl`/runner dependency).
+
+- Runtime evidence reviewed: PASS
+	- Manual HA dev runtime evidence reviewed for #369, #370, #371, #372, #378, #381, #382, and #383.
+	- #372 explicit runtime gate evidence includes:
+		- summary global route_scope behavior
+		- summary composite route_scope behavior (`resolved_composite_id` visible)
+		- execute-envelope provenance diagnostics/explainability boundary visibility
+		- fail-closed person-aware routing posture under low-confidence identity
+
+- Ownership boundary confirmation: PASS
+	- No source-of-record ownership drift.
+	- No provenance ownership drift.
+	- No identity/biometric ownership drift.
+	- Concierge remains bounded consumer/orchestrator.
+
+- Conflict review: PASS
+	- No unresolved ADR/contract/model/existing-implementation conflicts found during #373 validation.
+
+- Final Release 6 gate status: PASS
+	- Release 6 governed implementation slices are validated and evidence-linked.
+	- Environment-limited pytest execution remains explicitly documented and does not invalidate collected manual runtime evidence for this gate.

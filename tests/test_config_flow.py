@@ -12,6 +12,7 @@ from custom_components.concierge.config_flow import (
     CONF_AUDIT_ARCHIVE_INCLUDE_REFERENCE_EXCERPTS,
     CONF_AUDIT_ARCHIVE_RETENTION_DAYS,
     CONF_MEDIA_PROVIDER,
+    CONF_VOICE_IDENTITY_LINKED,
 )
 from custom_components.concierge.const import DOMAIN
 
@@ -27,6 +28,7 @@ def _current_config_flow_input() -> dict:
         "tts_provider": "none",
         CONF_MEDIA_PROVIDER: "none",
         CONF_ASSET_INTELLIGENCE_PROVIDER: "none",
+        CONF_VOICE_IDENTITY_LINKED: True,
         CONF_AUDIT_ARCHIVE_DESTINATION_URI: "",
         CONF_AUDIT_ARCHIVE_ENABLED: False,
         CONF_AUDIT_ARCHIVE_INCLUDE_REFERENCE_EXCERPTS: False,
@@ -44,6 +46,7 @@ async def test_user_flow(hass) -> None:
         _current_config_flow_input(),
     )
     assert result2["type"] == data_entry_flow.FlowResultType.CREATE_ENTRY
+    assert result2["data"][CONF_VOICE_IDENTITY_LINKED] is True
 
 
 async def test_single_instance_abort(hass) -> None:

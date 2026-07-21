@@ -85,6 +85,14 @@
     "voice_enrollment_capture_provider_unsupported": {
       "title": "Voice enrollment provider is unsupported",
       "description": "Concierge detected an unsupported voice enrollment provider configuration. Last occurrence: {last_occurrence}."
+    },
+    "person_context_unresolved": {
+      "title": "Person context is unresolved",
+      "description": "Concierge could not resolve a runtime person context and applied fail-closed person-aware routing. Active person state: {active_person_state}. Reason: {reason_code}. Last occurrence: {last_occurrence}."
+    },
+    "person_context_partial": {
+      "title": "Person context is partial",
+      "description": "Concierge resolved a person identity but required productivity bindings were incomplete or unavailable, so fail-closed person-aware routing remains disabled. Person: {resolved_person_id}. Active person state: {active_person_state}. Reason: {reason_code}. Last occurrence: {last_occurrence}."
     }
   }
 }

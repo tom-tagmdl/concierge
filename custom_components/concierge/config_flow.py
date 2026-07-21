@@ -30,6 +30,7 @@ from .archive_runtime import (
 from .const import (
     DEFAULT_NAME,
     DOMAIN,
+    CONF_VOICE_IDENTITY_LINKED,
 )
 
 CONF_AI_ENABLED = "ai_enabled"
@@ -219,6 +220,7 @@ def _build_global_config_schema(
         asset_intelligence_options,
         PROVIDER_ASSET_INTELLIGENCE,
     )
+    voice_identity_linked_default = bool(defaults.get(CONF_VOICE_IDENTITY_LINKED, False))
     archive_destination_default = _resolve_default_from_options(
         normalize_archive_destination(
             defaults.get(
@@ -262,6 +264,7 @@ def _build_global_config_schema(
             CONF_ASSET_INTELLIGENCE_PROVIDER,
             default=asset_intelligence_default,
         ): _select(asset_intelligence_options),
+        vol.Required(CONF_VOICE_IDENTITY_LINKED, default=voice_identity_linked_default): BooleanSelector(),
         vol.Required(
             CONF_AUDIT_ARCHIVE_DESTINATION_URI,
             default=archive_destination_default,
@@ -328,6 +331,7 @@ class ConciergeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 user_input.get(CONF_AUDIT_ARCHIVE_DESTINATION_URI, "")
             )
             user_input[CONF_AUDIT_ARCHIVE_DESTINATION_URI] = destination
+            user_input[CONF_VOICE_IDENTITY_LINKED] = bool(user_input.get(CONF_VOICE_IDENTITY_LINKED, False))
             user_input[CONF_AUDIT_ARCHIVE_RETENTION_DAYS] = max(
                 1,
                 int(user_input.get(CONF_AUDIT_ARCHIVE_RETENTION_DAYS, DEFAULT_AUDIT_ARCHIVE_RETENTION_DAYS)),
@@ -377,6 +381,7 @@ class ConciergeOptionsFlow(config_entries.OptionsFlow):
                 user_input.get(CONF_AUDIT_ARCHIVE_DESTINATION_URI, "")
             )
             user_input[CONF_AUDIT_ARCHIVE_DESTINATION_URI] = destination
+            user_input[CONF_VOICE_IDENTITY_LINKED] = bool(user_input.get(CONF_VOICE_IDENTITY_LINKED, False))
             user_input[CONF_AUDIT_ARCHIVE_RETENTION_DAYS] = max(
                 1,
                 int(user_input.get(CONF_AUDIT_ARCHIVE_RETENTION_DAYS, DEFAULT_AUDIT_ARCHIVE_RETENTION_DAYS)),
@@ -429,6 +434,10 @@ class ConciergeOptionsFlow(config_entries.OptionsFlow):
                     CONF_ASSET_INTELLIGENCE_PROVIDER,
                     DEFAULT_ASSET_INTELLIGENCE_PROVIDER,
                 ),
+            ),
+            CONF_VOICE_IDENTITY_LINKED: self._config_entry.options.get(
+                CONF_VOICE_IDENTITY_LINKED,
+                self._config_entry.data.get(CONF_VOICE_IDENTITY_LINKED, False),
             ),
             CONF_AUDIT_ARCHIVE_DESTINATION_URI: self._config_entry.options.get(
                 CONF_AUDIT_ARCHIVE_DESTINATION_URI,

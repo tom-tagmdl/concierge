@@ -20,6 +20,7 @@ from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
 
 from .archive_runtime import archive_options_from_entry, resolve_voice_enrollment_root
 from .const import (
+    CONF_VOICE_IDENTITY_LINKED,
     SERVICE_BUILD_VOICE_PROFILE,
     SERVICE_COMPLETE_VOICE_ENROLLMENT,
     SERVICE_CAPTURE_VOICE_ENROLLMENT_SAMPLE,
@@ -72,17 +73,96 @@ from .models import (
     PersonProfile,
     SignalState,
 )
+from .repairs import (
+    async_clear_person_context_issue,
+    async_create_or_update_person_context_issue,
+)
 from .storage import ConciergeStorage
 from .voice_identity_bridge import async_get_voice_identity_enrollment_status
 
 _PROVIDER_NONE = "none"
 _PROVIDER_ASSET_INTELLIGENCE = "asset_intelligence"
 _DEFAULT_TARGET_SAMPLE_COUNT = 3
+_VOICE_IDENTITY_DOMAIN = "voice_identity"
+_VOICE_IDENTITY_SERVICE_ATTRIBUTE_SPEAKER = "attribute_speaker"
+_VOICE_IDENTITY_SERVICE_GET_IDENTITY_CONTEXT = "get_identity_context"
+_VOICE_IDENTITY_NO_ACTIVE_ATTRIBUTION_STATES = {"unavailable", "unknown", "low_confidence"}
+
+_PRODUCTIVITY_SOURCE_BINDING_FIELDS = ["email", "calendar", "task", "shopping"]
+_PRODUCTIVITY_SOURCE_OF_RECORD_DOMAIN_AUTHORITIES = {
+    "calendar": {
+        "source_of_record": "configured_calendar_provider",
+        "configuration_reference_supported": True,
+        "derived_context_only": False,
+    },
+    "email": {
+        "source_of_record": "configured_email_provider",
+        "configuration_reference_supported": True,
+        "derived_context_only": False,
+    },
+    "task": {
+        "source_of_record": "configured_task_provider",
+        "configuration_reference_supported": True,
+        "derived_context_only": True,
+    },
+    "shopping": {
+        "source_of_record": "configured_shopping_provider",
+        "configuration_reference_supported": True,
+        "derived_context_only": False,
+    },
+    "capture": {
+        "source_of_record": "configured_capture_provider",
+        "configuration_reference_supported": True,
+        "derived_context_only": False,
+    },
+    "knowledge": {
+        "source_of_record": "configured_knowledge_provider",
+        "configuration_reference_supported": True,
+        "derived_context_only": False,
+    },
+    "briefing": {
+        "source_of_record": "composed_briefing_projection",
+        "configuration_reference_supported": False,
+        "derived_context_only": True,
+    },
+    "household_status": {
+        "source_of_record": "synthesized_household_status_projection",
+        "configuration_reference_supported": False,
+        "derived_context_only": True,
+    },
+}
 
 TTS_PROVIDER_ENTITY_IDS = {
     "openai_conversation": "tts.openai_tts",
     "google_translate": "tts.google_translate_en_com",
 }
+
+
+def _normalize_source_binding_rows(value: Any, legacy_ref: Any = None) -> list[dict[str, str]]:
+    """Normalize source-binding rows from service payloads with legacy fallback."""
+    bindings: list[dict[str, str]] = []
+    if isinstance(value, list):
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            entity_id = str(item.get("entity_id", "") or item.get("entityId", "") or "").strip()
+            if not entity_id:
+                continue
+            label = str(item.get("label", "") or item.get("name", "") or "").strip()
+            bindings.append(
+                {
+                    "label": label,
+                    "entity_id": entity_id,
+                }
+            )
+
+    legacy_value = str(legacy_ref or "").strip()
+    if legacy_value and not bindings:
+        bindings.append({"label": "", "entity_id": legacy_value})
+
+    return bindings
+
+
 SERVICE_EXECUTE_SCHEMA = vol.Schema(
     {
         vol.Required("target"): str,
@@ -231,6 +311,16 @@ SERVICE_PREVIEW_TTS_VOICE_SCHEMA = vol.Schema(
         ): str,
     }
 )
+SERVICE_PUSH_PERSON_MESSAGE_SCHEMA = vol.Schema(
+    {
+        vol.Required("person_id"): str,
+        vol.Required("message"): str,
+        vol.Optional("title", default="Concierge"): str,
+        vol.Optional("target_id"): str,
+        vol.Optional("data", default={}): dict,
+    }
+)
+
 SERVICE_UPDATE_IDENTITY_PROFILE_SCHEMA = vol.Schema(
     {
         vol.Required("profile_id"): str,
@@ -244,6 +334,7 @@ SERVICE_UPDATE_IDENTITY_PROFILE_SCHEMA = vol.Schema(
         vol.Optional("set_as_default", default=False): bool,
     }
 )
+
 SERVICE_UPDATE_PERSON_PROFILE_SCHEMA = vol.Schema(
     {
         vol.Required("person_id"): str,
@@ -261,10 +352,19 @@ SERVICE_UPDATE_PERSON_PROFILE_SCHEMA = vol.Schema(
         vol.Optional("minor_allow_general_qna", default=False): bool,
         vol.Optional("minor_allowed_intent_classes", default=[]): vol.All(list, [str]),
         vol.Optional("minor_content_filter_level", default="strict"): str,
+        vol.Optional("email_source_ref", default=""): str,
+        vol.Optional("calendar_source_ref", default=""): str,
+        vol.Optional("task_source_ref", default=""): str,
+        vol.Optional("shopping_source_ref", default=""): str,
+        vol.Optional("email_source_bindings", default=[]): list,
+        vol.Optional("calendar_source_bindings", default=[]): list,
+        vol.Optional("task_source_bindings", default=[]): list,
+        vol.Optional("shopping_source_bindings", default=[]): list,
         vol.Optional("notes", default=""): str,
         vol.Optional("set_as_default", default=False): bool,
     }
 )
+
 SERVICE_UPDATE_VOICE_PROFILE_SCHEMA = vol.Schema(
     {
         vol.Required("voice_profile_id"): str,
@@ -274,8 +374,8 @@ SERVICE_UPDATE_VOICE_PROFILE_SCHEMA = vol.Schema(
         vol.Optional("enrollment_source", default=""): str,
         vol.Optional("speaker_embedding_id", default=""): str,
         vol.Optional("sample_count", default=0): int,
-        vol.Optional("sample_items", default=[]): vol.All(list, [dict]),
-        vol.Optional("attribution_confidence"): vol.Coerce(float),
+        vol.Optional("sample_items", default=[]): list,
+        vol.Optional("attribution_confidence"): float,
         vol.Optional("enrollment_started_at", default=""): str,
         vol.Optional("last_sample_at", default=""): str,
         vol.Optional("last_built_at", default=""): str,
@@ -284,128 +384,116 @@ SERVICE_UPDATE_VOICE_PROFILE_SCHEMA = vol.Schema(
         vol.Optional("set_as_default", default=False): bool,
     }
 )
+
 SERVICE_START_VOICE_ENROLLMENT_SCHEMA = vol.Schema(
     {
         vol.Required("person_id"): str,
-        vol.Optional("voice_profile_id"): str,
-        vol.Optional("voice_name"): str,
-        vol.Optional("capture_provider", default="auto"): str,
+        vol.Required("voice_profile_id"): str,
         vol.Optional("consent_acknowledged", default=False): bool,
-        vol.Optional("local_only", default=True): bool,
+        vol.Optional("capture_provider", default="browser"): str,
+        vol.Optional("speech_text", default=""): str,
+        vol.Optional("prompt_text", default=""): str,
     }
 )
+
 SERVICE_CAPTURE_VOICE_ENROLLMENT_SAMPLE_SCHEMA = vol.Schema(
     {
         vol.Required("voice_profile_id"): str,
         vol.Required("speech_text"): str,
         vol.Optional("capture_provider", default="browser"): str,
-        vol.Optional("prompt_text"): str,
-        vol.Optional("source", default="guided_phrase"): str,
-        vol.Optional("quality_score"): vol.Coerce(float),
-        vol.Optional("recording_path"): str,
-        vol.Optional("recording_mime_type"): str,
-        vol.Optional("recording_size_bytes"): int,
-        vol.Optional("recording_duration_ms"): int,
-        vol.Optional("phrase_index"): int,
-        vol.Optional("prompt_id"): str,
-        vol.Optional("prompt_order"): int,
-        vol.Optional("prompt_category"): str,
-        vol.Optional("prompt_length_bucket"): str,
-        vol.Optional("capture_distance"): str,
-        vol.Optional("capture_noise"): str,
-        vol.Optional("quality_pass"): bool,
+        vol.Optional("prompt_text", default=""): str,
         vol.Optional("person_id"): str,
-        vol.Optional("satellite_entity_id"): str,
-        vol.Optional("device_id"): str,
-        vol.Optional("preannounce", default=False): bool,
-        vol.Optional("timeout_seconds", default=8.0): vol.All(
-            vol.Coerce(float),
-            vol.Range(min=0, min_included=False, max=60),
-        ),
     }
 )
+
 SERVICE_RUN_SATELLITE_CAPTURE_POC_SCHEMA = vol.Schema(
     {
-        vol.Required("voice_profile_id"): str,
         vol.Optional("person_id"): str,
-        vol.Optional("satellite_entity_id"): str,
-        vol.Optional("device_id"): str,
-        vol.Optional("timeout_seconds", default=8.0): vol.All(
-            vol.Coerce(float),
-            vol.Range(min=0, min_included=False, max=60),
-        ),
+        vol.Optional("voice_profile_id"): str,
+        vol.Optional("capture_provider", default="satellite"): str,
+        vol.Optional("prompt_text", default=""): str,
     }
 )
+
 SERVICE_REMOVE_VOICE_ENROLLMENT_SAMPLE_SCHEMA = vol.Schema(
     {
         vol.Required("voice_profile_id"): str,
         vol.Required("sample_id"): str,
+        vol.Optional("person_id"): str,
     }
 )
+
 SERVICE_BUILD_VOICE_PROFILE_SCHEMA = vol.Schema(
     {
         vol.Required("voice_profile_id"): str,
         vol.Optional("person_id"): str,
-        vol.Optional("min_samples", default=8): vol.All(int, vol.Range(min=1, max=50)),
+        vol.Optional("min_samples", default=3): int,
     }
 )
+
 SERVICE_COMPLETE_VOICE_ENROLLMENT_SCHEMA = vol.Schema(
     {
         vol.Required("voice_profile_id"): str,
         vol.Optional("person_id"): str,
-        vol.Optional("min_samples", default=8): vol.All(int, vol.Range(min=1, max=50)),
-        vol.Optional("min_total_duration_ms", default=30000): vol.All(int, vol.Range(min=1000, max=300000)),
     }
 )
+
 SERVICE_GET_VOICE_ENROLLMENT_COMPLETION_READINESS_SCHEMA = vol.Schema(
     {
-        vol.Required("voice_profile_id"): str,
-        vol.Optional("min_samples", default=8): vol.All(int, vol.Range(min=1, max=50)),
-        vol.Optional("min_total_duration_ms", default=30000): vol.All(int, vol.Range(min=1000, max=300000)),
+        vol.Optional("voice_profile_id"): str,
+        vol.Optional("person_id"): str,
     }
 )
+
 SERVICE_CANCEL_VOICE_ENROLLMENT_SCHEMA = vol.Schema(
     {
-        vol.Optional("person_id"): str,
         vol.Optional("voice_profile_id"): str,
+        vol.Optional("person_id"): str,
     }
 )
+
 SERVICE_RECOVER_VOICE_ENROLLMENT_SCHEMA = vol.Schema(
     {
-        vol.Optional("person_id"): str,
         vol.Optional("voice_profile_id"): str,
+        vol.Optional("person_id"): str,
     }
 )
+
 SERVICE_RESUME_VOICE_ENROLLMENT_SCHEMA = vol.Schema(
     {
-        vol.Optional("person_id"): str,
         vol.Optional("voice_profile_id"): str,
+        vol.Optional("person_id"): str,
     }
 )
+
 SERVICE_ABANDON_VOICE_ENROLLMENT_SCHEMA = vol.Schema(
     {
-        vol.Optional("person_id"): str,
         vol.Optional("voice_profile_id"): str,
+        vol.Optional("person_id"): str,
     }
 )
+
 SERVICE_RESET_VOICE_PROFILE_SCHEMA = vol.Schema(
     {
         vol.Required("voice_profile_id"): str,
         vol.Optional("preserve_consent", default=True): bool,
     }
 )
+
 SERVICE_DELETE_VOICE_PROFILE_SCHEMA = vol.Schema(
     {
         vol.Required("voice_profile_id"): str,
         vol.Optional("unlink_from_people", default=True): bool,
     }
 )
+
 SERVICE_SYNC_ROOMS_SCHEMA = vol.Schema(
     {
         vol.Optional("add_missing", default=True): bool,
         vol.Optional("remove_missing", default=True): bool,
     }
 )
+
 SERVICE_REFRESH_ENTITY_STRUCTURE_SCHEMA = vol.Schema(
     {
         vol.Optional("sync_rooms", default=True): bool,
@@ -413,6 +501,7 @@ SERVICE_REFRESH_ENTITY_STRUCTURE_SCHEMA = vol.Schema(
         vol.Optional("remove_missing", default=True): bool,
     }
 )
+
 SERVICE_RECORD_ACTIVITY_EVENT_SCHEMA = vol.Schema(
     {
         vol.Required("activity_id"): str,
@@ -421,23 +510,25 @@ SERVICE_RECORD_ACTIVITY_EVENT_SCHEMA = vol.Schema(
         vol.Required("channel"): str,
         vol.Required("actor_class"): str,
         vol.Required("intent_class"): str,
-        vol.Optional("request_summary", default=""): str,
+        vol.Required("request_summary"): str,
         vol.Optional("resolved_person_id"): str,
         vol.Optional("resolved_area_id"): str,
-        vol.Optional("confidence"): vol.Coerce(float),
-        vol.Optional("external_refs", default=[]): vol.All(list, [dict]),
+        vol.Optional("confidence"): float,
+        vol.Optional("external_refs", default=[]): list,
     }
 )
+
 SERVICE_CLOSE_ACTIVITY_OUTCOME_SCHEMA = vol.Schema(
     {
         vol.Required("activity_id"): str,
         vol.Required("ended_at"): str,
         vol.Required("outcome"): str,
         vol.Optional("outcome_reason", default=""): str,
-        vol.Optional("actions_taken", default=[]): vol.All(list, [str]),
-        vol.Optional("policy_gates", default=[]): vol.All(list, [str]),
+        vol.Optional("actions_taken", default=[]): list,
+        vol.Optional("policy_gates", default=[]): list,
     }
 )
+
 SERVICE_GET_ACTIVITY_TIMELINE_SCHEMA = vol.Schema(
     {
         vol.Optional("start"): str,
@@ -448,28 +539,20 @@ SERVICE_GET_ACTIVITY_TIMELINE_SCHEMA = vol.Schema(
         vol.Optional("channel"): str,
     }
 )
+
 SERVICE_EXPORT_ACTIVITY_ARCHIVE_SCHEMA = vol.Schema(
     {
+        vol.Optional("destination"): str,
         vol.Optional("start"): str,
         vol.Optional("end"): str,
-        vol.Optional("destination"): str,
-        vol.Optional("include_reference_excerpts"): bool,
+        vol.Optional("include_reference_excerpts", default=False): bool,
     }
 )
+
 SERVICE_RESOLVE_MOBILE_CONTEXT_SCHEMA = vol.Schema(
     {
-        vol.Optional("mobile_target_id"): str,
         vol.Optional("person_id"): str,
-        vol.Optional("request_text", default=""): str,
-    }
-)
-SERVICE_PUSH_PERSON_MESSAGE_SCHEMA = vol.Schema(
-    {
-        vol.Required("person_id"): str,
-        vol.Required("message"): str,
-        vol.Optional("title", default="Concierge"): str,
-        vol.Optional("target_id"): str,
-        vol.Optional("data", default={}): dict,
+        vol.Optional("mobile_target_id"): str,
     }
 )
 
@@ -2181,6 +2264,253 @@ def _select_signal_entries(state) -> list[dict[str, Any]]:
     return selected
 
 
+def _context_requires_voice_identity_runtime_invocation(raw_context: Any) -> bool:
+    """Return whether runtime Voice Identity invocation should be attempted."""
+    if not isinstance(raw_context, dict):
+        return False
+
+    if isinstance(raw_context.get("voice_identity_identity_context"), dict):
+        return False
+
+    if isinstance(raw_context.get("identity_context"), dict):
+        return False
+
+    if bool(raw_context.get("invoke_voice_identity_runtime", False)):
+        return True
+
+    audio_ref = str(raw_context.get("audio_ref", "") or "").strip()
+    if audio_ref:
+        return True
+
+    candidate_scope = raw_context.get("candidate_scope")
+    if isinstance(candidate_scope, list) and any(str(item).strip() for item in candidate_scope):
+        return True
+
+    model_preference = str(raw_context.get("model_preference", "") or "").strip()
+    if model_preference:
+        return True
+
+    return False
+
+
+def _voice_identity_request_payload(raw_context: Any) -> dict[str, Any]:
+    """Build approved Voice Identity runtime service request payload."""
+    if not isinstance(raw_context, dict):
+        return {}
+
+    payload: dict[str, Any] = {}
+
+    audio_ref = str(raw_context.get("audio_ref", "") or "").strip()
+    if audio_ref:
+        payload["audio_ref"] = audio_ref
+
+    model_preference = str(raw_context.get("model_preference", "") or "").strip()
+    if model_preference:
+        payload["model_preference"] = model_preference
+
+    candidate_scope_raw = raw_context.get("candidate_scope")
+    if isinstance(candidate_scope_raw, list):
+        candidate_scope = [str(item).strip() for item in candidate_scope_raw if str(item).strip()]
+        if candidate_scope:
+            payload["candidate_scope"] = candidate_scope
+
+    return payload
+
+
+def _unavailable_identity_context(reason_code: str) -> dict[str, Any]:
+    """Return fail-closed identity-context payload when runtime services are unavailable."""
+    return {
+        "state": "unavailable",
+        "person_id": None,
+        "voice_profile_id": None,
+        "confidence": None,
+        "confidence_band": None,
+        "reason_code": str(reason_code or "attribution_unavailable").strip().lower() or "attribution_unavailable",
+        "source": "voice_identity",
+    }
+
+
+def _identity_context_from_attribution(attribution: dict[str, Any]) -> dict[str, Any]:
+    """Project attribution-service output into bounded identity-context shape."""
+    status = str(attribution.get("status", "") or "").strip().lower()
+    reason_code = str(attribution.get("reason_code", "") or "").strip().lower() or "unknown"
+    confidence_band = str(attribution.get("confidence_band", "") or "").strip().lower() or None
+    confidence_value = attribution.get("confidence")
+
+    person_id = str(attribution.get("attributed_person_id", "") or "").strip() or None
+    voice_profile_id = str(attribution.get("attributed_profile_id", "") or "").strip() or None
+
+    state = "unavailable"
+    if status == "ready":
+        state = "known" if (person_id or voice_profile_id) else "unknown"
+    elif status == "abstained":
+        if reason_code in {"low_confidence", "ambiguous_match"} or confidence_band in {"low", "ambiguous"}:
+            state = "low_confidence"
+        else:
+            state = "unknown"
+
+    return {
+        "state": state,
+        "person_id": person_id,
+        "voice_profile_id": voice_profile_id,
+        "confidence": confidence_value,
+        "confidence_band": confidence_band,
+        "reason_code": reason_code,
+        "source": "voice_identity",
+    }
+
+
+def _diagnostics_context_from_attribution(attribution: dict[str, Any]) -> dict[str, Any]:
+    """Project Voice Identity attribution diagnostics into bounded diagnostics shape."""
+    diagnostic_summary = attribution.get("diagnostic_summary")
+    if not isinstance(diagnostic_summary, dict):
+        diagnostic_summary = {}
+
+    return {
+        "diagnostic_available": bool(diagnostic_summary.get("diagnostic_available", False)),
+        "diagnostic_reason_code": str(
+            diagnostic_summary.get("diagnostic_reason_code")
+            or attribution.get("reason_code")
+            or "diagnostics_unavailable"
+        ).strip().lower() or "diagnostics_unavailable",
+        "health_status": str(diagnostic_summary.get("health_status", "") or "").strip().lower() or "unavailable",
+        "attribution_readiness": str(
+            diagnostic_summary.get("attribution_readiness", "") or ""
+        ).strip().lower() or None,
+        "compatibility_readiness": str(
+            diagnostic_summary.get("compatibility_readiness", "") or ""
+        ).strip().lower() or None,
+        "repair_available": bool(diagnostic_summary.get("repair_available", False)),
+        "repair_hint_code": str(attribution.get("repair_hint_code", "") or "").strip().lower() or None,
+        "suggested_next_action_code": str(
+            attribution.get("suggested_next_action_code", "") or ""
+        ).strip().lower() or None,
+        "source": "voice_identity",
+    }
+
+
+def _explainability_context_from_attribution(
+    attribution: dict[str, Any],
+    identity_context: dict[str, Any],
+) -> dict[str, Any]:
+    """Project deterministic explainability for consumed Voice Identity outcomes."""
+    state = str(identity_context.get("state", "") or "").strip().lower()
+    no_active_attribution = state in _VOICE_IDENTITY_NO_ACTIVE_ATTRIBUTION_STATES or not (
+        identity_context.get("person_id") or identity_context.get("voice_profile_id")
+    )
+
+    return {
+        "consumed_outcome": str(attribution.get("status", "") or "attribution_unavailable").strip().lower() or "attribution_unavailable",
+        "authority_source": "voice_identity",
+        "attribution_source": "voice_identity.attribute_speaker",
+        "confidence_source": "voice_identity.attribute_speaker",
+        "reason_code": str(identity_context.get("reason_code", "") or "unknown").strip().lower() or "unknown",
+        "unavailable_state": "no_active_attribution" if no_active_attribution else None,
+        "source": "voice_identity",
+    }
+
+
+async def _async_consume_voice_identity_runtime_context(
+    hass: HomeAssistant,
+    *,
+    raw_context: Any,
+    voice_identity_linked: bool,
+) -> dict[str, Any]:
+    """Actively consume Voice Identity runtime attribution and identity-context services."""
+    context: dict[str, Any] = dict(raw_context) if isinstance(raw_context, dict) else {}
+
+    if not voice_identity_linked:
+        identity_context = _unavailable_identity_context("voice_identity_linkage_disabled")
+        context["voice_identity_identity_context"] = identity_context
+        context["identity_context"] = identity_context
+        context["voice_identity_diagnostics_context"] = {
+            "diagnostic_available": False,
+            "diagnostic_reason_code": "voice_identity_linkage_disabled",
+            "health_status": "unavailable",
+            "attribution_readiness": "unavailable",
+            "compatibility_readiness": "unavailable",
+            "repair_available": False,
+            "source": "voice_identity",
+        }
+        context["voice_identity_explainability_context"] = {
+            "consumed_outcome": "attribution_unavailable",
+            "authority_source": "voice_identity",
+            "attribution_source": "voice_identity.attribute_speaker",
+            "confidence_source": "voice_identity.attribute_speaker",
+            "unavailable_state": "no_active_attribution",
+            "reason_code": "voice_identity_linkage_disabled",
+            "source": "voice_identity",
+        }
+        return context
+
+    if not isinstance(hass.data.get(_VOICE_IDENTITY_DOMAIN), dict):
+        identity_context = _unavailable_identity_context("voice_identity_not_loaded")
+        context["voice_identity_identity_context"] = identity_context
+        context["identity_context"] = identity_context
+        return context
+
+    if not hass.services.has_service(_VOICE_IDENTITY_DOMAIN, _VOICE_IDENTITY_SERVICE_ATTRIBUTE_SPEAKER):
+        identity_context = _unavailable_identity_context("attribution_service_unavailable")
+        context["voice_identity_identity_context"] = identity_context
+        context["identity_context"] = identity_context
+        return context
+
+    if not hass.services.has_service(_VOICE_IDENTITY_DOMAIN, _VOICE_IDENTITY_SERVICE_GET_IDENTITY_CONTEXT):
+        identity_context = _unavailable_identity_context("identity_context_service_unavailable")
+        context["voice_identity_identity_context"] = identity_context
+        context["identity_context"] = identity_context
+        return context
+
+    request_data = _voice_identity_request_payload(raw_context)
+
+    attribution_response: dict[str, Any] = {}
+    try:
+        response = await hass.services.async_call(
+            _VOICE_IDENTITY_DOMAIN,
+            _VOICE_IDENTITY_SERVICE_ATTRIBUTE_SPEAKER,
+            request_data,
+            blocking=True,
+            return_response=True,
+        )
+        if isinstance(response, dict):
+            attribution_response = dict(response.get("attribution", {}))
+    except Exception:
+        attribution_response = {}
+
+    identity_context_payload: dict[str, Any] | None = None
+    try:
+        response = await hass.services.async_call(
+            _VOICE_IDENTITY_DOMAIN,
+            _VOICE_IDENTITY_SERVICE_GET_IDENTITY_CONTEXT,
+            request_data,
+            blocking=True,
+            return_response=True,
+        )
+        if isinstance(response, dict) and isinstance(response.get("identity_context"), dict):
+            identity_context_payload = dict(response["identity_context"])
+    except Exception:
+        identity_context_payload = None
+
+    if identity_context_payload is None:
+        if attribution_response:
+            identity_context_payload = _identity_context_from_attribution(attribution_response)
+        else:
+            identity_context_payload = _unavailable_identity_context("attribution_unavailable")
+
+    identity_context_payload["source"] = "voice_identity"
+    context["voice_identity_identity_context"] = identity_context_payload
+    context["identity_context"] = identity_context_payload
+
+    if attribution_response:
+        context["voice_identity_diagnostics_context"] = _diagnostics_context_from_attribution(attribution_response)
+        context["voice_identity_explainability_context"] = _explainability_context_from_attribution(
+            attribution_response,
+            identity_context_payload,
+        )
+
+    return context
+
+
 def _extract_voice_identity_identity_context(raw_context: Any) -> dict[str, Any] | None:
     """Return a normalized Voice Identity identity-context payload when present."""
     if not isinstance(raw_context, dict):
@@ -2508,9 +2838,9 @@ def _build_voice_identity_attribution_confidence_consumption(
 
     attribution_available = bool(
         identity_context
+        and str(identity_context.get("state", "") or "").strip().lower() not in _VOICE_IDENTITY_NO_ACTIVE_ATTRIBUTION_STATES
         and (
-            identity_context.get("state") is not None
-            or identity_context.get("person_id") is not None
+            identity_context.get("person_id") is not None
             or identity_context.get("voice_profile_id") is not None
         )
     )
@@ -3000,6 +3330,685 @@ def _build_voice_identity_attribution_confidence_consumption(
     }
 
 
+def _build_productivity_source_of_record_boundary(
+    *,
+    state=None,
+    hass: HomeAssistant | None = None,
+    configured_source_references: dict[str, bool] | None = None,
+    active_person_resolution: dict[str, Any] | None = None,
+    runtime_person_context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return governed Release 6 source-of-record boundary metadata."""
+    person_source_bindings = _build_person_productivity_source_bindings(
+        state,
+        hass=hass,
+    ) if state is not None else {
+        "required_domains": list(_PRODUCTIVITY_SOURCE_BINDING_FIELDS),
+        "person_count": 0,
+        "configured_reference_counts": {
+            domain: 0 for domain in _PRODUCTIVITY_SOURCE_BINDING_FIELDS
+        },
+        "configured_reference_present": {
+            domain: False for domain in _PRODUCTIVITY_SOURCE_BINDING_FIELDS
+        },
+        "safe_fallback_person_count": 0,
+        "person_bindings": [],
+    }
+
+    configured_source_references = configured_source_references or dict(
+        person_source_bindings.get("configured_reference_present", {})
+    )
+    domain_boundaries: dict[str, dict[str, Any]] = {}
+
+    for domain, authority in _PRODUCTIVITY_SOURCE_OF_RECORD_DOMAIN_AUTHORITIES.items():
+        configured_reference_present = bool(configured_source_references.get(domain, False))
+        domain_boundaries[domain] = {
+            "source_of_record": authority["source_of_record"],
+            "source_of_record_external": True,
+            "configuration_reference_supported": bool(
+                authority["configuration_reference_supported"]
+            ),
+            "configured_reference_present": configured_reference_present,
+            "consumed_projection_supported": True,
+            "generated_explanation_supported": True,
+            "coordination_context_supported": True,
+            "derived_context_only": bool(authority["derived_context_only"]),
+            "concierge_canonical_state_owned": False,
+            "source_lineage_required": True,
+            "provenance_reference_required": True,
+            "sensitive_content_storage_permitted": False,
+        }
+
+    configured_reference_count = sum(
+        1 for boundary in domain_boundaries.values() if boundary["configured_reference_present"]
+    )
+    person_aware_routing = _build_person_aware_productivity_routing(
+        state=state,
+        hass=hass,
+        active_person_resolution=active_person_resolution,
+        runtime_person_context=runtime_person_context,
+    )
+
+    return {
+        "productivity_source_of_record_boundary_version": 1,
+        "applicable": True,
+        "boundary_path": "governed_productivity_source_of_record_boundary",
+        "deterministic_boundary": True,
+        "boundary_status": "active",
+        "concierge_role": "bounded_consumer_orchestrator",
+        "representation_kinds": [
+            "configuration_reference",
+            "consumed_projection",
+            "generated_explanation",
+            "coordination_context",
+        ],
+        "configured_source_reference_count": configured_reference_count,
+        "person_productivity_source_bindings": person_source_bindings,
+        "person_aware_productivity_routing": person_aware_routing,
+        "domain_boundaries": domain_boundaries,
+        "provenance_requirements": {
+            "provenance_authority_external": True,
+            "source_lineage_required": True,
+            "provenance_reference_required": True,
+            "provenance_duplication_permitted": False,
+            "explanation_source_required": True,
+        },
+        "diagnostics_visibility": {
+            "boundary_verification_supported": True,
+            "safe_source_metadata_only": True,
+            "sensitive_source_content_exposed": False,
+        },
+        "non_authority_assertions": {
+            "creates_source_of_record": False,
+            "stores_duplicate_canonical_records": False,
+            "claims_calendar_authority": False,
+            "claims_email_authority": False,
+            "claims_task_authority": False,
+            "claims_shopping_authority": False,
+            "claims_capture_authority": False,
+            "claims_knowledge_authority": False,
+            "claims_briefing_authority": False,
+            "claims_household_status_authority": False,
+            "redefines_provenance_authority": False,
+        },
+        "deferred_release_6_owners": {
+            "person_productivity_source_bindings": "#375",
+            "calendar_and_email_consumption": "#363",
+            "task_and_shopping_consumption": "#364",
+            "capture_and_knowledge_consumption": "#365",
+            "briefing_and_household_status_synthesis": "#366",
+            "productivity_diagnostics_provenance_explainability": "#367",
+            "household_coordination": "#368-#372",
+            "release_6_validation": "#373",
+        },
+    }
+
+
+def _build_person_productivity_source_bindings(
+    state,
+    *,
+    hass: HomeAssistant | None = None,
+) -> dict[str, Any]:
+    """Build person-level productivity source reference posture with safe fallback metadata."""
+    required_domains = list(_PRODUCTIVITY_SOURCE_BINDING_FIELDS)
+    configured_reference_counts = {domain: 0 for domain in required_domains}
+    person_bindings: list[dict[str, Any]] = []
+
+    profiles = list(getattr(state, "person_profiles", {}).values())
+    for profile in profiles:
+        person_id = str(getattr(profile, "person_id", "") or "")
+        source_refs = {
+            "email": str(getattr(profile, "email_source_ref", "") or "").strip(),
+            "calendar": str(getattr(profile, "calendar_source_ref", "") or "").strip(),
+            "task": str(getattr(profile, "task_source_ref", "") or "").strip(),
+            "shopping": str(getattr(profile, "shopping_source_ref", "") or "").strip(),
+        }
+
+        sources: dict[str, dict[str, Any]] = {}
+        configured_domains: list[str] = []
+        unavailable_or_removed_domains: list[str] = []
+
+        for domain in required_domains:
+            source_ref = source_refs[domain]
+            if not source_ref:
+                binding_status = "missing"
+            elif domain in {"email", "calendar"}:
+                entity_exists = bool(hass and hass.states.get(source_ref) is not None)
+                binding_status = "configured" if entity_exists else "unavailable_or_removed"
+            else:
+                # Shopping/task references are provider IDs, not HA entity_ids.
+                binding_status = "configured"
+
+            if binding_status == "configured":
+                configured_domains.append(domain)
+                configured_reference_counts[domain] += 1
+            elif binding_status == "unavailable_or_removed":
+                unavailable_or_removed_domains.append(domain)
+
+            sources[domain] = {
+                "source_ref": source_ref,
+                "binding_status": binding_status,
+            }
+
+        fallback_reasons: list[str] = []
+        if len(configured_domains) < len(required_domains):
+            fallback_reasons.append("source_missing_or_configuration_incomplete")
+        if unavailable_or_removed_domains:
+            fallback_reasons.append("source_unavailable_or_removed")
+
+        person_bindings.append(
+            {
+                "person_id": person_id,
+                "configured_domain_count": len(configured_domains),
+                "configuration_complete": len(configured_domains) == len(required_domains),
+                "safe_fallback_mode_active": bool(fallback_reasons),
+                "safe_fallback_reasons": fallback_reasons,
+                "sources": sources,
+            }
+        )
+
+    person_bindings.sort(key=lambda item: str(item.get("person_id", "")))
+
+    return {
+        "required_domains": required_domains,
+        "person_count": len(person_bindings),
+        "configured_reference_counts": configured_reference_counts,
+        "configured_reference_present": {
+            domain: bool(configured_reference_counts[domain]) for domain in required_domains
+        },
+        "safe_fallback_person_count": sum(
+            1 for binding in person_bindings if binding.get("safe_fallback_mode_active")
+        ),
+        "person_bindings": person_bindings,
+    }
+
+
+def _resolve_runtime_person_profile(
+    state,
+    active_person_resolution: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Resolve a Concierge person profile from the active-person outcome."""
+    default_runtime_person_context = {
+        "person_context_state": "person_context_unresolved",
+        "reason_code": "person_profile_not_configured",
+        "resolved_person_id": None,
+        "resolved_voice_profile_id": None,
+        "resolved_concierge_person_profile_id": None,
+        "match_mode": "unresolved",
+        "profile_resolution_state": "unresolved",
+        "profile_resolution_reason_code": "person_profile_not_configured",
+        "profile_resolution_matches": [],
+    }
+    if state is None:
+        return dict(default_runtime_person_context)
+
+    resolved = dict(active_person_resolution or {})
+    active_person_available = bool(resolved.get("active_person_available", False))
+    resolved_person_id = str(resolved.get("resolved_person_id", "") or "").strip() or None
+    resolved_voice_profile_id = str(resolved.get("resolved_voice_profile_id", "") or "").strip() or None
+    if not active_person_available or not resolved_person_id:
+        return dict(default_runtime_person_context)
+
+    profiles = list(getattr(state, "person_profiles", {}).values())
+    exact_profile = getattr(state, "person_profiles", {}).get(resolved_person_id)
+    resolved_matches: list[tuple[str, Any]] = []
+
+    if exact_profile is not None:
+        resolved_matches.append(("person_id_exact", exact_profile))
+    else:
+        for profile in profiles:
+            profile_voice_profile_id = str(getattr(profile, "voice_profile_id", "") or "").strip()
+            if not profile_voice_profile_id:
+                continue
+            if profile_voice_profile_id in {resolved_person_id, resolved_voice_profile_id}:
+                resolved_matches.append(("voice_profile_reference", profile))
+
+    unique_matches: list[tuple[str, Any]] = []
+    seen_person_ids: set[str] = set()
+    for match_mode, profile in resolved_matches:
+        profile_person_id = str(getattr(profile, "person_id", "") or "").strip()
+        if not profile_person_id or profile_person_id in seen_person_ids:
+            continue
+        seen_person_ids.add(profile_person_id)
+        unique_matches.append((match_mode, profile))
+
+    if len(unique_matches) == 0:
+        return {
+            **default_runtime_person_context,
+            "resolved_person_id": resolved_person_id,
+            "resolved_voice_profile_id": resolved_voice_profile_id,
+            "profile_resolution_reason_code": "person_profile_not_configured",
+        }
+
+    if len(unique_matches) > 1:
+        return {
+            **default_runtime_person_context,
+            "resolved_person_id": resolved_person_id,
+            "resolved_voice_profile_id": resolved_voice_profile_id,
+            "reason_code": "person_profile_ambiguous",
+            "profile_resolution_state": "ambiguous",
+            "profile_resolution_reason_code": "person_profile_ambiguous",
+            "profile_resolution_matches": [
+                {
+                    "person_profile_ref": str(getattr(profile, "person_id", "") or "").strip(),
+                    "match_mode": match_mode,
+                }
+                for match_mode, profile in unique_matches
+            ],
+        }
+
+    match_mode, profile = unique_matches[0]
+    person_profile_ref = str(getattr(profile, "person_id", "") or "").strip() or None
+    voice_profile_ref = str(getattr(profile, "voice_profile_id", "") or "").strip() or None
+    home_assistant_person_ref = None
+    location_ref = str(getattr(profile, "linked_area_id", "") or "").strip() or None
+
+    email_source_ref = str(getattr(profile, "email_source_ref", "") or "").strip()
+    calendar_source_ref = str(getattr(profile, "calendar_source_ref", "") or "").strip()
+    shopping_source_ref = str(getattr(profile, "shopping_source_ref", "") or "").strip()
+    task_source_ref = str(getattr(profile, "task_source_ref", "") or "").strip()
+    email_source_refs = [
+        str(binding.get("entity_id", "") or "").strip()
+        for binding in getattr(profile, "email_source_bindings", [])
+        if str(binding.get("entity_id", "") or "").strip()
+    ]
+    calendar_source_refs = [
+        str(binding.get("entity_id", "") or "").strip()
+        for binding in getattr(profile, "calendar_source_bindings", [])
+        if str(binding.get("entity_id", "") or "").strip()
+    ]
+    shopping_source_refs = [
+        str(binding.get("entity_id", "") or "").strip()
+        for binding in getattr(profile, "shopping_source_bindings", [])
+        if str(binding.get("entity_id", "") or "").strip()
+    ]
+    task_source_refs = [
+        str(binding.get("entity_id", "") or "").strip()
+        for binding in getattr(profile, "task_source_bindings", [])
+        if str(binding.get("entity_id", "") or "").strip()
+    ]
+    if email_source_ref and email_source_ref not in email_source_refs:
+        email_source_refs.insert(0, email_source_ref)
+    if calendar_source_ref and calendar_source_ref not in calendar_source_refs:
+        calendar_source_refs.insert(0, calendar_source_ref)
+    if shopping_source_ref and shopping_source_ref not in shopping_source_refs:
+        shopping_source_refs.insert(0, shopping_source_ref)
+    if task_source_ref and task_source_ref not in task_source_refs:
+        task_source_refs.insert(0, task_source_ref)
+
+    ble_device_refs = [
+        str(device_id).strip()
+        for device_id in getattr(profile, "ble_device_ids", [])
+        if str(device_id).strip()
+    ]
+    presence_entity_refs = [
+        str(entity_id).strip()
+        for entity_id in getattr(profile, "aqara_presence_entity_ids", [])
+        if str(entity_id).strip()
+    ]
+    mobile_device_refs = [
+        str(target).strip()
+        for target in getattr(profile, "mobile_notify_targets", [])
+        if str(target).strip()
+    ]
+    notification_target_refs = list(mobile_device_refs)
+    preferred_mobile_target = str(getattr(profile, "preferred_mobile_target", "") or "").strip() or None
+    if preferred_mobile_target and preferred_mobile_target not in notification_target_refs:
+        notification_target_refs.insert(0, preferred_mobile_target)
+
+    allowed_intent_abilities = [
+        str(intent_class).strip()
+        for intent_class in getattr(profile, "minor_allowed_intent_classes", [])
+        if str(intent_class).strip()
+    ]
+    consent_state = dict(getattr(profile, "consent", {}) or {})
+    policy_context_available = bool(
+        consent_state
+        or getattr(profile, "is_minor", False)
+        or getattr(profile, "guardian_controls_required", False)
+        or getattr(profile, "minor_allow_general_qna", False)
+        or allowed_intent_abilities
+    )
+    productivity_bindings_available = bool(
+        email_source_refs and calendar_source_refs and shopping_source_refs
+    )
+    presence_bindings_available = bool(
+        ble_device_refs or presence_entity_refs or mobile_device_refs or location_ref
+    )
+
+    if not productivity_bindings_available:
+        person_context_state = "person_context_partial"
+        reason_code = "productivity_bindings_missing"
+    elif not presence_bindings_available:
+        person_context_state = "person_context_partial"
+        reason_code = "presence_bindings_missing"
+    elif not policy_context_available:
+        person_context_state = "person_context_partial"
+        reason_code = "policy_context_missing"
+    else:
+        person_context_state = "person_context_resolved"
+        reason_code = "person_context_resolved"
+
+    return {
+        "person_context_state": person_context_state,
+        "reason_code": reason_code,
+        "resolved_person_id": resolved_person_id,
+        "resolved_voice_profile_id": resolved_voice_profile_id,
+        "resolved_concierge_person_profile_id": person_profile_ref,
+        "match_mode": match_mode,
+        "profile_resolution_state": "resolved" if person_context_state == "person_context_resolved" else "partial",
+        "profile_resolution_reason_code": reason_code,
+        "profile_resolution_matches": [
+            {
+                "person_profile_ref": person_profile_ref,
+                "match_mode": match_mode,
+            }
+        ],
+        "person_profile_ref": person_profile_ref,
+        "voice_profile_ref": voice_profile_ref,
+        "home_assistant_person_ref": home_assistant_person_ref,
+        "identity": {
+            "person_profile_ref": person_profile_ref,
+            "voice_profile_ref": voice_profile_ref,
+            "home_assistant_person_ref": home_assistant_person_ref,
+            "resolved_person_id": resolved_person_id,
+            "resolved_voice_profile_id": resolved_voice_profile_id,
+        },
+        "productivity": {
+            "available": productivity_bindings_available,
+            "email_source_refs": email_source_refs,
+            "calendar_source_refs": calendar_source_refs,
+            "shopping_source_refs": shopping_source_refs,
+            "task_source_refs": task_source_refs,
+        },
+        "presence": {
+            "available": presence_bindings_available,
+            "ble_device_refs": ble_device_refs,
+            "presence_entity_refs": presence_entity_refs,
+            "location_ref": location_ref,
+        },
+        "mobility": {
+            "mobile_device_refs": mobile_device_refs,
+            "read_later_target": preferred_mobile_target,
+            "notification_target_refs": notification_target_refs,
+        },
+        "policy": {
+            "available": policy_context_available,
+            "allowed_intent_abilities": allowed_intent_abilities,
+            "content_filter_level": str(getattr(profile, "minor_content_filter_level", "") or "").strip() or "strict",
+            "minor_controls": {
+                "is_minor": bool(getattr(profile, "is_minor", False)),
+                "guardian_controls_required": bool(getattr(profile, "guardian_controls_required", False)),
+                "minor_allow_general_qna": bool(getattr(profile, "minor_allow_general_qna", False)),
+            },
+            "step_up_requirements": {
+                "guardian_controls_required": bool(getattr(profile, "guardian_controls_required", False)),
+            },
+            "consent_state": consent_state,
+        },
+        "binding_availability": {
+            "productivity": productivity_bindings_available,
+            "presence": presence_bindings_available,
+            "policy": policy_context_available,
+        },
+        "fail_closed": person_context_state != "person_context_resolved",
+    }
+
+
+def _build_runtime_person_context(
+    state,
+    *,
+    active_person_resolution: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Build the bounded runtime person context used by downstream orchestration."""
+    return _resolve_runtime_person_profile(state, active_person_resolution)
+
+
+def _build_calendar_email_consumption_boundary(
+    *,
+    state=None,
+    hass: HomeAssistant | None = None,
+    active_person_resolution: dict[str, Any] | None = None,
+    runtime_person_context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return governed Release 6 calendar/email consumption metadata."""
+    required_domains = ["email", "calendar"]
+    domain_authorities = {
+        "calendar": "configured_calendar_provider",
+        "email": "configured_email_provider",
+    }
+
+    if state is None:
+        return {
+            "calendar_email_consumption_boundary_version": 1,
+            "applicable": True,
+            "boundary_path": "governed_calendar_email_consumption_boundary",
+            "deterministic_boundary": True,
+            "boundary_status": "active",
+            "concierge_role": "bounded_consumer_orchestrator",
+            "consumption_only": True,
+            "representation_kinds": [
+                "configuration_reference",
+                "consumed_projection",
+                "generated_explanation",
+                "coordination_context",
+            ],
+            "configured_source_reference_count": 0,
+            "person_aware_routing": {
+                "routing_enabled": False,
+                "reason_code": "no_active_person_resolution",
+                "active_person_state": "active_person_unavailable",
+                "active_person_available": False,
+                "resolved_person_id": None,
+                "domains": {
+                    "email": {
+                        "enabled": False,
+                        "reason_code": "no_active_person_resolution",
+                        "selected_person_id": None,
+                        "selection_mode": "disabled",
+                    },
+                    "calendar": {
+                        "enabled": False,
+                        "reason_code": "no_active_person_resolution",
+                        "selected_person_id": None,
+                        "selection_mode": "disabled",
+                    },
+                },
+            },
+            "person_calendar_email_bindings": {
+                "required_domains": required_domains,
+                "person_count": 0,
+                "configured_reference_counts": {domain: 0 for domain in required_domains},
+                "configured_reference_present": {domain: False for domain in required_domains},
+                "safe_fallback_person_count": 0,
+                "person_bindings": [],
+            },
+            "domain_boundaries": {
+                domain: {
+                    "source_of_record": authority,
+                    "source_of_record_external": True,
+                    "configuration_reference_supported": True,
+                    "configured_reference_present": False,
+                    "consumed_projection_supported": True,
+                    "generated_explanation_supported": True,
+                    "coordination_context_supported": True,
+                    "derived_context_only": False,
+                    "concierge_canonical_state_owned": False,
+                    "source_lineage_required": True,
+                    "provenance_reference_required": True,
+                    "sensitive_content_storage_permitted": False,
+                }
+                for domain, authority in domain_authorities.items()
+            },
+            "provenance_requirements": {
+                "provenance_authority_external": True,
+                "source_lineage_required": True,
+                "provenance_reference_required": True,
+                "provenance_duplication_permitted": False,
+                "explanation_source_required": True,
+            },
+            "diagnostics_visibility": {
+                "boundary_verification_supported": True,
+                "safe_source_metadata_only": True,
+                "sensitive_source_content_exposed": False,
+            },
+            "non_authority_assertions": {
+                "creates_source_of_record": False,
+                "stores_duplicate_canonical_records": False,
+                "claims_calendar_authority": False,
+                "claims_email_authority": False,
+                "redefines_provenance_authority": False,
+            },
+            "deferred_release_6_owners": {
+                "person_productivity_source_bindings": "#375",
+                "calendar_and_email_consumption": "#363",
+                "task_and_shopping_consumption": "#364",
+                "capture_and_knowledge_consumption": "#365",
+                "briefing_and_household_status_synthesis": "#366",
+                "productivity_diagnostics_provenance_explainability": "#367",
+                "household_coordination": "#368-#372",
+                "release_6_validation": "#373",
+            },
+        }
+
+    person_source_bindings = _build_person_productivity_source_bindings(state, hass=hass)
+    person_bindings: list[dict[str, Any]] = []
+    configured_reference_counts = {domain: 0 for domain in required_domains}
+
+    for person_binding in person_source_bindings.get("person_bindings", []):
+        sources = dict(person_binding.get("sources", {}))
+        calendar_email_sources = {
+            domain: dict(sources.get(domain, {}))
+            for domain in required_domains
+        }
+        configured_domains = [
+            domain
+            for domain in required_domains
+            if calendar_email_sources[domain].get("binding_status") == "configured"
+        ]
+        unavailable_or_removed_domains = [
+            domain
+            for domain in required_domains
+            if calendar_email_sources[domain].get("binding_status") == "unavailable_or_removed"
+        ]
+        for domain in configured_domains:
+            configured_reference_counts[domain] += 1
+
+        fallback_reasons: list[str] = []
+        if len(configured_domains) < len(required_domains):
+            fallback_reasons.append("source_missing_or_configuration_incomplete")
+        if unavailable_or_removed_domains:
+            fallback_reasons.append("source_unavailable_or_removed")
+
+        person_bindings.append(
+            {
+                "person_id": person_binding.get("person_id"),
+                "configured_domain_count": len(configured_domains),
+                "configuration_complete": len(configured_domains) == len(required_domains),
+                "safe_fallback_mode_active": bool(fallback_reasons),
+                "safe_fallback_reasons": fallback_reasons,
+                "sources": calendar_email_sources,
+            }
+        )
+
+    person_bindings.sort(key=lambda item: str(item.get("person_id", "")))
+    person_aware_routing = _build_person_aware_productivity_routing(
+        state=state,
+        hass=hass,
+        active_person_resolution=active_person_resolution,
+        runtime_person_context=runtime_person_context,
+    )
+    calendar_email_routing = dict(person_aware_routing.get("domain_routing", {}))
+
+    return {
+        "calendar_email_consumption_boundary_version": 1,
+        "applicable": True,
+        "boundary_path": "governed_calendar_email_consumption_boundary",
+        "deterministic_boundary": True,
+        "boundary_status": "active",
+        "concierge_role": "bounded_consumer_orchestrator",
+        "consumption_only": True,
+        "representation_kinds": [
+            "configuration_reference",
+            "consumed_projection",
+            "generated_explanation",
+            "coordination_context",
+        ],
+        "configured_source_reference_count": sum(configured_reference_counts.values()),
+        "runtime_person_context": dict(person_aware_routing.get("runtime_person_context", {})),
+        "person_aware_routing": {
+            "routing_enabled": bool(person_aware_routing.get("routing_enabled", False)),
+            "reason_code": person_aware_routing.get("reason_code"),
+            "active_person_state": person_aware_routing.get("active_person_state"),
+            "active_person_available": bool(person_aware_routing.get("active_person_available", False)),
+            "resolved_person_id": person_aware_routing.get("resolved_person_id"),
+            "domains": {
+                "email": dict(calendar_email_routing.get("email", {})),
+                "calendar": dict(calendar_email_routing.get("calendar", {})),
+            },
+        },
+        "person_calendar_email_bindings": {
+            "required_domains": required_domains,
+            "person_count": len(person_bindings),
+            "configured_reference_counts": configured_reference_counts,
+            "configured_reference_present": {
+                domain: bool(configured_reference_counts[domain])
+                for domain in required_domains
+            },
+            "safe_fallback_person_count": sum(
+                1 for item in person_bindings if item.get("safe_fallback_mode_active")
+            ),
+            "person_bindings": person_bindings,
+        },
+        "domain_boundaries": {
+            domain: {
+                "source_of_record": authority,
+                "source_of_record_external": True,
+                "configuration_reference_supported": True,
+                "configured_reference_present": bool(configured_reference_counts[domain]),
+                "consumed_projection_supported": True,
+                "generated_explanation_supported": True,
+                "coordination_context_supported": True,
+                "derived_context_only": False,
+                "concierge_canonical_state_owned": False,
+                "source_lineage_required": True,
+                "provenance_reference_required": True,
+                "sensitive_content_storage_permitted": False,
+            }
+            for domain, authority in domain_authorities.items()
+        },
+        "provenance_requirements": {
+            "provenance_authority_external": True,
+            "source_lineage_required": True,
+            "provenance_reference_required": True,
+            "provenance_duplication_permitted": False,
+            "explanation_source_required": True,
+        },
+        "diagnostics_visibility": {
+            "boundary_verification_supported": True,
+            "safe_source_metadata_only": True,
+            "sensitive_source_content_exposed": False,
+        },
+        "non_authority_assertions": {
+            "creates_source_of_record": False,
+            "stores_duplicate_canonical_records": False,
+            "claims_calendar_authority": False,
+            "claims_email_authority": False,
+            "redefines_provenance_authority": False,
+        },
+        "deferred_release_6_owners": {
+            "person_productivity_source_bindings": "#375",
+            "calendar_and_email_consumption": "#363",
+            "task_and_shopping_consumption": "#364",
+            "capture_and_knowledge_consumption": "#365",
+            "briefing_and_household_status_synthesis": "#366",
+            "productivity_diagnostics_provenance_explainability": "#367",
+            "household_coordination": "#368-#372",
+            "release_6_validation": "#373",
+        },
+    }
+
+
 def _assemble_foundation_context(
     state,
     *,
@@ -3065,6 +4074,2112 @@ def _assemble_foundation_context(
         "summary": " | ".join(summary_parts),
         "context_source_count": len(contexts),
         "signal_count": len(signals),
+    }
+
+    
+def _build_task_shopping_consumption_boundary(
+    *,
+    state=None,
+    hass: HomeAssistant | None = None,
+    active_person_resolution: dict[str, Any] | None = None,
+    runtime_person_context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return governed Release 6 task/shopping consumption metadata."""
+    task_reference_kinds = [
+        "ownership_references",
+        "assignment_references",
+        "completion_references",
+        "due_awareness_references",
+        "provenance_references",
+    ]
+    shopping_reference_kinds = [
+        "shopping_item_references",
+        "ownership_references",
+        "duplicate_indicators",
+        "completion_references",
+        "provenance_references",
+        "shopping_explainability_references",
+    ]
+
+    if state is None:
+        return {
+            "task_shopping_consumption_boundary_version": 1,
+            "applicable": True,
+            "boundary_path": "governed_task_shopping_consumption_boundary",
+            "deterministic_boundary": True,
+            "boundary_status": "active",
+            "concierge_role": "bounded_consumer_orchestrator",
+            "consumption_only": True,
+            "representation_kinds": [
+                "configuration_reference",
+                "consumed_projection",
+                "generated_explanation",
+                "coordination_context",
+                "clarification_response",
+            ],
+            "task_reference_kinds": task_reference_kinds,
+            "shopping_reference_kinds": shopping_reference_kinds,
+            "configured_source_reference_count": 0,
+            "person_aware_routing": {
+                "routing_enabled": False,
+                "reason_code": "no_active_person_resolution",
+                "active_person_state": "active_person_unavailable",
+                "active_person_available": False,
+                "resolved_person_id": None,
+                "domains": {
+                    "task": {
+                        "enabled": False,
+                        "reason_code": "no_active_person_resolution",
+                        "selected_person_id": None,
+                        "selection_mode": "disabled",
+                    },
+                    "shopping": {
+                        "enabled": False,
+                        "reason_code": "no_active_person_resolution",
+                        "selected_person_id": None,
+                        "selection_mode": "disabled",
+                    },
+                },
+            },
+            "person_shopping_bindings": {
+                "required_domains": ["shopping"],
+                "person_count": 0,
+                "configured_reference_counts": {"shopping": 0},
+                "configured_reference_present": {"shopping": False},
+                "safe_fallback_person_count": 0,
+                "person_bindings": [],
+            },
+            "task_reference_boundaries": {
+                "task": {
+                    "source_of_record": "configured_task_provider",
+                    "source_of_record_external": True,
+                    "reference_only_model": True,
+                    "ownership_references_supported": True,
+                    "assignment_references_supported": True,
+                    "completion_references_supported": True,
+                    "due_awareness_references_supported": True,
+                    "provenance_references_supported": True,
+                    "consumed_projection_supported": True,
+                    "generated_explanation_supported": True,
+                    "coordination_context_supported": True,
+                    "derived_context_only": True,
+                    "clarification_supported": True,
+                    "ambiguity_visible": True,
+                    "hidden_intent_inference": False,
+                    "concierge_canonical_state_owned": False,
+                    "source_lineage_required": True,
+                    "provenance_reference_required": True,
+                    "sensitive_content_storage_permitted": False,
+                },
+                "shopping": {
+                    "source_of_record": "configured_shopping_provider",
+                    "source_of_record_external": True,
+                    "reference_only_model": True,
+                    "shopping_reference_kinds": shopping_reference_kinds,
+                    "shopping_binding_supported": True,
+                    "consumed_projection_supported": True,
+                    "generated_explanation_supported": True,
+                    "coordination_context_supported": True,
+                    "derived_context_only": False,
+                    "clarification_supported": True,
+                    "ambiguity_visible": True,
+                    "hidden_intent_inference": False,
+                    "concierge_canonical_state_owned": False,
+                    "source_lineage_required": True,
+                    "provenance_reference_required": True,
+                    "sensitive_content_storage_permitted": False,
+                },
+            },
+            "clarification_behavior": {
+                "supported": True,
+                "ambiguity_visible": True,
+                "confirmation_required_when_ambiguous": True,
+                "hidden_intent_inference": False,
+                "explainable_prompt_required": True,
+                "multi_item_capture_aligned": True,
+            },
+            "provenance_requirements": {
+                "provenance_authority_external": True,
+                "source_lineage_required": True,
+                "provenance_reference_required": True,
+                "provenance_duplication_permitted": False,
+                "explanation_source_required": True,
+            },
+            "diagnostics_visibility": {
+                "boundary_verification_supported": True,
+                "safe_source_metadata_only": True,
+                "sensitive_source_content_exposed": False,
+            },
+            "non_authority_assertions": {
+                "creates_source_of_record": False,
+                "stores_duplicate_canonical_records": False,
+                "claims_task_authority": False,
+                "claims_shopping_authority": False,
+                "redefines_provenance_authority": False,
+                "infers_hidden_intent": False,
+            },
+            "deferred_release_6_owners": {
+                "person_productivity_source_bindings": "#375",
+                "calendar_and_email_consumption": "#363",
+                "task_and_shopping_consumption": "#364",
+                "capture_and_knowledge_consumption": "#365",
+                "briefing_and_household_status_synthesis": "#366",
+                "productivity_diagnostics_provenance_explainability": "#367",
+                "household_coordination": "#368-#372",
+                "release_6_validation": "#373",
+            },
+        }
+
+    person_source_bindings = _build_person_productivity_source_bindings(state, hass=hass)
+    person_bindings: list[dict[str, Any]] = []
+    configured_reference_counts = {"shopping": 0}
+
+    for person_binding in person_source_bindings.get("person_bindings", []):
+        sources = dict(person_binding.get("sources", {}))
+        shopping_source = dict(sources.get("shopping", {}))
+        shopping_binding_status = str(shopping_source.get("binding_status", "missing") or "missing")
+        configured = shopping_binding_status == "configured"
+
+        if configured:
+            configured_reference_counts["shopping"] += 1
+
+        fallback_reasons: list[str] = []
+        if shopping_binding_status == "missing":
+            fallback_reasons.append("source_missing_or_configuration_incomplete")
+        if shopping_binding_status == "unavailable_or_removed":
+            fallback_reasons.append("source_unavailable_or_removed")
+
+        person_bindings.append(
+            {
+                "person_id": person_binding.get("person_id"),
+                "configured_domain_count": 1 if configured else 0,
+                "configuration_complete": configured,
+                "safe_fallback_mode_active": bool(fallback_reasons),
+                "safe_fallback_reasons": fallback_reasons,
+                "sources": {"shopping": shopping_source},
+            }
+        )
+
+    person_bindings.sort(key=lambda item: str(item.get("person_id", "")))
+    person_aware_routing = _build_person_aware_productivity_routing(
+        state=state,
+        hass=hass,
+        active_person_resolution=active_person_resolution,
+        runtime_person_context=runtime_person_context,
+    )
+    task_shopping_routing = dict(person_aware_routing.get("domain_routing", {}))
+
+    return {
+        "task_shopping_consumption_boundary_version": 1,
+        "applicable": True,
+        "boundary_path": "governed_task_shopping_consumption_boundary",
+        "deterministic_boundary": True,
+        "boundary_status": "active",
+        "concierge_role": "bounded_consumer_orchestrator",
+        "consumption_only": True,
+        "representation_kinds": [
+            "configuration_reference",
+            "consumed_projection",
+            "generated_explanation",
+            "coordination_context",
+            "clarification_response",
+        ],
+        "task_reference_kinds": task_reference_kinds,
+        "shopping_reference_kinds": shopping_reference_kinds,
+        "configured_source_reference_count": configured_reference_counts["shopping"],
+        "runtime_person_context": dict(person_aware_routing.get("runtime_person_context", {})),
+        "person_aware_routing": {
+            "routing_enabled": bool(person_aware_routing.get("routing_enabled", False)),
+            "reason_code": person_aware_routing.get("reason_code"),
+            "active_person_state": person_aware_routing.get("active_person_state"),
+            "active_person_available": bool(person_aware_routing.get("active_person_available", False)),
+            "resolved_person_id": person_aware_routing.get("resolved_person_id"),
+            "domains": {
+                "task": dict(task_shopping_routing.get("task", {})),
+                "shopping": dict(task_shopping_routing.get("shopping", {})),
+            },
+        },
+        "person_shopping_bindings": {
+            "required_domains": ["shopping"],
+            "person_count": len(person_bindings),
+            "configured_reference_counts": configured_reference_counts,
+            "configured_reference_present": {"shopping": bool(configured_reference_counts["shopping"])},
+            "safe_fallback_person_count": sum(
+                1 for item in person_bindings if item.get("safe_fallback_mode_active")
+            ),
+            "person_bindings": person_bindings,
+        },
+        "task_reference_boundaries": {
+            "task": {
+                "source_of_record": "configured_task_provider",
+                "source_of_record_external": True,
+                "reference_only_model": True,
+                "ownership_references_supported": True,
+                "assignment_references_supported": True,
+                "completion_references_supported": True,
+                "due_awareness_references_supported": True,
+                "provenance_references_supported": True,
+                "consumed_projection_supported": True,
+                "generated_explanation_supported": True,
+                "coordination_context_supported": True,
+                "derived_context_only": True,
+                "clarification_supported": True,
+                "ambiguity_visible": True,
+                "hidden_intent_inference": False,
+                "concierge_canonical_state_owned": False,
+                "source_lineage_required": True,
+                "provenance_reference_required": True,
+                "sensitive_content_storage_permitted": False,
+            },
+            "shopping": {
+                "source_of_record": "configured_shopping_provider",
+                "source_of_record_external": True,
+                "reference_only_model": True,
+                "shopping_reference_kinds": shopping_reference_kinds,
+                "shopping_binding_supported": True,
+                "consumed_projection_supported": True,
+                "generated_explanation_supported": True,
+                "coordination_context_supported": True,
+                "derived_context_only": False,
+                "clarification_supported": True,
+                "ambiguity_visible": True,
+                "hidden_intent_inference": False,
+                "concierge_canonical_state_owned": False,
+                "source_lineage_required": True,
+                "provenance_reference_required": True,
+                "sensitive_content_storage_permitted": False,
+            },
+        },
+        "clarification_behavior": {
+            "supported": True,
+            "ambiguity_visible": True,
+            "confirmation_required_when_ambiguous": True,
+            "hidden_intent_inference": False,
+            "explainable_prompt_required": True,
+            "multi_item_capture_aligned": True,
+        },
+        "provenance_requirements": {
+            "provenance_authority_external": True,
+            "source_lineage_required": True,
+            "provenance_reference_required": True,
+            "provenance_duplication_permitted": False,
+            "explanation_source_required": True,
+        },
+        "diagnostics_visibility": {
+            "boundary_verification_supported": True,
+            "safe_source_metadata_only": True,
+            "sensitive_source_content_exposed": False,
+        },
+        "non_authority_assertions": {
+            "creates_source_of_record": False,
+            "stores_duplicate_canonical_records": False,
+            "claims_task_authority": False,
+            "claims_shopping_authority": False,
+            "redefines_provenance_authority": False,
+            "infers_hidden_intent": False,
+        },
+        "deferred_release_6_owners": {
+            "person_productivity_source_bindings": "#375",
+            "calendar_and_email_consumption": "#363",
+            "task_and_shopping_consumption": "#364",
+            "capture_and_knowledge_consumption": "#365",
+            "briefing_and_household_status_synthesis": "#366",
+            "productivity_diagnostics_provenance_explainability": "#367",
+            "household_coordination": "#368-#372",
+            "release_6_validation": "#373",
+        },
+    }
+
+
+def _build_capture_knowledge_consumption_boundary(
+    *,
+    state=None,
+    hass: HomeAssistant | None = None,
+) -> dict[str, Any]:
+    """Return governed Release 6 capture/knowledge consumption metadata."""
+    knowledge_reference_kinds = [
+        "knowledge_request_references",
+        "knowledge_response_references",
+        "source_references",
+        "uncertainty_references",
+        "knowledge_explainability_references",
+    ]
+    capture_reference_kinds = [
+        "utterance_reference",
+        "decomposition_references",
+        "item_lineage_references",
+        "decomposition_explainability_references",
+        "ambiguity_reference",
+        "confirmation_reference",
+    ]
+
+    if state is None:
+        return {
+            "capture_knowledge_consumption_boundary_version": 1,
+            "applicable": True,
+            "boundary_path": "governed_capture_knowledge_consumption_boundary",
+            "deterministic_boundary": True,
+            "boundary_status": "active",
+            "concierge_role": "bounded_consumer_orchestrator",
+            "consumption_only": True,
+            "representation_kinds": [
+                "configuration_reference",
+                "consumed_projection",
+                "generated_explanation",
+                "coordination_context",
+                "clarification_response",
+            ],
+            "knowledge_reference_kinds": knowledge_reference_kinds,
+            "capture_reference_kinds": capture_reference_kinds,
+            "configured_source_reference_count": 0,
+            "knowledge_consumption": {
+                "reference_count": 0,
+                "knowledge_enabled_room_count": 0,
+                "knowledge_enabled_composite_count": 0,
+                "knowledge_available": False,
+                "safe_fallback_mode_active": True,
+                "safe_fallback_reasons": ["knowledge_references_missing_or_unavailable"],
+            },
+            "capture_consumption": {
+                "reference_count": 0,
+                "capture_available": False,
+                "safe_fallback_mode_active": True,
+                "safe_fallback_reasons": ["capture_references_missing_or_unavailable"],
+            },
+            "provenance_visibility": {
+                "provenance_reference_count": 0,
+                "provenance_reference_present": False,
+                "provenance_visible": False,
+            },
+            "clarification_behavior": {
+                "supported": True,
+                "ambiguity_visible": True,
+                "confirmation_required_when_ambiguous": True,
+                "hidden_intent_inference": False,
+                "explainable_prompt_required": True,
+                "multi_item_capture_aligned": True,
+            },
+            "domain_boundaries": {
+                "knowledge": {
+                    "source_of_record": "configured_knowledge_provider",
+                    "source_of_record_external": True,
+                    "reference_only_model": True,
+                    "knowledge_reference_kinds": knowledge_reference_kinds,
+                    "query_context_supported": True,
+                    "consumed_projection_supported": True,
+                    "generated_explanation_supported": True,
+                    "availability_visibility_supported": True,
+                    "derived_context_only": True,
+                    "concierge_canonical_state_owned": False,
+                    "source_lineage_required": True,
+                    "provenance_reference_required": True,
+                    "sensitive_content_storage_permitted": False,
+                },
+                "capture": {
+                    "source_of_record": "configured_capture_provider",
+                    "source_of_record_external": True,
+                    "reference_only_model": True,
+                    "capture_reference_kinds": capture_reference_kinds,
+                    "interpretation_context_supported": True,
+                    "consumed_projection_supported": True,
+                    "generated_explanation_supported": True,
+                    "availability_visibility_supported": True,
+                    "derived_context_only": True,
+                    "concierge_canonical_state_owned": False,
+                    "source_lineage_required": True,
+                    "provenance_reference_required": True,
+                    "sensitive_content_storage_permitted": False,
+                },
+            },
+            "provenance_requirements": {
+                "provenance_authority_external": True,
+                "source_lineage_required": True,
+                "provenance_reference_required": True,
+                "provenance_duplication_permitted": False,
+                "explanation_source_required": True,
+            },
+            "diagnostics_visibility": {
+                "boundary_verification_supported": True,
+                "safe_source_metadata_only": True,
+                "sensitive_source_content_exposed": False,
+            },
+            "non_authority_assertions": {
+                "creates_source_of_record": False,
+                "stores_duplicate_canonical_records": False,
+                "claims_capture_authority": False,
+                "claims_knowledge_authority": False,
+                "redefines_provenance_authority": False,
+                "replaces_capture_system": False,
+                "replaces_knowledge_system": False,
+                "infers_hidden_intent": False,
+            },
+            "deferred_release_6_owners": {
+                "person_productivity_source_bindings": "#375",
+                "calendar_and_email_consumption": "#363",
+                "task_and_shopping_consumption": "#364",
+                "capture_and_knowledge_consumption": "#365",
+                "briefing_and_household_status_synthesis": "#366",
+                "productivity_diagnostics_provenance_explainability": "#367",
+                "household_coordination": "#368-#372",
+                "release_6_validation": "#373",
+            },
+        }
+
+    knowledge_enabled_room_count = sum(
+        1 for room in state.rooms.values() if bool(getattr(room, "ai_knowledge_enabled", False))
+    )
+    knowledge_enabled_composite_count = sum(
+        1 for composite in state.composites.values() if bool(getattr(composite, "ai_knowledge_enabled", False))
+    )
+
+    knowledge_reference_items: list[dict[str, Any]] = []
+    capture_reference_items: list[dict[str, Any]] = []
+    provenance_reference_items: list[dict[str, Any]] = []
+
+    for activity in sorted(
+        state.activities.values(),
+        key=lambda item: str(getattr(item, "started_at", "")),
+        reverse=True,
+    ):
+        for ref in list(getattr(activity, "external_refs", [])):
+            ref_type = str(ref.get("ref_type", "") or "")
+            if ref_type in knowledge_reference_kinds:
+                knowledge_reference_items.append(dict(ref))
+            if ref_type in capture_reference_kinds:
+                capture_reference_items.append(dict(ref))
+            if ref_type == "provenance_references":
+                provenance_reference_items.append(dict(ref))
+
+    knowledge_available = bool(
+        knowledge_reference_items or knowledge_enabled_room_count or knowledge_enabled_composite_count
+    )
+    capture_available = bool(capture_reference_items)
+    provenance_visible = bool(provenance_reference_items)
+
+    knowledge_fallback_reasons: list[str] = []
+    if not knowledge_available:
+        knowledge_fallback_reasons.append("knowledge_references_missing_or_unavailable")
+
+    capture_fallback_reasons: list[str] = []
+    if not capture_available:
+        capture_fallback_reasons.append("capture_references_missing_or_unavailable")
+
+    return {
+        "capture_knowledge_consumption_boundary_version": 1,
+        "applicable": True,
+        "boundary_path": "governed_capture_knowledge_consumption_boundary",
+        "deterministic_boundary": True,
+        "boundary_status": "active",
+        "concierge_role": "bounded_consumer_orchestrator",
+        "consumption_only": True,
+        "representation_kinds": [
+            "configuration_reference",
+            "consumed_projection",
+            "generated_explanation",
+            "coordination_context",
+            "clarification_response",
+        ],
+        "knowledge_reference_kinds": knowledge_reference_kinds,
+        "capture_reference_kinds": capture_reference_kinds,
+        "configured_source_reference_count": len(knowledge_reference_items) + len(capture_reference_items),
+        "knowledge_consumption": {
+            "reference_count": len(knowledge_reference_items),
+            "knowledge_enabled_room_count": knowledge_enabled_room_count,
+            "knowledge_enabled_composite_count": knowledge_enabled_composite_count,
+            "knowledge_available": knowledge_available,
+            "safe_fallback_mode_active": not knowledge_available,
+            "safe_fallback_reasons": knowledge_fallback_reasons,
+        },
+        "capture_consumption": {
+            "reference_count": len(capture_reference_items),
+            "capture_available": capture_available,
+            "safe_fallback_mode_active": not capture_available,
+            "safe_fallback_reasons": capture_fallback_reasons,
+        },
+        "provenance_visibility": {
+            "provenance_reference_count": len(provenance_reference_items),
+            "provenance_reference_present": provenance_visible,
+            "provenance_visible": provenance_visible,
+        },
+        "clarification_behavior": {
+            "supported": True,
+            "ambiguity_visible": True,
+            "confirmation_required_when_ambiguous": True,
+            "hidden_intent_inference": False,
+            "explainable_prompt_required": True,
+            "multi_item_capture_aligned": True,
+        },
+        "domain_boundaries": {
+            "knowledge": {
+                "source_of_record": "configured_knowledge_provider",
+                "source_of_record_external": True,
+                "reference_only_model": True,
+                "knowledge_reference_kinds": knowledge_reference_kinds,
+                "query_context_supported": True,
+                "consumed_projection_supported": True,
+                "generated_explanation_supported": True,
+                "availability_visibility_supported": True,
+                "derived_context_only": True,
+                "concierge_canonical_state_owned": False,
+                "source_lineage_required": True,
+                "provenance_reference_required": True,
+                "sensitive_content_storage_permitted": False,
+            },
+            "capture": {
+                "source_of_record": "configured_capture_provider",
+                "source_of_record_external": True,
+                "reference_only_model": True,
+                "capture_reference_kinds": capture_reference_kinds,
+                "interpretation_context_supported": True,
+                "consumed_projection_supported": True,
+                "generated_explanation_supported": True,
+                "availability_visibility_supported": True,
+                "derived_context_only": True,
+                "concierge_canonical_state_owned": False,
+                "source_lineage_required": True,
+                "provenance_reference_required": True,
+                "sensitive_content_storage_permitted": False,
+            },
+        },
+        "provenance_requirements": {
+            "provenance_authority_external": True,
+            "source_lineage_required": True,
+            "provenance_reference_required": True,
+            "provenance_duplication_permitted": False,
+            "explanation_source_required": True,
+        },
+        "diagnostics_visibility": {
+            "boundary_verification_supported": True,
+            "safe_source_metadata_only": True,
+            "sensitive_source_content_exposed": False,
+        },
+        "non_authority_assertions": {
+            "creates_source_of_record": False,
+            "stores_duplicate_canonical_records": False,
+            "claims_capture_authority": False,
+            "claims_knowledge_authority": False,
+            "redefines_provenance_authority": False,
+            "replaces_capture_system": False,
+            "replaces_knowledge_system": False,
+            "infers_hidden_intent": False,
+        },
+        "deferred_release_6_owners": {
+            "person_productivity_source_bindings": "#375",
+            "calendar_and_email_consumption": "#363",
+            "task_and_shopping_consumption": "#364",
+            "capture_and_knowledge_consumption": "#365",
+            "briefing_and_household_status_synthesis": "#366",
+            "productivity_diagnostics_provenance_explainability": "#367",
+            "household_coordination": "#368-#372",
+            "release_6_validation": "#373",
+        },
+    }
+
+
+def _build_briefing_composition_boundary(
+    *,
+    state=None,
+    hass: HomeAssistant | None = None,
+) -> dict[str, Any]:
+    """Return governed Release 6 briefing composition metadata."""
+    calendar_email_boundary = _build_calendar_email_consumption_boundary(state=state, hass=hass)
+    task_shopping_boundary = _build_task_shopping_consumption_boundary(state=state, hass=hass)
+    capture_knowledge_boundary = _build_capture_knowledge_consumption_boundary(state=state, hass=hass)
+
+    source_boundary_items = [
+        {
+            "source_domain": "calendar_email",
+            "source_boundary": "calendar_email_consumption_boundary",
+            "boundary_path": calendar_email_boundary.get("boundary_path"),
+            "source_reference_count": calendar_email_boundary.get("configured_source_reference_count", 0),
+            "availability": bool(
+                calendar_email_boundary.get("configured_source_reference_count", 0)
+                or calendar_email_boundary.get("person_calendar_email_bindings", {}).get("person_count", 0)
+            ),
+            "safe_fallback_mode_active": bool(
+                calendar_email_boundary.get("person_calendar_email_bindings", {})
+                .get("safe_fallback_person_count", 0)
+            ),
+            "provenance_visible": bool(calendar_email_boundary.get("configured_source_reference_count", 0)),
+        },
+        {
+            "source_domain": "task_shopping",
+            "source_boundary": "task_shopping_consumption_boundary",
+            "boundary_path": task_shopping_boundary.get("boundary_path"),
+            "source_reference_count": task_shopping_boundary.get("configured_source_reference_count", 0),
+            "availability": bool(
+                task_shopping_boundary.get("configured_source_reference_count", 0)
+                or task_shopping_boundary.get("person_shopping_bindings", {}).get("person_count", 0)
+            ),
+            "safe_fallback_mode_active": bool(
+                task_shopping_boundary.get("person_shopping_bindings", {}).get("safe_fallback_person_count", 0)
+            ),
+            "provenance_visible": bool(task_shopping_boundary.get("configured_source_reference_count", 0)),
+        },
+        {
+            "source_domain": "capture_knowledge",
+            "source_boundary": "capture_knowledge_consumption_boundary",
+            "boundary_path": capture_knowledge_boundary.get("boundary_path"),
+            "source_reference_count": capture_knowledge_boundary.get("configured_source_reference_count", 0),
+            "availability": bool(
+                capture_knowledge_boundary.get("knowledge_consumption", {}).get("knowledge_available", False)
+                or capture_knowledge_boundary.get("capture_consumption", {}).get("capture_available", False)
+            ),
+            "safe_fallback_mode_active": bool(capture_knowledge_boundary.get("capture_consumption", {}).get("safe_fallback_mode_active", False))
+            or bool(capture_knowledge_boundary.get("knowledge_consumption", {}).get("safe_fallback_mode_active", False)),
+            "provenance_visible": bool(capture_knowledge_boundary.get("provenance_visibility", {}).get("provenance_reference_present", False)),
+        },
+    ]
+
+    total_source_reference_count = sum(item["source_reference_count"] for item in source_boundary_items)
+    available_source_count = sum(1 for item in source_boundary_items if item["availability"])
+    safe_fallback_mode_active = any(item["safe_fallback_mode_active"] for item in source_boundary_items)
+    provenance_references = [
+        {
+            "source_boundary": item["source_boundary"],
+            "boundary_path": item["boundary_path"],
+            "source_reference_count": item["source_reference_count"],
+            "provenance_visible": item["provenance_visible"],
+        }
+        for item in source_boundary_items
+        if item["provenance_visible"] or item["source_reference_count"] > 0
+    ]
+
+    section_order = ["calendar_email", "task_shopping", "capture_knowledge"]
+    briefing_sections = [
+        {
+            "section_id": section_name,
+            "section_type": section_name,
+            "source_boundaries": [item["source_boundary"] for item in source_boundary_items if item["source_domain"] == section_name],
+            "source_reference_count": next(item["source_reference_count"] for item in source_boundary_items if item["source_domain"] == section_name),
+            "safe_fallback_mode_active": next(item["safe_fallback_mode_active"] for item in source_boundary_items if item["source_domain"] == section_name),
+        }
+        for section_name in section_order
+    ]
+
+    briefing_composition_state = "active" if available_source_count else "restricted"
+    return {
+        "briefing_composition_boundary_version": 1,
+        "applicable": True,
+        "boundary_path": "governed_briefing_composition_boundary",
+        "deterministic_boundary": True,
+        "boundary_status": "active",
+        "concierge_role": "bounded_consumer_orchestrator",
+        "consumption_only": True,
+        "representation_kinds": [
+            "configuration_reference",
+            "consumed_projection",
+            "generated_explanation",
+            "coordination_context",
+            "clarification_response",
+        ],
+        "briefing_composition": {
+            "briefing_composition_id": "briefcomp_release_6",
+            "briefing_sections": briefing_sections,
+            "source_references": source_boundary_items,
+            "priority_ordering": section_order,
+            "calm_by_default_ordering": section_order,
+            "briefing_explainability_references": [
+                {
+                    "section_id": item["section_id"],
+                    "source_boundaries": item["source_boundaries"],
+                    "source_reference_count": item["source_reference_count"],
+                    "safe_fallback_mode_active": item["safe_fallback_mode_active"],
+                }
+                for item in briefing_sections
+            ],
+            "provenance_references": provenance_references,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "briefing_composition_state": briefing_composition_state,
+        },
+        "briefing_available": bool(available_source_count),
+        "source_boundary_count": len(source_boundary_items),
+        "configured_source_reference_count": total_source_reference_count,
+        "safe_fallback_mode_active": safe_fallback_mode_active,
+        "safe_fallback_reasons": [
+            "source_boundary_unavailable",
+        ] if not available_source_count else [],
+        "source_boundaries": source_boundary_items,
+        "provenance_visibility": {
+            "provenance_reference_count": len(provenance_references),
+            "provenance_reference_present": bool(provenance_references),
+            "provenance_visible": bool(provenance_references),
+        },
+        "explainability_visibility": {
+            "briefing_explainability_supported": True,
+            "source_domain_visible": True,
+            "source_type_visible": True,
+            "safe_fallback_visible": True,
+        },
+        "non_authority_assertions": {
+            "creates_source_of_record": False,
+            "stores_duplicate_canonical_records": False,
+            "claims_briefing_authority": False,
+            "claims_household_status_authority": False,
+            "creates_planning_engine": False,
+            "creates_recommendation_engine": False,
+            "redefines_provenance_authority": False,
+        },
+        "deferred_release_6_owners": {
+            "person_productivity_source_bindings": "#375",
+            "calendar_and_email_consumption": "#363",
+            "task_and_shopping_consumption": "#364",
+            "capture_and_knowledge_consumption": "#365",
+            "briefing_and_household_status_synthesis": "#366",
+            "productivity_diagnostics_provenance_explainability": "#367",
+            "household_coordination": "#368-#372",
+            "release_6_validation": "#373",
+        },
+    }
+
+
+def _build_household_status_synthesis_boundary(
+    *,
+    state=None,
+    hass: HomeAssistant | None = None,
+) -> dict[str, Any]:
+    """Return governed Release 6 household status synthesis metadata."""
+    calendar_email_boundary = _build_calendar_email_consumption_boundary(state=state, hass=hass)
+    task_shopping_boundary = _build_task_shopping_consumption_boundary(state=state, hass=hass)
+    capture_knowledge_boundary = _build_capture_knowledge_consumption_boundary(state=state, hass=hass)
+    briefing_composition_boundary = _build_briefing_composition_boundary(state=state, hass=hass)
+
+    source_items = [
+        {
+            "source_domain": "calendar",
+            "source_type": "calendar_email_consumption_boundary",
+            "boundary_path": calendar_email_boundary.get("boundary_path"),
+            "source_reference_count": calendar_email_boundary.get("configured_source_reference_count", 0),
+            "availability": bool(
+                calendar_email_boundary.get("configured_source_reference_count", 0)
+                or calendar_email_boundary.get("person_calendar_email_bindings", {}).get("person_count", 0)
+            ),
+            "safe_fallback_mode_active": bool(
+                calendar_email_boundary.get("person_calendar_email_bindings", {}).get("person_count", 0)
+            ),
+            "provenance_visible": bool(calendar_email_boundary.get("configured_source_reference_count", 0)),
+        },
+        {
+            "source_domain": "task",
+            "source_type": "task_shopping_consumption_boundary",
+            "boundary_path": task_shopping_boundary.get("boundary_path"),
+            "source_reference_count": task_shopping_boundary.get("configured_source_reference_count", 0),
+            "availability": bool(
+                task_shopping_boundary.get("configured_source_reference_count", 0)
+                or task_shopping_boundary.get("person_shopping_bindings", {}).get("person_count", 0)
+            ),
+            "safe_fallback_mode_active": bool(
+                task_shopping_boundary.get("person_shopping_bindings", {}).get("safe_fallback_person_count", 0)
+            ),
+            "provenance_visible": bool(task_shopping_boundary.get("configured_source_reference_count", 0)),
+        },
+        {
+            "source_domain": "shopping",
+            "source_type": "task_shopping_consumption_boundary",
+            "boundary_path": task_shopping_boundary.get("boundary_path"),
+            "source_reference_count": task_shopping_boundary.get("configured_source_reference_count", 0),
+            "availability": bool(
+                task_shopping_boundary.get("configured_source_reference_count", 0)
+                or task_shopping_boundary.get("person_shopping_bindings", {}).get("person_count", 0)
+            ),
+            "safe_fallback_mode_active": bool(
+                task_shopping_boundary.get("person_shopping_bindings", {}).get("safe_fallback_person_count", 0)
+            ),
+            "provenance_visible": bool(task_shopping_boundary.get("configured_source_reference_count", 0)),
+        },
+        {
+            "source_domain": "capture",
+            "source_type": "capture_knowledge_consumption_boundary",
+            "boundary_path": capture_knowledge_boundary.get("boundary_path"),
+            "source_reference_count": capture_knowledge_boundary.get("configured_source_reference_count", 0),
+            "availability": bool(
+                capture_knowledge_boundary.get("knowledge_consumption", {}).get("knowledge_available", False)
+                or capture_knowledge_boundary.get("capture_consumption", {}).get("capture_available", False)
+            ),
+            "safe_fallback_mode_active": bool(capture_knowledge_boundary.get("capture_consumption", {}).get("safe_fallback_mode_active", False))
+            or bool(capture_knowledge_boundary.get("knowledge_consumption", {}).get("safe_fallback_mode_active", False)),
+            "provenance_visible": bool(capture_knowledge_boundary.get("provenance_visibility", {}).get("provenance_reference_present", False)),
+        },
+        {
+            "source_domain": "knowledge",
+            "source_type": "capture_knowledge_consumption_boundary",
+            "boundary_path": capture_knowledge_boundary.get("boundary_path"),
+            "source_reference_count": capture_knowledge_boundary.get("configured_source_reference_count", 0),
+            "availability": bool(capture_knowledge_boundary.get("knowledge_consumption", {}).get("knowledge_available", False)),
+            "safe_fallback_mode_active": bool(capture_knowledge_boundary.get("knowledge_consumption", {}).get("safe_fallback_mode_active", False)),
+            "provenance_visible": bool(capture_knowledge_boundary.get("provenance_visibility", {}).get("provenance_reference_present", False)),
+        },
+    ]
+
+    available_source_count = sum(1 for item in source_items if item["availability"])
+    total_source_reference_count = sum(item["source_reference_count"] for item in source_items)
+    safe_fallback_mode_active = any(item["safe_fallback_mode_active"] for item in source_items)
+    provenance_references = [
+        {
+            "source_domain": item["source_domain"],
+            "source_type": item["source_type"],
+            "boundary_path": item["boundary_path"],
+            "source_reference_count": item["source_reference_count"],
+            "provenance_visible": item["provenance_visible"],
+        }
+        for item in source_items
+        if item["provenance_visible"] or item["source_reference_count"] > 0
+    ]
+
+    unresolved_coordination_domains = sorted(
+        {
+            str(item.get("source_domain", "") or "").strip()
+            for item in source_items
+            if not bool(item.get("availability", False))
+            or bool(item.get("safe_fallback_mode_active", False))
+        }
+    )
+    open_loop_items = [
+        {
+            "source_domain": str(item.get("source_domain", "") or "").strip(),
+            "source_type": item.get("source_type"),
+            "open_loop_state": (
+                "pending"
+                if (not bool(item.get("availability", False)) or bool(item.get("safe_fallback_mode_active", False)))
+                else "resolved"
+            ),
+            "open_loop_reason_code": (
+                "source_boundary_unavailable"
+                if not bool(item.get("availability", False))
+                else ("safe_fallback_active" if bool(item.get("safe_fallback_mode_active", False)) else "resolved")
+            ),
+            "source_reference_count": int(item.get("source_reference_count", 0) or 0),
+            "provenance_visible": bool(item.get("provenance_visible", False)),
+        }
+        for item in source_items
+    ]
+    pending_open_loop_count = sum(1 for item in open_loop_items if item["open_loop_state"] == "pending")
+    open_loop_state = "active" if pending_open_loop_count > 0 else "clear"
+
+    status_state = "active" if available_source_count else "simplified"
+    return {
+        "household_status_synthesis_boundary_version": 1,
+        "applicable": True,
+        "boundary_path": "governed_household_status_synthesis_boundary",
+        "deterministic_boundary": True,
+        "boundary_status": "active",
+        "concierge_role": "bounded_consumer_orchestrator",
+        "consumption_only": True,
+        "representation_kinds": [
+            "configuration_reference",
+            "consumed_projection",
+            "generated_explanation",
+            "coordination_context",
+            "clarification_response",
+        ],
+        "coordination_snapshot": {
+            "coordination_snapshot_id": "coordsnap_release_6",
+            "calendar_references": [item for item in source_items if item["source_domain"] == "calendar"],
+            "task_references": [item for item in source_items if item["source_domain"] == "task"],
+            "shopping_references": [item for item in source_items if item["source_domain"] == "shopping"],
+            "messaging_references": [],
+            "home_status_references": [],
+            "coordination_explainability_references": [
+                {
+                    "source_domain": item["source_domain"],
+                    "source_type": item["source_type"],
+                    "safe_fallback_mode_active": item["safe_fallback_mode_active"],
+                    "availability": item["availability"],
+                }
+                for item in source_items
+            ],
+            "provenance_references": provenance_references,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "coordination_snapshot_state": status_state,
+        },
+        "household_status_available": bool(available_source_count),
+        "source_boundary_count": len(source_items),
+        "configured_source_reference_count": total_source_reference_count,
+        "safe_fallback_mode_active": safe_fallback_mode_active,
+        "safe_fallback_reasons": [
+            "source_boundary_unavailable",
+        ] if not available_source_count else [],
+        "open_loop_coordination_visibility": {
+            "open_loop_supported": True,
+            "open_loop_state": open_loop_state,
+            "pending_open_loop_count": pending_open_loop_count,
+            "unresolved_coordination_domains": unresolved_coordination_domains,
+            "open_loop_items": open_loop_items,
+            "informational_only": True,
+            "coordination_authority_external": True,
+            "source_of_record_external": True,
+            "explainability_supported": True,
+            "provenance_visibility_supported": True,
+        },
+        "source_boundaries": source_items,
+        "briefing_composition_boundary": {
+            "boundary_path": briefing_composition_boundary.get("boundary_path"),
+            "briefing_composition_state": briefing_composition_boundary.get("briefing_composition", {}).get("briefing_composition_state"),
+            "briefing_available": briefing_composition_boundary.get("briefing_available"),
+        },
+        "provenance_visibility": {
+            "provenance_reference_count": len(provenance_references),
+            "provenance_reference_present": bool(provenance_references),
+            "provenance_visible": bool(provenance_references),
+        },
+        "explainability_visibility": {
+            "household_status_explainability_supported": True,
+            "source_domain_visible": True,
+            "source_type_visible": True,
+            "safe_fallback_visible": True,
+        },
+        "non_authority_assertions": {
+            "creates_source_of_record": False,
+            "stores_duplicate_canonical_records": False,
+            "claims_household_status_authority": False,
+            "creates_planning_engine": False,
+            "creates_coordination_engine": False,
+            "redefines_provenance_authority": False,
+        },
+        "deferred_release_6_owners": {
+            "person_productivity_source_bindings": "#375",
+            "calendar_and_email_consumption": "#363",
+            "task_and_shopping_consumption": "#364",
+            "capture_and_knowledge_consumption": "#365",
+            "briefing_and_household_status_synthesis": "#366",
+            "productivity_diagnostics_provenance_explainability": "#367",
+            "household_coordination": "#368-#372",
+            "release_6_validation": "#373",
+        },
+    }
+
+
+def _build_productivity_coordination_boundary(
+    *,
+    state=None,
+    hass: HomeAssistant | None = None,
+    active_person_resolution: dict[str, Any] | None = None,
+    runtime_person_context: dict[str, Any] | None = None,
+    person_aware_productivity_routing: dict[str, Any] | None = None,
+    calendar_email_consumption_boundary: dict[str, Any] | None = None,
+    task_shopping_consumption_boundary: dict[str, Any] | None = None,
+    capture_knowledge_consumption_boundary: dict[str, Any] | None = None,
+    provenance_ownership_consumption_boundary: dict[str, Any] | None = None,
+    route_scope: str = "global",
+    context_area_id: str | None = None,
+    resolved_composite_id: str | None = None,
+) -> dict[str, Any]:
+    """Return governed Release 6 productivity coordination metadata."""
+    active_person_resolution = dict(
+        active_person_resolution
+        or {
+            "active_person_state": "active_person_unavailable",
+            "active_person_available": False,
+            "resolved_person_id": None,
+            "reason_code": "no_execution_envelope",
+        }
+    )
+    runtime_person_context = dict(
+        runtime_person_context
+        or _build_runtime_person_context(state, active_person_resolution=active_person_resolution)
+    )
+    person_aware_productivity_routing = dict(
+        person_aware_productivity_routing
+        or _build_person_aware_productivity_routing(
+            state=state,
+            hass=hass,
+            active_person_resolution=active_person_resolution,
+            runtime_person_context=runtime_person_context,
+        )
+    )
+    calendar_email_consumption_boundary = dict(
+        calendar_email_consumption_boundary
+        or _build_calendar_email_consumption_boundary(
+            state=state,
+            hass=hass,
+            active_person_resolution=active_person_resolution,
+            runtime_person_context=runtime_person_context,
+        )
+    )
+    task_shopping_consumption_boundary = dict(
+        task_shopping_consumption_boundary
+        or _build_task_shopping_consumption_boundary(
+            state=state,
+            hass=hass,
+            active_person_resolution=active_person_resolution,
+            runtime_person_context=runtime_person_context,
+        )
+    )
+    capture_knowledge_consumption_boundary = dict(
+        capture_knowledge_consumption_boundary
+        or _build_capture_knowledge_consumption_boundary(
+            state=state,
+            hass=hass,
+        )
+    )
+    provenance_ownership_consumption_boundary = dict(
+        provenance_ownership_consumption_boundary
+        or _build_release_6_provenance_ownership_consumption_boundary(state=state, hass=hass)
+    )
+
+    routing_domains = dict(person_aware_productivity_routing.get("domain_routing", {}))
+    calendar_email_domain_boundaries = dict(
+        calendar_email_consumption_boundary.get("domain_boundaries", {})
+    )
+    task_shopping_domain_boundaries = dict(
+        task_shopping_consumption_boundary.get("domain_boundaries", {})
+    )
+    calendar_email_person_count = int(
+        calendar_email_consumption_boundary.get("person_calendar_email_bindings", {}).get(
+            "person_count", 0
+        )
+        or 0
+    )
+    calendar_email_safe_fallback_count = int(
+        calendar_email_consumption_boundary.get("person_calendar_email_bindings", {}).get(
+            "safe_fallback_person_count", 0
+        )
+        or 0
+    )
+    shopping_person_count = int(
+        task_shopping_consumption_boundary.get("person_shopping_bindings", {}).get(
+            "person_count", 0
+        )
+        or 0
+    )
+    shopping_safe_fallback_count = int(
+        task_shopping_consumption_boundary.get("person_shopping_bindings", {}).get(
+            "safe_fallback_person_count", 0
+        )
+        or 0
+    )
+
+    domain_details = [
+        {
+            "domain": "calendar",
+            "source_boundary": "calendar_email_consumption_boundary",
+            "source_boundary_path": calendar_email_consumption_boundary.get("boundary_path"),
+            "source_reference_count": int(
+                calendar_email_consumption_boundary.get("configured_source_reference_count", 0)
+                or 0
+            ),
+            "source_available": bool(
+                calendar_email_domain_boundaries.get("calendar", {}).get(
+                    "configured_reference_present", False
+                )
+                or calendar_email_person_count
+            ),
+            "safe_fallback_mode_active": bool(calendar_email_safe_fallback_count),
+            "routing_enabled": bool(routing_domains.get("calendar", {}).get("enabled", False)),
+            "routing_reason_code": routing_domains.get("calendar", {}).get("reason_code"),
+            "selected_source_ref": routing_domains.get("calendar", {}).get("selected_source_ref"),
+            "selection_mode": routing_domains.get("calendar", {}).get("selection_mode"),
+        },
+        {
+            "domain": "email",
+            "source_boundary": "calendar_email_consumption_boundary",
+            "source_boundary_path": calendar_email_consumption_boundary.get("boundary_path"),
+            "source_reference_count": int(
+                calendar_email_consumption_boundary.get("configured_source_reference_count", 0)
+                or 0
+            ),
+            "source_available": bool(
+                calendar_email_domain_boundaries.get("email", {}).get(
+                    "configured_reference_present", False
+                )
+                or calendar_email_person_count
+            ),
+            "safe_fallback_mode_active": bool(calendar_email_safe_fallback_count),
+            "routing_enabled": bool(routing_domains.get("email", {}).get("enabled", False)),
+            "routing_reason_code": routing_domains.get("email", {}).get("reason_code"),
+            "selected_source_ref": routing_domains.get("email", {}).get("selected_source_ref"),
+            "selection_mode": routing_domains.get("email", {}).get("selection_mode"),
+        },
+        {
+            "domain": "task",
+            "source_boundary": "task_shopping_consumption_boundary",
+            "source_boundary_path": task_shopping_consumption_boundary.get("boundary_path"),
+            "source_reference_count": int(
+                task_shopping_consumption_boundary.get("configured_source_reference_count", 0)
+                or 0
+            ),
+            "source_available": bool(
+                task_shopping_domain_boundaries.get("task", {}).get(
+                    "configured_reference_present", False
+                )
+                or shopping_person_count
+            ),
+            "safe_fallback_mode_active": bool(shopping_safe_fallback_count),
+            "routing_enabled": bool(routing_domains.get("task", {}).get("enabled", False)),
+            "routing_reason_code": routing_domains.get("task", {}).get("reason_code"),
+            "selected_source_ref": routing_domains.get("task", {}).get("selected_source_ref"),
+            "selection_mode": routing_domains.get("task", {}).get("selection_mode"),
+        },
+        {
+            "domain": "shopping",
+            "source_boundary": "task_shopping_consumption_boundary",
+            "source_boundary_path": task_shopping_consumption_boundary.get("boundary_path"),
+            "source_reference_count": int(
+                task_shopping_consumption_boundary.get("configured_source_reference_count", 0)
+                or 0
+            ),
+            "source_available": bool(
+                task_shopping_domain_boundaries.get("shopping", {}).get(
+                    "configured_reference_present", False
+                )
+                or shopping_person_count
+            ),
+            "safe_fallback_mode_active": bool(shopping_safe_fallback_count),
+            "routing_enabled": bool(routing_domains.get("shopping", {}).get("enabled", False)),
+            "routing_reason_code": routing_domains.get("shopping", {}).get("reason_code"),
+            "selected_source_ref": routing_domains.get("shopping", {}).get("selected_source_ref"),
+            "selection_mode": routing_domains.get("shopping", {}).get("selection_mode"),
+        },
+        {
+            "domain": "capture",
+            "source_boundary": "capture_knowledge_consumption_boundary",
+            "source_boundary_path": capture_knowledge_consumption_boundary.get("boundary_path"),
+            "source_reference_count": int(
+                capture_knowledge_consumption_boundary.get("configured_source_reference_count", 0)
+                or 0
+            ),
+            "source_available": bool(
+                capture_knowledge_consumption_boundary.get("capture_consumption", {}).get(
+                    "capture_available", False
+                )
+            ),
+            "safe_fallback_mode_active": bool(
+                capture_knowledge_consumption_boundary.get("capture_consumption", {}).get(
+                    "safe_fallback_mode_active", False
+                )
+            ),
+            "routing_enabled": False,
+            "routing_reason_code": None,
+            "selected_source_ref": None,
+            "selection_mode": None,
+        },
+        {
+            "domain": "knowledge",
+            "source_boundary": "capture_knowledge_consumption_boundary",
+            "source_boundary_path": capture_knowledge_consumption_boundary.get("boundary_path"),
+            "source_reference_count": int(
+                capture_knowledge_consumption_boundary.get("configured_source_reference_count", 0)
+                or 0
+            ),
+            "source_available": bool(
+                capture_knowledge_consumption_boundary.get("knowledge_consumption", {}).get(
+                    "knowledge_available", False
+                )
+            ),
+            "safe_fallback_mode_active": bool(
+                capture_knowledge_consumption_boundary.get("knowledge_consumption", {}).get(
+                    "safe_fallback_mode_active", False
+                )
+            ),
+            "routing_enabled": False,
+            "routing_reason_code": None,
+            "selected_source_ref": None,
+            "selection_mode": None,
+        },
+    ]
+
+    participating_domains = sorted(
+        {
+            str(item.get("domain", "") or "").strip()
+            for item in domain_details
+            if bool(item.get("source_available", False))
+            or bool(item.get("routing_enabled", False))
+            or bool(item.get("safe_fallback_mode_active", False))
+        }
+    )
+    pending_domains = sorted(
+        {
+            str(item.get("domain", "") or "").strip()
+            for item in domain_details
+            if not bool(item.get("source_available", False))
+            or bool(item.get("safe_fallback_mode_active", False))
+        }
+    )
+    runtime_context_state = str(
+        runtime_person_context.get("person_context_state", "person_context_unresolved")
+    ).strip().lower()
+
+    if not participating_domains:
+        coordination_state = "simplified"
+    elif runtime_context_state in {"person_context_partial", "person_context_unresolved"}:
+        coordination_state = "restricted"
+    else:
+        coordination_state = "active"
+
+    provenance_inputs = {
+        "boundary_path": provenance_ownership_consumption_boundary.get("boundary_path"),
+        "provenance_reference_count": int(
+            provenance_ownership_consumption_boundary.get("provenance_visibility", {}).get(
+                "provenance_reference_count", 0
+            )
+            or 0
+        ),
+        "provenance_visible": bool(
+            provenance_ownership_consumption_boundary.get("provenance_visibility", {}).get(
+                "provenance_visible", False
+            )
+        ),
+        "lineage_completeness_ready": bool(
+            provenance_ownership_consumption_boundary.get("readiness_assessment", {}).get(
+                "lineage_completeness_ready", False
+            )
+        ),
+    }
+
+    return {
+        "productivity_coordination_boundary_version": 1,
+        "applicable": True,
+        "boundary_path": "governed_productivity_coordination_boundary",
+        "deterministic_boundary": True,
+        "boundary_status": "active",
+        "concierge_role": "bounded_consumer_orchestrator",
+        "consumption_only": True,
+        "informational_only": True,
+        "coordination_state": coordination_state,
+        "coordination_awareness": {
+            "participating_domains": participating_domains,
+            "pending_domains": pending_domains,
+            "participating_domain_count": len(participating_domains),
+            "pending_domain_count": len(pending_domains),
+            "cross_domain_coordination_supported": True,
+            "cross_domain_coordination_state": (
+                "active" if len(participating_domains) > 1 else "limited"
+            ),
+        },
+        "coordination_categories": [
+            "calendar_coordination",
+            "email_coordination",
+            "task_coordination",
+            "shopping_coordination",
+            "cross_domain_productivity_coordination",
+        ],
+        "domain_coordination": domain_details,
+        "runtime_person_context": {
+            "person_context_state": runtime_person_context.get("person_context_state"),
+            "reason_code": runtime_person_context.get("reason_code"),
+            "resolved_person_id": runtime_person_context.get("resolved_person_id"),
+            "resolved_voice_profile_id": runtime_person_context.get("resolved_voice_profile_id"),
+            "resolved_concierge_person_profile_id": runtime_person_context.get(
+                "resolved_concierge_person_profile_id"
+            ),
+        },
+        "person_aware_routing_inputs": {
+            "routing_enabled": bool(person_aware_productivity_routing.get("routing_enabled", False)),
+            "reason_code": person_aware_productivity_routing.get("reason_code"),
+            "active_person_state": person_aware_productivity_routing.get("active_person_state"),
+            "active_person_available": bool(
+                person_aware_productivity_routing.get("active_person_available", False)
+            ),
+            "resolved_person_id": person_aware_productivity_routing.get("resolved_person_id"),
+            "domain_routing": {
+                domain: {
+                    "enabled": bool(details.get("enabled", False)),
+                    "reason_code": details.get("reason_code"),
+                    "selected_source_ref": details.get("selected_source_ref"),
+                    "selection_mode": details.get("selection_mode"),
+                }
+                for domain, details in routing_domains.items()
+            },
+        },
+        "provenance_inputs": provenance_inputs,
+        "governance_context": {
+            "route_scope": route_scope,
+            "context_area_id": context_area_id,
+            "resolved_composite_id": resolved_composite_id,
+            "active_person_state": active_person_resolution.get("active_person_state"),
+            "active_person_available": bool(
+                active_person_resolution.get("active_person_available", False)
+            ),
+        },
+        "explainability_visibility": {
+            "coordination_state_visible": True,
+            "participating_domains_visible": True,
+            "productivity_inputs_visible": True,
+            "routing_inputs_visible": True,
+            "provenance_inputs_visible": True,
+            "safe_fallback_visible": True,
+        },
+        "diagnostics_visibility": {
+            "coordination_visibility_supported": True,
+            "explainability_supported": True,
+            "provenance_visibility_supported": True,
+            "ownership_verification_supported": True,
+            "safe_source_metadata_only": True,
+            "sensitive_source_content_exposed": False,
+        },
+        "non_authority_assertions": {
+            "creates_source_of_record": False,
+            "stores_duplicate_canonical_records": False,
+            "claims_productivity_authority": False,
+            "claims_coordination_authority": False,
+            "claims_provenance_authority": False,
+            "creates_planning_engine": False,
+            "creates_workflow_engine": False,
+            "redefines_identity_authority": False,
+        },
+        "deferred_release_6_owners": {
+            "person_productivity_source_bindings": "#375",
+            "calendar_and_email_consumption": "#363",
+            "task_and_shopping_consumption": "#364",
+            "capture_and_knowledge_consumption": "#365",
+            "briefing_and_household_status_synthesis": "#366",
+            "productivity_diagnostics_provenance_explainability": "#367",
+            "provenance_ownership_and_consumption": "#368",
+            "household_coordination": "#369-#372",
+            "release_6_validation": "#373",
+        },
+    }
+
+
+def _build_household_coordination_boundary(
+    *,
+    state=None,
+    hass: HomeAssistant | None = None,
+    active_person_resolution: dict[str, Any] | None = None,
+    runtime_person_context: dict[str, Any] | None = None,
+    person_aware_productivity_routing: dict[str, Any] | None = None,
+    household_status_synthesis_boundary: dict[str, Any] | None = None,
+    provenance_ownership_consumption_boundary: dict[str, Any] | None = None,
+    route_scope: str = "global",
+    context_area_id: str | None = None,
+    resolved_composite_id: str | None = None,
+) -> dict[str, Any]:
+    """Return governed Release 6 household coordination boundary metadata."""
+    household_status_synthesis_boundary = dict(
+        household_status_synthesis_boundary
+        or _build_household_status_synthesis_boundary(state=state, hass=hass)
+    )
+    provenance_ownership_consumption_boundary = dict(
+        provenance_ownership_consumption_boundary
+        or _build_release_6_provenance_ownership_consumption_boundary(state=state, hass=hass)
+    )
+    active_person_resolution = dict(
+        active_person_resolution
+        or {
+            "active_person_state": "active_person_unavailable",
+            "active_person_available": False,
+            "resolved_person_id": None,
+            "reason_code": "no_execution_envelope",
+        }
+    )
+    runtime_person_context = dict(
+        runtime_person_context
+        or _build_runtime_person_context(state, active_person_resolution=active_person_resolution)
+    )
+    person_aware_productivity_routing = dict(
+        person_aware_productivity_routing
+        or _build_person_aware_productivity_routing(
+            state=state,
+            hass=hass,
+            active_person_resolution=active_person_resolution,
+            runtime_person_context=runtime_person_context,
+        )
+    )
+
+    routing_domains = dict(person_aware_productivity_routing.get("domain_routing", {}))
+    source_boundaries = list(household_status_synthesis_boundary.get("source_boundaries", []))
+    source_by_domain = {
+        str(item.get("source_domain", "") or ""): dict(item)
+        for item in source_boundaries
+        if isinstance(item, dict)
+    }
+
+    contributor_domains = [
+        "calendar",
+        "email",
+        "task",
+        "shopping",
+        "capture",
+        "knowledge",
+        "briefing",
+        "household_status",
+    ]
+    contributors: list[dict[str, Any]] = []
+    for domain in contributor_domains:
+        routing = dict(routing_domains.get(domain, {}))
+        source = dict(source_by_domain.get(domain, {}))
+        contributor_available = bool(source.get("availability", False))
+        if domain in {"calendar", "email", "task", "shopping"}:
+            contributor_available = contributor_available or bool(routing.get("enabled", False))
+        contributors.append(
+            {
+                "source_domain": domain,
+                "contributor_available": contributor_available,
+                "source_type": source.get("source_type"),
+                "source_reference_count": int(source.get("source_reference_count", 0) or 0),
+                "routing_enabled": bool(routing.get("enabled", False)),
+                "routing_reason_code": routing.get("reason_code"),
+                "selected_source_ref": routing.get("selected_source_ref"),
+                "selection_mode": routing.get("selection_mode"),
+                "safe_fallback_mode_active": bool(source.get("safe_fallback_mode_active", False)),
+            }
+        )
+
+    available_contributor_count = sum(1 for item in contributors if item["contributor_available"])
+    configured_source_reference_count = int(
+        household_status_synthesis_boundary.get("configured_source_reference_count", 0) or 0
+    )
+    household_status_available = bool(
+        household_status_synthesis_boundary.get("household_status_available", False)
+    )
+    runtime_context_state = str(
+        runtime_person_context.get("person_context_state", "person_context_unresolved")
+    ).strip().lower()
+
+    if household_status_available:
+        coordination_state = "active"
+    elif runtime_context_state in {"person_context_partial", "person_context_unresolved"}:
+        coordination_state = "restricted"
+    else:
+        coordination_state = "simplified"
+
+    provenance_context = {
+        "boundary_path": provenance_ownership_consumption_boundary.get("boundary_path"),
+        "provenance_reference_count": int(
+            provenance_ownership_consumption_boundary.get("provenance_visibility", {}).get(
+                "provenance_reference_count", 0
+            )
+            or 0
+        ),
+        "provenance_visible": bool(
+            provenance_ownership_consumption_boundary.get("provenance_visibility", {}).get(
+                "provenance_visible", False
+            )
+        ),
+        "lineage_completeness_ready": bool(
+            provenance_ownership_consumption_boundary.get("readiness_assessment", {}).get(
+                "lineage_completeness_ready", False
+            )
+        ),
+    }
+
+    coordination_snapshot = dict(
+        household_status_synthesis_boundary.get("coordination_snapshot", {})
+    )
+    coordination_snapshot_state = str(
+        coordination_snapshot.get("coordination_snapshot_state", coordination_state)
+    ).strip() or coordination_state
+
+    coordination_explainability = {
+        "coordination_state": coordination_state,
+        "coordination_source": "governed_release_6_consumption_boundaries",
+        "coordination_contributors": [
+            {
+                "source_domain": item["source_domain"],
+                "contributor_available": item["contributor_available"],
+                "routing_enabled": item["routing_enabled"],
+                "routing_reason_code": item["routing_reason_code"],
+                "selection_mode": item["selection_mode"],
+            }
+            for item in contributors
+        ],
+        "coordination_context": {
+            "route_scope": route_scope,
+            "context_area_id": context_area_id,
+            "resolved_composite_id": resolved_composite_id,
+            "active_person_state": active_person_resolution.get("active_person_state"),
+            "active_person_available": bool(
+                active_person_resolution.get("active_person_available", False)
+            ),
+            "resolved_person_id": active_person_resolution.get("resolved_person_id"),
+            "runtime_person_context_state": runtime_context_state,
+            "person_aware_routing_enabled": bool(
+                person_aware_productivity_routing.get("routing_enabled", False)
+            ),
+            "person_aware_routing_reason_code": person_aware_productivity_routing.get("reason_code"),
+        },
+        "provenance_context": provenance_context,
+    }
+
+    safe_fallback_mode_active = coordination_state != "active"
+    safe_fallback_reasons: list[str] = []
+    if not household_status_available:
+        safe_fallback_reasons.append("household_status_unavailable")
+    if runtime_context_state != "person_context_resolved":
+        safe_fallback_reasons.append(runtime_context_state)
+    if not provenance_context["lineage_completeness_ready"]:
+        safe_fallback_reasons.append("provenance_lineage_incomplete")
+
+    open_loop_visibility = dict(
+        household_status_synthesis_boundary.get("open_loop_coordination_visibility", {})
+    )
+    if not open_loop_visibility:
+        open_loop_visibility = {
+            "open_loop_supported": True,
+            "open_loop_state": "active" if safe_fallback_mode_active else "clear",
+            "pending_open_loop_count": 1 if safe_fallback_mode_active else 0,
+            "unresolved_coordination_domains": ["household_status"] if safe_fallback_mode_active else [],
+            "open_loop_items": [],
+            "informational_only": True,
+            "coordination_authority_external": True,
+            "source_of_record_external": True,
+            "explainability_supported": True,
+            "provenance_visibility_supported": True,
+        }
+
+    return {
+        "household_coordination_boundary_version": 1,
+        "applicable": True,
+        "boundary_path": "governed_household_coordination_boundary",
+        "deterministic_boundary": True,
+        "boundary_status": "active",
+        "concierge_role": "bounded_consumer_orchestrator",
+        "consumption_only": True,
+        "coordination_state": coordination_state,
+        "coordination_snapshot": {
+            "coordination_snapshot_id": coordination_snapshot.get(
+                "coordination_snapshot_id", "coordsnap_release_6"
+            ),
+            "coordination_snapshot_state": coordination_snapshot_state,
+            "timestamp": coordination_snapshot.get("timestamp"),
+        },
+        "coordination_source": "governed_release_6_consumption_boundaries",
+        "coordination_contributors": contributors,
+        "coordination_context": coordination_explainability["coordination_context"],
+        "provenance_context": provenance_context,
+        "runtime_person_context": {
+            "person_context_state": runtime_person_context.get("person_context_state"),
+            "reason_code": runtime_person_context.get("reason_code"),
+            "resolved_person_id": runtime_person_context.get("resolved_person_id"),
+            "resolved_voice_profile_id": runtime_person_context.get("resolved_voice_profile_id"),
+            "resolved_concierge_person_profile_id": runtime_person_context.get(
+                "resolved_concierge_person_profile_id"
+            ),
+        },
+        "person_aware_productivity_routing": {
+            "routing_enabled": bool(
+                person_aware_productivity_routing.get("routing_enabled", False)
+            ),
+            "reason_code": person_aware_productivity_routing.get("reason_code"),
+            "active_person_state": person_aware_productivity_routing.get(
+                "active_person_state"
+            ),
+            "active_person_available": bool(
+                person_aware_productivity_routing.get("active_person_available", False)
+            ),
+            "resolved_person_id": person_aware_productivity_routing.get("resolved_person_id"),
+            "domain_routing": {
+                domain: {
+                    "enabled": bool(details.get("enabled", False)),
+                    "reason_code": details.get("reason_code"),
+                    "selected_source_ref": details.get("selected_source_ref"),
+                    "selection_mode": details.get("selection_mode"),
+                }
+                for domain, details in routing_domains.items()
+            },
+        },
+        "configured_source_reference_count": configured_source_reference_count,
+        "source_boundary_count": len(source_boundaries),
+        "available_contributor_count": available_contributor_count,
+        "safe_fallback_mode_active": safe_fallback_mode_active,
+        "safe_fallback_reasons": safe_fallback_reasons,
+        "open_loop_coordination_visibility": {
+            **open_loop_visibility,
+            "coordination_state": coordination_state,
+            "runtime_person_context_state": runtime_context_state,
+        },
+        "provenance_visibility": {
+            "provenance_visible": provenance_context["provenance_visible"],
+            "provenance_reference_count": provenance_context["provenance_reference_count"],
+            "lineage_completeness_ready": provenance_context["lineage_completeness_ready"],
+        },
+        "explainability_visibility": {
+            "coordination_state_visible": True,
+            "coordination_source_visible": True,
+            "coordination_contributors_visible": True,
+            "coordination_context_visible": True,
+            "provenance_context_visible": True,
+            "safe_fallback_visible": True,
+            "coordination_explainability": coordination_explainability,
+        },
+        "diagnostics_visibility": {
+            "boundary_verification_supported": True,
+            "runtime_context_visibility_supported": True,
+            "provenance_visibility_supported": True,
+            "safe_source_metadata_only": True,
+            "sensitive_source_content_exposed": False,
+        },
+        "non_authority_assertions": {
+            "creates_source_of_record": False,
+            "stores_duplicate_canonical_records": False,
+            "claims_coordination_authority": False,
+            "claims_provenance_authority": False,
+            "creates_planning_engine": False,
+            "redefines_identity_authority": False,
+        },
+        "deferred_release_6_owners": {
+            "person_productivity_source_bindings": "#375",
+            "calendar_and_email_consumption": "#363",
+            "task_and_shopping_consumption": "#364",
+            "capture_and_knowledge_consumption": "#365",
+            "briefing_and_household_status_synthesis": "#366",
+            "productivity_diagnostics_provenance_explainability": "#367",
+            "provenance_ownership_and_consumption": "#368",
+            "household_coordination": "#369-#372",
+            "release_6_validation": "#373",
+        },
+    }
+
+
+def _build_release_6_provenance_ownership_consumption_boundary(
+    *,
+    state=None,
+    hass: HomeAssistant | None = None,
+) -> dict[str, Any]:
+    """Return governed Release 6 provenance ownership and consumption metadata."""
+    source_views = [
+        {
+            "boundary_name": "productivity_source_of_record_boundary",
+            "source_domain": "productivity",
+            "source_type": "productivity_source_of_record_boundary",
+            "visibility": _build_productivity_source_of_record_boundary(state=state, hass=hass),
+            "available": True if state is not None else False,
+        },
+        {
+            "boundary_name": "calendar_email_consumption_boundary",
+            "source_domain": "calendar_email",
+            "source_type": "calendar_email_consumption_boundary",
+            "visibility": _build_calendar_email_consumption_boundary(state=state, hass=hass),
+            "available": bool(
+                _build_calendar_email_consumption_boundary(state=state, hass=hass).get("configured_source_reference_count", 0)
+                or _build_calendar_email_consumption_boundary(state=state, hass=hass).get("person_calendar_email_bindings", {}).get("person_count", 0)
+            ),
+        },
+        {
+            "boundary_name": "task_shopping_consumption_boundary",
+            "source_domain": "task_shopping",
+            "source_type": "task_shopping_consumption_boundary",
+            "visibility": _build_task_shopping_consumption_boundary(state=state, hass=hass),
+            "available": bool(
+                _build_task_shopping_consumption_boundary(state=state, hass=hass).get("configured_source_reference_count", 0)
+                or _build_task_shopping_consumption_boundary(state=state, hass=hass).get("person_shopping_bindings", {}).get("person_count", 0)
+            ),
+        },
+        {
+            "boundary_name": "capture_knowledge_consumption_boundary",
+            "source_domain": "capture_knowledge",
+            "source_type": "capture_knowledge_consumption_boundary",
+            "visibility": _build_capture_knowledge_consumption_boundary(state=state, hass=hass),
+            "available": bool(
+                _build_capture_knowledge_consumption_boundary(state=state, hass=hass).get("knowledge_consumption", {}).get("knowledge_available", False)
+                or _build_capture_knowledge_consumption_boundary(state=state, hass=hass).get("capture_consumption", {}).get("capture_available", False)
+            ),
+        },
+        {
+            "boundary_name": "briefing_composition_boundary",
+            "source_domain": "briefing",
+            "source_type": "briefing_composition_boundary",
+            "visibility": _build_briefing_composition_boundary(state=state, hass=hass),
+            "available": bool(_build_briefing_composition_boundary(state=state, hass=hass).get("briefing_available", False)),
+        },
+        {
+            "boundary_name": "household_status_synthesis_boundary",
+            "source_domain": "household_status",
+            "source_type": "household_status_synthesis_boundary",
+            "visibility": _build_household_status_synthesis_boundary(state=state, hass=hass),
+            "available": bool(_build_household_status_synthesis_boundary(state=state, hass=hass).get("household_status_available", False)),
+        },
+    ]
+
+    boundary_entries: list[dict[str, Any]] = []
+    for item in source_views:
+        visibility = item["visibility"]
+        provenance_visibility = visibility.get("provenance_visibility", {})
+        explainability_visibility = visibility.get("explainability_visibility", {})
+        ownership_visible = bool(visibility.get("non_authority_assertions") or visibility.get("authority_relationships"))
+        source_authority_visible = bool(
+            visibility.get("provenance_requirements", {}).get("provenance_authority_external", False)
+            or visibility.get("domain_boundaries", {})
+            or visibility.get("governance_controls", {})
+        )
+        provenance_visible = bool(provenance_visibility.get("provenance_visible", False))
+        attribution_visible = bool(
+            provenance_visible
+            or bool(explainability_visibility)
+            or bool(visibility.get("authority_visibility", {}))
+        )
+        lineage_visible = bool(provenance_visible or provenance_visibility.get("provenance_reference_count", 0))
+        explainability_visible = bool(explainability_visibility or visibility.get("clarification_behavior", {}))
+        boundary_entries.append(
+            {
+                "boundary_name": item["boundary_name"],
+                "source_domain": item["source_domain"],
+                "source_type": item["source_type"],
+                "boundary_path": visibility.get("boundary_path"),
+                "available": bool(item["available"]),
+                "source_ownership_visible": ownership_visible,
+                "source_authority_visible": source_authority_visible,
+                "provenance_ownership_visible": provenance_visible or source_authority_visible,
+                "provenance_available": provenance_visible,
+                "provenance_incomplete": not provenance_visible,
+                "attribution_visible": attribution_visible,
+                "attribution_incomplete": not attribution_visible,
+                "lineage_visible": lineage_visible,
+                "explainability_visible": explainability_visible,
+            }
+        )
+
+    boundary_count = len(boundary_entries)
+    provenance_reference_count = sum(
+        int(item["visibility"].get("provenance_visibility", {}).get("provenance_reference_count", 0) or 0)
+        for item in source_views
+    )
+    source_ownership_visible_boundary_count = sum(1 for item in boundary_entries if item["source_ownership_visible"])
+    source_authority_visible_boundary_count = sum(1 for item in boundary_entries if item["source_authority_visible"])
+    provenance_ownership_visible_boundary_count = sum(1 for item in boundary_entries if item["provenance_ownership_visible"])
+    provenance_available_boundary_count = sum(1 for item in boundary_entries if item["provenance_available"])
+    provenance_incomplete_boundary_count = sum(1 for item in boundary_entries if item["provenance_incomplete"])
+    attribution_visible_boundary_count = sum(1 for item in boundary_entries if item["attribution_visible"])
+    attribution_incomplete_boundary_count = sum(1 for item in boundary_entries if item["attribution_incomplete"])
+    lineage_visible_boundary_count = sum(1 for item in boundary_entries if item["lineage_visible"])
+    explainability_visible_boundary_count = sum(1 for item in boundary_entries if item["explainability_visible"])
+
+    ownership_complete_boundary_count = sum(
+        1 for item in boundary_entries if item["source_ownership_visible"] and item["source_authority_visible"]
+    )
+
+    return {
+        "release_6_provenance_ownership_consumption_boundary_version": 1,
+        "applicable": True,
+        "boundary_path": "governed_release_6_provenance_ownership_consumption_boundary",
+        "deterministic_boundary": True,
+        "boundary_status": "active",
+        "concierge_role": "bounded_consumer_orchestrator",
+        "source_boundaries": boundary_entries,
+        "provenance_ownership_visibility": {
+            "boundary_count": boundary_count,
+            "provenance_reference_count": provenance_reference_count,
+            "source_ownership_visible_boundary_count": source_ownership_visible_boundary_count,
+            "source_authority_visible_boundary_count": source_authority_visible_boundary_count,
+            "provenance_ownership_visible_boundary_count": provenance_ownership_visible_boundary_count,
+            "ownership_complete_boundary_count": ownership_complete_boundary_count,
+            "ownership_incomplete_boundary_count": boundary_count - ownership_complete_boundary_count,
+        },
+        "provenance_consumption_visibility": {
+            "boundary_count": boundary_count,
+            "provenance_visible": provenance_available_boundary_count > 0,
+            "provenance_available_boundary_count": provenance_available_boundary_count,
+            "provenance_unavailable_boundary_count": boundary_count - provenance_available_boundary_count,
+            "provenance_incomplete_boundary_count": provenance_incomplete_boundary_count,
+            "attribution_visible_boundary_count": attribution_visible_boundary_count,
+            "attribution_incomplete_boundary_count": attribution_incomplete_boundary_count,
+            "lineage_visible_boundary_count": lineage_visible_boundary_count,
+        },
+        "provenance_visibility": {
+            "provenance_reference_count": provenance_reference_count,
+            "provenance_visible": provenance_available_boundary_count > 0,
+        },
+        "explainability_visibility": {
+            "source_domain_visible": source_ownership_visible_boundary_count > 0,
+            "source_type_visible": source_authority_visible_boundary_count > 0,
+            "safe_fallback_visible": True,
+        },
+        "readiness_assessment": {
+            "ownership_visibility_ready": ownership_complete_boundary_count == boundary_count,
+            "attribution_visibility_ready": attribution_visible_boundary_count == boundary_count,
+            "lineage_completeness_ready": provenance_available_boundary_count == boundary_count,
+            "boundary_completeness_ready": ownership_complete_boundary_count == boundary_count
+            and attribution_visible_boundary_count == boundary_count,
+            "explainability_readiness": explainability_visible_boundary_count == boundary_count,
+        },
+        "safe_fallback_mode_active": not all(item["available"] for item in boundary_entries),
+        "safe_fallback_reason": (
+            "provenance_lineage_incomplete" if provenance_available_boundary_count < boundary_count else None
+        ),
+        "safe_fallback_visibility": {
+            "available_boundary_count": sum(1 for item in boundary_entries if item["available"]),
+            "degraded_boundary_count": sum(1 for item in boundary_entries if not item["available"]),
+            "missing_prerequisite_boundary_count": sum(1 for item in boundary_entries if not item["available"]),
+        },
+        "non_authority_assertions": {
+            "creates_source_of_record": False,
+            "stores_duplicate_canonical_records": False,
+            "claims_ownership_authority": False,
+            "claims_provenance_authority": False,
+            "claims_coordination_authority": False,
+            "claims_governance_authority": False,
+        },
+        "deferred_release_6_owners": {
+            "person_productivity_source_bindings": "#375",
+            "calendar_and_email_consumption": "#363",
+            "task_and_shopping_consumption": "#364",
+            "capture_and_knowledge_consumption": "#365",
+            "briefing_and_household_status_synthesis": "#366",
+            "productivity_diagnostics_provenance_explainability": "#367",
+            "provenance_ownership_and_consumption": "#368",
+            "household_coordination": "#369-#372",
+            "release_6_validation": "#373",
+        },
+    }
+
+
+def _build_release_6_provenance_diagnostics_explainability_boundary(
+    *,
+    state=None,
+    hass: HomeAssistant | None = None,
+    route_scope: str = "global",
+    context_area_id: str | None = None,
+    resolved_composite_id: str | None = None,
+    runtime_person_context: dict[str, Any] | None = None,
+    person_aware_productivity_routing: dict[str, Any] | None = None,
+    productivity_coordination_boundary: dict[str, Any] | None = None,
+    household_status_synthesis_boundary: dict[str, Any] | None = None,
+    household_coordination_boundary: dict[str, Any] | None = None,
+    provenance_ownership_consumption_boundary: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return governed Release 6 provenance diagnostics and explainability metadata."""
+    runtime_person_context = dict(
+        runtime_person_context
+        or {
+            "person_context_state": "person_context_unresolved",
+            "reason_code": "person_profile_not_configured",
+            "resolved_person_id": None,
+            "resolved_voice_profile_id": None,
+            "resolved_concierge_person_profile_id": None,
+        }
+    )
+    person_aware_productivity_routing = dict(
+        person_aware_productivity_routing
+        or _build_person_aware_productivity_routing(
+            state=state,
+            hass=hass,
+            runtime_person_context=runtime_person_context,
+        )
+    )
+    productivity_coordination_boundary = dict(
+        productivity_coordination_boundary
+        or _build_productivity_coordination_boundary(
+            state=state,
+            hass=hass,
+            runtime_person_context=runtime_person_context,
+            person_aware_productivity_routing=person_aware_productivity_routing,
+            route_scope=route_scope,
+            context_area_id=context_area_id,
+            resolved_composite_id=resolved_composite_id,
+        )
+    )
+    household_status_synthesis_boundary = dict(
+        household_status_synthesis_boundary
+        or _build_household_status_synthesis_boundary(
+            state=state,
+            hass=hass,
+        )
+    )
+    provenance_ownership_consumption_boundary = dict(
+        provenance_ownership_consumption_boundary
+        or _build_release_6_provenance_ownership_consumption_boundary(
+            state=state,
+            hass=hass,
+        )
+    )
+    household_coordination_boundary = dict(
+        household_coordination_boundary
+        or _build_household_coordination_boundary(
+            state=state,
+            hass=hass,
+            runtime_person_context=runtime_person_context,
+            person_aware_productivity_routing=person_aware_productivity_routing,
+            household_status_synthesis_boundary=household_status_synthesis_boundary,
+            provenance_ownership_consumption_boundary=provenance_ownership_consumption_boundary,
+            route_scope=route_scope,
+            context_area_id=context_area_id,
+            resolved_composite_id=resolved_composite_id,
+        )
+    )
+
+    source_boundaries = list(provenance_ownership_consumption_boundary.get("source_boundaries", []))
+    provenance_ownership_visibility = dict(
+        provenance_ownership_consumption_boundary.get("provenance_ownership_visibility", {})
+    )
+    provenance_consumption_visibility = dict(
+        provenance_ownership_consumption_boundary.get("provenance_consumption_visibility", {})
+    )
+    readiness_assessment = dict(
+        provenance_ownership_consumption_boundary.get("readiness_assessment", {})
+    )
+
+    provenance_reference_count = int(
+        provenance_ownership_visibility.get("provenance_reference_count", 0) or 0
+    )
+    boundary_count = int(provenance_ownership_visibility.get("boundary_count", 0) or 0)
+    lineage_completeness_ready = bool(readiness_assessment.get("lineage_completeness_ready", False))
+
+    source_boundary_inspection = [
+        {
+            "boundary_name": str(item.get("boundary_name", "") or ""),
+            "source_domain": str(item.get("source_domain", "") or ""),
+            "source_type": str(item.get("source_type", "") or ""),
+            "boundary_path": item.get("boundary_path"),
+            "source_authority_visible": bool(item.get("source_authority_visible", False)),
+            "source_ownership_visible": bool(item.get("source_ownership_visible", False)),
+            "provenance_ownership_visible": bool(item.get("provenance_ownership_visible", False)),
+            "provenance_available": bool(item.get("provenance_available", False)),
+            "attribution_visible": bool(item.get("attribution_visible", False)),
+            "lineage_visible": bool(item.get("lineage_visible", False)),
+            "explainability_visible": bool(item.get("explainability_visible", False)),
+        }
+        for item in source_boundaries
+    ]
+
+    routing_domain_inputs = {
+        domain: {
+            "enabled": bool(details.get("enabled", False)),
+            "reason_code": details.get("reason_code"),
+            "selected_source_ref": details.get("selected_source_ref"),
+            "selection_mode": details.get("selection_mode"),
+        }
+        for domain, details in dict(
+            person_aware_productivity_routing.get("domain_routing", {})
+        ).items()
+    }
+
+    return {
+        "release_6_provenance_diagnostics_explainability_boundary_version": 1,
+        "applicable": True,
+        "boundary_path": "governed_release_6_provenance_diagnostics_explainability_boundary",
+        "deterministic_boundary": True,
+        "boundary_status": "active",
+        "concierge_role": "bounded_consumer_orchestrator",
+        "consumption_only": True,
+        "informational_only": True,
+        "provenance_diagnostics": {
+            "boundary_count": boundary_count,
+            "provenance_reference_count": provenance_reference_count,
+            "ownership_visible_boundary_count": int(
+                provenance_ownership_visibility.get("source_ownership_visible_boundary_count", 0) or 0
+            ),
+            "authority_visible_boundary_count": int(
+                provenance_ownership_visibility.get("source_authority_visible_boundary_count", 0) or 0
+            ),
+            "provenance_available_boundary_count": int(
+                provenance_consumption_visibility.get("provenance_available_boundary_count", 0) or 0
+            ),
+            "provenance_incomplete_boundary_count": int(
+                provenance_consumption_visibility.get("provenance_incomplete_boundary_count", 0)
+                or 0
+            ),
+            "attribution_visible_boundary_count": int(
+                provenance_consumption_visibility.get("attribution_visible_boundary_count", 0)
+                or 0
+            ),
+            "lineage_visible_boundary_count": int(
+                provenance_consumption_visibility.get("lineage_visible_boundary_count", 0) or 0
+            ),
+            "lineage_completeness_ready": lineage_completeness_ready,
+            "safe_fallback_reason": provenance_ownership_consumption_boundary.get("safe_fallback_reason"),
+        },
+        "provenance_explainability": {
+            "source_boundary_inspection": source_boundary_inspection,
+            "source_boundary_count": len(source_boundary_inspection),
+            "productivity_inputs": {
+                "boundary_path": productivity_coordination_boundary.get("boundary_path"),
+                "coordination_state": productivity_coordination_boundary.get("coordination_state"),
+                "coordination_categories": list(
+                    productivity_coordination_boundary.get("coordination_categories", [])
+                ),
+                "domain_coordination": list(
+                    productivity_coordination_boundary.get("domain_coordination", [])
+                ),
+            },
+            "routing_inputs": {
+                "routing_enabled": bool(
+                    person_aware_productivity_routing.get("routing_enabled", False)
+                ),
+                "reason_code": person_aware_productivity_routing.get("reason_code"),
+                "active_person_state": person_aware_productivity_routing.get("active_person_state"),
+                "active_person_available": bool(
+                    person_aware_productivity_routing.get("active_person_available", False)
+                ),
+                "resolved_person_id": person_aware_productivity_routing.get("resolved_person_id"),
+                "domain_routing": routing_domain_inputs,
+            },
+            "coordination_inputs": {
+                "boundary_path": household_coordination_boundary.get("boundary_path"),
+                "coordination_state": household_coordination_boundary.get("coordination_state"),
+                "coordination_source": household_coordination_boundary.get("coordination_source"),
+                "available_contributor_count": int(
+                    household_coordination_boundary.get("available_contributor_count", 0) or 0
+                ),
+                "provenance_context": dict(
+                    household_coordination_boundary.get("provenance_context", {})
+                ),
+            },
+            "status_inputs": {
+                "boundary_path": household_status_synthesis_boundary.get("boundary_path"),
+                "household_status_available": bool(
+                    household_status_synthesis_boundary.get("household_status_available", False)
+                ),
+                "open_loop_coordination_visibility": dict(
+                    household_status_synthesis_boundary.get("open_loop_coordination_visibility", {})
+                ),
+            },
+        },
+        "runtime_person_context": {
+            "person_context_state": runtime_person_context.get("person_context_state"),
+            "reason_code": runtime_person_context.get("reason_code"),
+            "resolved_person_id": runtime_person_context.get("resolved_person_id"),
+            "resolved_voice_profile_id": runtime_person_context.get("resolved_voice_profile_id"),
+            "resolved_concierge_person_profile_id": runtime_person_context.get(
+                "resolved_concierge_person_profile_id"
+            ),
+        },
+        "governance_context": {
+            "route_scope": route_scope,
+            "context_area_id": context_area_id,
+            "resolved_composite_id": resolved_composite_id,
+        },
+        "provenance_visibility": {
+            "provenance_reference_count": provenance_reference_count,
+            "provenance_visible": provenance_reference_count > 0,
+            "lineage_completeness_ready": lineage_completeness_ready,
+        },
+        "safe_fallback_mode_active": not lineage_completeness_ready,
+        "safe_fallback_reason": (
+            "provenance_lineage_incomplete" if not lineage_completeness_ready else None
+        ),
+        "diagnostics_visibility": {
+            "provenance_visibility_supported": True,
+            "ownership_visibility_supported": True,
+            "authority_visibility_supported": True,
+            "runtime_inspection_supported": True,
+            "safe_source_metadata_only": True,
+            "sensitive_source_content_exposed": False,
+        },
+        "explainability_visibility": {
+            "source_boundary_visible": True,
+            "source_domain_visible": True,
+            "source_type_visible": True,
+            "ownership_boundary_visible": True,
+            "provenance_inputs_visible": True,
+            "routing_inputs_visible": True,
+            "coordination_inputs_visible": True,
+            "status_inputs_visible": True,
+            "runtime_person_context_visible": True,
+            "safe_fallback_visible": True,
+        },
+        "non_authority_assertions": {
+            "creates_source_of_record": False,
+            "stores_duplicate_canonical_records": False,
+            "claims_provenance_authority": False,
+            "claims_lineage_authority": False,
+            "claims_ownership_authority": False,
+            "claims_routing_authority": False,
+            "creates_planning_engine": False,
+            "creates_workflow_engine": False,
+            "redefines_identity_authority": False,
+        },
+        "deferred_release_6_owners": {
+            "person_productivity_source_bindings": "#375",
+            "calendar_and_email_consumption": "#363",
+            "task_and_shopping_consumption": "#364",
+            "capture_and_knowledge_consumption": "#365",
+            "briefing_and_household_status_synthesis": "#366",
+            "productivity_diagnostics_provenance_explainability": "#367",
+            "provenance_ownership_and_consumption": "#368",
+            "household_coordination": "#369-#372",
+            "provenance_diagnostics_and_explainability": "#372",
+            "release_6_validation": "#373",
+        },
     }
 
 
@@ -3145,9 +6260,404 @@ def _resolve_preserved_execution_target(
     return preferred_target
 
 
+def _latest_execution_envelope_ref_from_state(state) -> dict[str, Any] | None:
+    """Return latest execution-envelope reference from persisted activity history."""
+    refs: list[dict[str, Any]] = []
+    for activity in sorted(
+        state.activities.values(),
+        key=lambda item: str(getattr(item, "started_at", "")),
+        reverse=True,
+    ):
+        for ref in list(getattr(activity, "external_refs", [])):
+            if str(ref.get("ref_type", "") or "") == "execution_envelope":
+                refs.append(dict(ref))
+    return refs[0] if refs else None
+
+
+def _resolve_active_person_resolution_from_envelope(
+    latest_envelope: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Resolve active person state from consumed Voice Identity attribution fields."""
+    if latest_envelope is None:
+        return {
+            "resolution_enabled": True,
+            "active_person_state": "active_person_unavailable",
+            "active_person_available": False,
+            "resolved_person_id": None,
+            "resolved_voice_profile_id": None,
+            "attribution_available": False,
+            "identity_context_available": False,
+            "confidence_available": False,
+            "confidence_accepted": False,
+            "confidence": None,
+            "confidence_band": None,
+            "readiness_state": "unavailable",
+            "reason_code": "no_execution_envelope",
+            "resolution_posture": "fail_closed",
+            "fail_closed": True,
+            "authority_source": "voice_identity",
+            "consumption_only": True,
+        }
+
+    def _coerce_confidence(value: Any) -> float | None:
+        try:
+            if value is None:
+                return None
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    attribution_consumed = bool(latest_envelope.get("voice_identity_attribution_consumed", False))
+    attribution_state = str(latest_envelope.get("voice_identity_attribution_state", "") or "").strip().lower()
+    attribution_reason = str(latest_envelope.get("voice_identity_attribution_reason_code", "") or "").strip().lower()
+    person_id = str(latest_envelope.get("voice_identity_attribution_person_id", "") or "").strip() or None
+    voice_profile_id = str(
+        latest_envelope.get("voice_identity_attribution_voice_profile_id", "") or ""
+    ).strip() or None
+    confidence_consumed = bool(latest_envelope.get("voice_identity_confidence_consumed", False))
+    confidence_value = _coerce_confidence(latest_envelope.get("voice_identity_confidence_value"))
+    confidence_band = str(latest_envelope.get("voice_identity_confidence_band", "") or "").strip().lower() or None
+    readiness_raw = str(latest_envelope.get("voice_identity_attribution_readiness", "") or "").strip().lower()
+    readiness_state = readiness_raw or "unspecified"
+
+    ambiguous_reason_codes = {"low_confidence", "ambiguous_match"}
+    unavailable_reason_codes = {
+        "voice_identity_not_loaded",
+        "voice_identity_linkage_disabled",
+        "attribution_service_unavailable",
+        "identity_context_service_unavailable",
+        "attribution_unavailable",
+        "attribution_not_ready",
+    }
+
+    available = bool(attribution_consumed and person_id)
+    ambiguous = bool(
+        attribution_state == "low_confidence"
+        or confidence_band in {"low", "ambiguous"}
+        or attribution_reason in ambiguous_reason_codes
+    )
+    unavailable = bool(
+        (readiness_raw and readiness_raw != "ready")
+        or attribution_state == "unavailable"
+        or attribution_reason in unavailable_reason_codes
+    )
+
+    if available:
+        state = "active_person_available"
+        reason_code = attribution_reason or "attribution_ready"
+    elif ambiguous:
+        state = "active_person_ambiguous"
+        reason_code = attribution_reason or "low_confidence"
+    elif unavailable:
+        state = "active_person_unavailable"
+        reason_code = attribution_reason or "attribution_unavailable"
+    else:
+        state = "active_person_unknown"
+        reason_code = attribution_reason or "identity_unknown"
+
+    confidence_accepted = bool(
+        available
+        and confidence_consumed
+        and confidence_band not in {"low", "ambiguous", "unknown", "unavailable", "no_match"}
+    )
+
+    return {
+        "resolution_enabled": True,
+        "active_person_state": state,
+        "active_person_available": available,
+        "resolved_person_id": person_id if available else None,
+        "resolved_voice_profile_id": voice_profile_id if available else None,
+        "attribution_available": attribution_consumed,
+        "identity_context_available": attribution_state in {"known", "unknown", "low_confidence"},
+        "confidence_available": confidence_consumed,
+        "confidence_accepted": confidence_accepted,
+        "confidence": confidence_value,
+        "confidence_band": confidence_band,
+        "readiness_state": readiness_state,
+        "reason_code": reason_code,
+        "resolution_posture": "resolved" if available else "fail_closed",
+        "fail_closed": not available,
+        "authority_source": "voice_identity",
+        "consumption_only": True,
+    }
+
+
+def _resolve_active_person_resolution_from_voice_identity_consumption(
+    voice_identity_consumption: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Project active-person resolution using the voice identity consumption envelope shape."""
+    consumption = voice_identity_consumption or {}
+    attribution = dict(consumption.get("attribution", {}))
+    confidence = dict(consumption.get("confidence", {}))
+    diagnostics = dict(dict(consumption.get("diagnostics_boundary", {})).get("diagnostics", {}))
+    latest_envelope_like = {
+        "voice_identity_attribution_consumed": attribution.get("consumed"),
+        "voice_identity_attribution_state": attribution.get("state"),
+        "voice_identity_attribution_person_id": attribution.get("person_id"),
+        "voice_identity_attribution_voice_profile_id": attribution.get("voice_profile_id"),
+        "voice_identity_attribution_reason_code": attribution.get("reason_code"),
+        "voice_identity_confidence_consumed": confidence.get("consumed"),
+        "voice_identity_confidence_value": confidence.get("value"),
+        "voice_identity_confidence_band": confidence.get("band"),
+        "voice_identity_attribution_readiness": diagnostics.get("attribution_readiness"),
+    }
+    return _resolve_active_person_resolution_from_envelope(latest_envelope_like)
+
+
+def _build_person_aware_productivity_routing(
+    *,
+    state,
+    hass: HomeAssistant | None,
+    active_person_resolution: dict[str, Any] | None,
+    runtime_person_context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build person-aware productivity routing decisions with fail-closed explainability."""
+    default_active_person_resolution = {
+        "active_person_state": "active_person_unavailable",
+        "active_person_available": False,
+        "resolved_person_id": None,
+        "reason_code": "no_active_person_resolution",
+    }
+    if active_person_resolution is None and state is not None:
+        active_person_resolution = _resolve_active_person_resolution_from_envelope(
+            _latest_execution_envelope_ref_from_state(state)
+        )
+    resolved = dict(active_person_resolution or default_active_person_resolution)
+    active_person_state = str(resolved.get("active_person_state", "active_person_unavailable") or "active_person_unavailable")
+    active_person_available = bool(resolved.get("active_person_available", False))
+    resolved_person_id = str(resolved.get("resolved_person_id", "") or "").strip() or None
+    reason_code = str(resolved.get("reason_code", "no_active_person_resolution") or "no_active_person_resolution")
+
+    runtime_person_context = dict(
+        runtime_person_context
+        or _build_runtime_person_context(
+            state,
+            active_person_resolution=resolved,
+        )
+    )
+    runtime_person_context_state = str(
+        runtime_person_context.get("person_context_state", "person_context_unresolved")
+        or "person_context_unresolved"
+    )
+    runtime_person_context_reason = str(
+        runtime_person_context.get("reason_code", "person_profile_not_configured")
+        or "person_profile_not_configured"
+    )
+
+    inactive_reason = reason_code or active_person_state or "active_person_unavailable"
+    if not active_person_available or not resolved_person_id:
+        return {
+            "applicable": True,
+            "boundary_path": "governed_person_aware_productivity_routing",
+            "consumption_only": True,
+            "routing_enabled": False,
+            "reason_code": inactive_reason,
+            "active_person_state": active_person_state,
+            "active_person_available": active_person_available,
+            "resolved_person_id": None,
+            "runtime_person_context": runtime_person_context,
+            "domain_routing": {
+                "email": {
+                    "enabled": False,
+                    "reason_code": inactive_reason,
+                    "selected_person_id": None,
+                    "selected_source_ref": None,
+                    "selection_mode": "disabled",
+                },
+                "calendar": {
+                    "enabled": False,
+                    "reason_code": inactive_reason,
+                    "selected_person_id": None,
+                    "selected_source_ref": None,
+                    "selection_mode": "disabled",
+                },
+                "task": {
+                    "enabled": False,
+                    "reason_code": inactive_reason,
+                    "selected_person_id": None,
+                    "selected_source_ref": None,
+                    "selection_mode": "disabled",
+                },
+                "shopping": {
+                    "enabled": False,
+                    "reason_code": inactive_reason,
+                    "selected_person_id": None,
+                    "selected_source_ref": None,
+                    "selection_mode": "disabled",
+                },
+            },
+            "non_authority_assertions": {
+                "creates_source_of_record": False,
+                "infers_hidden_intent": False,
+                "derives_identity_authority": False,
+            },
+        }
+
+    if runtime_person_context_state == "person_context_unresolved":
+        return {
+            "applicable": True,
+            "boundary_path": "governed_person_aware_productivity_routing",
+            "consumption_only": True,
+            "routing_enabled": False,
+            "reason_code": runtime_person_context_reason,
+            "active_person_state": active_person_state,
+            "active_person_available": active_person_available,
+            "resolved_person_id": resolved_person_id,
+            "runtime_person_context": runtime_person_context,
+            "domain_routing": {
+                domain: {
+                    "enabled": False,
+                    "reason_code": runtime_person_context_reason,
+                    "selected_person_id": resolved_person_id,
+                    "selected_source_ref": None,
+                    "selection_mode": "disabled",
+                }
+                for domain in ["email", "calendar", "task", "shopping"]
+            },
+            "non_authority_assertions": {
+                "creates_source_of_record": False,
+                "infers_hidden_intent": False,
+                "derives_identity_authority": False,
+            },
+        }
+
+    if runtime_person_context_state == "person_context_partial":
+        return {
+            "applicable": True,
+            "boundary_path": "governed_person_aware_productivity_routing",
+            "consumption_only": True,
+            "routing_enabled": False,
+            "reason_code": runtime_person_context_reason,
+            "active_person_state": active_person_state,
+            "active_person_available": active_person_available,
+            "resolved_person_id": resolved_person_id,
+            "runtime_person_context": runtime_person_context,
+            "domain_routing": {
+                domain: {
+                    "enabled": False,
+                    "reason_code": runtime_person_context_reason,
+                    "selected_person_id": resolved_person_id,
+                    "selected_source_ref": None,
+                    "selection_mode": "disabled",
+                }
+                for domain in ["email", "calendar", "task", "shopping"]
+            },
+            "non_authority_assertions": {
+                "creates_source_of_record": False,
+                "infers_hidden_intent": False,
+                "derives_identity_authority": False,
+            },
+        }
+
+    productivity_context = dict(runtime_person_context.get("productivity", {}))
+
+    def _resolve_calendar_email(domain: str, source_ref: str) -> dict[str, Any]:
+        selected_source_ref = source_ref or None
+        if not selected_source_ref:
+            return {
+                "enabled": False,
+                "reason_code": "source_missing_or_configuration_incomplete",
+                "selected_person_id": resolved_person_id,
+                "selected_source_ref": None,
+                "selection_mode": "disabled",
+            }
+        entity_exists = bool(hass and hass.states.get(selected_source_ref) is not None)
+        if not entity_exists:
+            return {
+                "enabled": False,
+                "reason_code": "source_unavailable_or_removed",
+                "selected_person_id": resolved_person_id,
+                "selected_source_ref": selected_source_ref,
+                "selection_mode": "disabled",
+            }
+        return {
+            "enabled": True,
+            "reason_code": "person_source_selected",
+            "selected_person_id": resolved_person_id,
+            "selected_source_ref": selected_source_ref,
+            "selection_mode": "person_binding",
+        }
+
+    email_routing = _resolve_calendar_email(
+        "email",
+        str(productivity_context.get("email_source_refs", [""])[0] if productivity_context.get("email_source_refs") else "").strip(),
+    )
+    calendar_routing = _resolve_calendar_email(
+        "calendar",
+        str(productivity_context.get("calendar_source_refs", [""])[0] if productivity_context.get("calendar_source_refs") else "").strip(),
+    )
+
+    shopping_source_ref = str(productivity_context.get("shopping_source_refs", [""])[0] if productivity_context.get("shopping_source_refs") else "").strip()
+    if shopping_source_ref:
+        shopping_routing = {
+            "enabled": True,
+            "reason_code": "person_source_selected",
+            "selected_person_id": resolved_person_id,
+            "selected_source_ref": shopping_source_ref,
+            "selection_mode": "person_binding",
+        }
+    else:
+        shopping_routing = {
+            "enabled": False,
+            "reason_code": "source_missing_or_configuration_incomplete",
+            "selected_person_id": resolved_person_id,
+            "selected_source_ref": None,
+            "selection_mode": "disabled",
+        }
+
+    task_source_ref = str(
+        productivity_context.get("task_source_refs", [""])[0]
+        if productivity_context.get("task_source_refs")
+        else ""
+    ).strip()
+    if task_source_ref:
+        task_routing = {
+            "enabled": True,
+            "reason_code": "person_source_selected",
+            "selected_person_id": resolved_person_id,
+            "selected_source_ref": task_source_ref,
+            "selection_mode": "person_binding",
+        }
+    else:
+        task_routing = {
+            "enabled": True,
+            "reason_code": "person_scope_selected",
+            "selected_person_id": resolved_person_id,
+            "selected_source_ref": None,
+            "selection_mode": "person_scope_only",
+        }
+
+    domain_routing = {
+        "email": email_routing,
+        "calendar": calendar_routing,
+        "task": task_routing,
+        "shopping": shopping_routing,
+    }
+    enabled_any = any(bool(item.get("enabled", False)) for item in domain_routing.values())
+
+    return {
+        "applicable": True,
+        "boundary_path": "governed_person_aware_productivity_routing",
+        "consumption_only": True,
+        "routing_enabled": enabled_any,
+        "reason_code": "person_routing_available" if enabled_any else "person_routing_sources_unavailable",
+        "active_person_state": active_person_state,
+        "active_person_available": active_person_available,
+        "resolved_person_id": resolved_person_id,
+        "runtime_person_context": runtime_person_context,
+        "domain_routing": domain_routing,
+        "non_authority_assertions": {
+            "creates_source_of_record": False,
+            "infers_hidden_intent": False,
+            "derives_identity_authority": False,
+        },
+    }
+
+
 def _build_execute_envelope(
     state,
     *,
+    hass: HomeAssistant,
     requested_area_id: str | None,
     call: ServiceCall,
     capabilities: dict[str, Any],
@@ -3159,6 +6669,7 @@ def _build_execute_envelope(
     domain: str,
     service: str,
     data: dict[str, Any],
+    runtime_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a bounded execution envelope for orchestration requests."""
     fallback_status = _context_fallback_status(
@@ -3297,7 +6808,84 @@ def _build_execute_envelope(
         resolved_target=resolved_target,
     )
     voice_identity_consumption = _build_voice_identity_attribution_confidence_consumption(
-        raw_context=call.data.get("context"),
+        raw_context=runtime_context if runtime_context is not None else call.data.get("context"),
+    )
+    active_person_resolution = _resolve_active_person_resolution_from_voice_identity_consumption(
+        voice_identity_consumption
+    )
+    runtime_person_context = _build_runtime_person_context(
+        state,
+        active_person_resolution=active_person_resolution,
+    )
+    productivity_source_of_record_boundary = _build_productivity_source_of_record_boundary(
+        state=state,
+        hass=hass,
+        active_person_resolution=active_person_resolution,
+        runtime_person_context=runtime_person_context,
+    )
+    calendar_email_consumption_boundary = _build_calendar_email_consumption_boundary(
+        state=state,
+        hass=hass,
+        active_person_resolution=active_person_resolution,
+        runtime_person_context=runtime_person_context,
+    )
+    task_shopping_consumption_boundary = _build_task_shopping_consumption_boundary(
+        state=state,
+        hass=hass,
+        active_person_resolution=active_person_resolution,
+        runtime_person_context=runtime_person_context,
+    )
+    household_status_synthesis_boundary = _build_household_status_synthesis_boundary(
+        state=state,
+        hass=hass,
+    )
+    provenance_ownership_consumption_boundary = _build_release_6_provenance_ownership_consumption_boundary(
+        state=state,
+        hass=hass,
+    )
+    person_aware_productivity_routing = _build_person_aware_productivity_routing(
+        state=state,
+        hass=hass,
+        active_person_resolution=active_person_resolution,
+        runtime_person_context=runtime_person_context,
+    )
+    household_coordination_boundary = _build_household_coordination_boundary(
+        state=state,
+        hass=hass,
+        active_person_resolution=active_person_resolution,
+        runtime_person_context=runtime_person_context,
+        person_aware_productivity_routing=person_aware_productivity_routing,
+        household_status_synthesis_boundary=household_status_synthesis_boundary,
+        provenance_ownership_consumption_boundary=provenance_ownership_consumption_boundary,
+        route_scope=route_scope,
+        context_area_id=assembled_context.get("context_area_id"),
+        resolved_composite_id=assembled_context.get("resolved_composite_id"),
+    )
+    productivity_coordination_boundary = _build_productivity_coordination_boundary(
+        state=state,
+        hass=hass,
+        active_person_resolution=active_person_resolution,
+        runtime_person_context=runtime_person_context,
+        person_aware_productivity_routing=person_aware_productivity_routing,
+        calendar_email_consumption_boundary=calendar_email_consumption_boundary,
+        task_shopping_consumption_boundary=task_shopping_consumption_boundary,
+        provenance_ownership_consumption_boundary=provenance_ownership_consumption_boundary,
+        route_scope=route_scope,
+        context_area_id=assembled_context.get("context_area_id"),
+        resolved_composite_id=assembled_context.get("resolved_composite_id"),
+    )
+    provenance_diagnostics_explainability_boundary = _build_release_6_provenance_diagnostics_explainability_boundary(
+        state=state,
+        hass=hass,
+        route_scope=route_scope,
+        context_area_id=assembled_context.get("context_area_id"),
+        resolved_composite_id=assembled_context.get("resolved_composite_id"),
+        runtime_person_context=runtime_person_context,
+        person_aware_productivity_routing=person_aware_productivity_routing,
+        productivity_coordination_boundary=productivity_coordination_boundary,
+        household_status_synthesis_boundary=household_status_synthesis_boundary,
+        household_coordination_boundary=household_coordination_boundary,
+        provenance_ownership_consumption_boundary=provenance_ownership_consumption_boundary,
     )
     return {
         "envelope_version": 1,
@@ -3334,6 +6922,15 @@ def _build_execute_envelope(
         "experience_restoration_outcome": experience_restoration_outcome,
         "e3a_preservation_alignment": e3a_preservation_alignment,
         "voice_identity_attribution_confidence_consumption": voice_identity_consumption,
+        "active_person_resolution": active_person_resolution,
+        "runtime_person_context": runtime_person_context,
+        "person_aware_productivity_routing": person_aware_productivity_routing,
+        "productivity_source_of_record_boundary": productivity_source_of_record_boundary,
+        "calendar_email_consumption_boundary": calendar_email_consumption_boundary,
+        "task_shopping_consumption_boundary": task_shopping_consumption_boundary,
+        "productivity_coordination_boundary": productivity_coordination_boundary,
+        "household_coordination_boundary": household_coordination_boundary,
+        "provenance_diagnostics_explainability_boundary": provenance_diagnostics_explainability_boundary,
         "planning": {
             "plan_kind": plan_kind,
             "target_type": target_type,
@@ -5447,6 +9044,16 @@ def _build_execution_envelope_ref(execution_envelope: dict[str, Any]) -> dict[st
     voice_identity_explainability = dict(
         voice_identity_explainability_boundary.get("explainability", {})
     )
+    person_aware_productivity_routing = dict(
+        execution_envelope.get("person_aware_productivity_routing", {})
+    )
+    person_aware_domain_routing = dict(
+        person_aware_productivity_routing.get("domain_routing", {})
+    )
+    person_aware_calendar = dict(person_aware_domain_routing.get("calendar", {}))
+    person_aware_email = dict(person_aware_domain_routing.get("email", {}))
+    person_aware_task = dict(person_aware_domain_routing.get("task", {}))
+    person_aware_shopping = dict(person_aware_domain_routing.get("shopping", {}))
     selected_outcome_raw = restoration_outcome.get("selected_outcome", {})
     selected_outcome = selected_outcome_raw if isinstance(selected_outcome_raw, dict) else {}
     continuity_constraints = dict(continuity.get("orchestration_constraints", {}))
@@ -5735,6 +9342,8 @@ def _build_execution_envelope_ref(execution_envelope: dict[str, Any]) -> dict[st
             voice_identity_attribution.get("consumed", False)
         ),
         "voice_identity_attribution_state": voice_identity_attribution.get("state"),
+        "voice_identity_attribution_person_id": voice_identity_attribution.get("person_id"),
+        "voice_identity_attribution_voice_profile_id": voice_identity_attribution.get("voice_profile_id"),
         "voice_identity_attribution_reason_code": voice_identity_attribution.get("reason_code"),
         "voice_identity_confidence_consumed": bool(
             voice_identity_confidence.get("consumed", False)
@@ -5931,6 +9540,23 @@ def _build_execution_envelope_ref(execution_envelope: dict[str, Any]) -> dict[st
         "voice_identity_explainability_legacy_disposition_source": voice_identity_explainability.get("legacy_disposition_source"),
         "voice_identity_explainability_unavailable_state": voice_identity_explainability.get("unavailable_state"),
         "voice_identity_explainability_reason_code": voice_identity_explainability.get("reason_code"),
+        "person_aware_productivity_routing_enabled": bool(
+            person_aware_productivity_routing.get("routing_enabled", False)
+        ),
+        "person_aware_productivity_routing_reason_code": person_aware_productivity_routing.get("reason_code"),
+        "person_aware_productivity_active_person_state": person_aware_productivity_routing.get("active_person_state"),
+        "person_aware_productivity_active_person_available": bool(
+            person_aware_productivity_routing.get("active_person_available", False)
+        ),
+        "person_aware_productivity_resolved_person_id": person_aware_productivity_routing.get("resolved_person_id"),
+        "person_aware_calendar_routing_enabled": bool(person_aware_calendar.get("enabled", False)),
+        "person_aware_calendar_routing_reason_code": person_aware_calendar.get("reason_code"),
+        "person_aware_email_routing_enabled": bool(person_aware_email.get("enabled", False)),
+        "person_aware_email_routing_reason_code": person_aware_email.get("reason_code"),
+        "person_aware_task_routing_enabled": bool(person_aware_task.get("enabled", False)),
+        "person_aware_task_routing_reason_code": person_aware_task.get("reason_code"),
+        "person_aware_shopping_routing_enabled": bool(person_aware_shopping.get("enabled", False)),
+        "person_aware_shopping_routing_reason_code": person_aware_shopping.get("reason_code"),
         "voice_identity_generates_explainability_authority": bool(
             voice_identity_explainability_boundary.get("generate_explainability_authority", False)
         ),
@@ -6350,6 +9976,7 @@ async def _async_resolve_integration_capabilities(hass: HomeAssistant) -> dict[s
                 "asset_intelligence_provider": _PROVIDER_NONE,
                 "archive_ready": False,
                 "voice_identity_ready": False,
+                "voice_identity_linked": False,
                 "voice_enrollment_reason_code": "concierge_not_configured",
             },
         }
@@ -6387,13 +10014,29 @@ async def _async_resolve_integration_capabilities(hass: HomeAssistant) -> dict[s
     cap_extended_history = bool(
         archive_options.get("destination_configured") and archive_options.get("archive_enabled")
     )
-    voice_identity_status = await async_get_voice_identity_enrollment_status(hass)
+    voice_identity_linked = bool(
+        options.get(
+            CONF_VOICE_IDENTITY_LINKED,
+            data.get(CONF_VOICE_IDENTITY_LINKED, False),
+        )
+    )
+    if voice_identity_linked:
+        voice_identity_status = await async_get_voice_identity_enrollment_status(hass)
+    else:
+        voice_identity_status = {
+            "voice_enrollment_enabled": False,
+            "voice_enrollment_reason_code": "voice_identity_linkage_disabled",
+            "voice_enrollment_status_summary": "Voice enrollment is unavailable because Voice Identity linkage is disabled.",
+        }
     voice_identity_ready = bool(voice_identity_status.get("voice_enrollment_enabled", False))
-    cap_voice_enrollment = bool(archive_ready and voice_identity_ready)
+    cap_voice_enrollment = bool(archive_ready and voice_identity_linked and voice_identity_ready)
 
     if not archive_ready:
         reason_code = "archive_not_configured"
         status_summary = "Voice enrollment requires attached storage and archive export to be enabled in Concierge options."
+    elif not voice_identity_linked:
+        reason_code = "voice_identity_linkage_disabled"
+        status_summary = "Voice enrollment is unavailable because Voice Identity linkage is disabled."
     elif not voice_identity_ready:
         reason_code = str(voice_identity_status.get("voice_enrollment_reason_code", "voice_identity_unavailable"))
         status_summary = str(
@@ -6424,6 +10067,7 @@ async def _async_resolve_integration_capabilities(hass: HomeAssistant) -> dict[s
             "asset_intelligence_provider": asset_intelligence_provider,
             "archive_ready": archive_ready,
             "voice_identity_ready": voice_identity_ready,
+            "voice_identity_linked": voice_identity_linked,
             "voice_enrollment_reason_code": reason_code,
         },
     }
@@ -6465,11 +10109,55 @@ def _enforce_minor_intent_policy(
         raise vol.Invalid("minor_policy_denied: intent_class_not_allowed")
 
 
+async def _async_update_person_context_repairs(
+    hass: HomeAssistant,
+    *,
+    execution_envelope: dict[str, Any],
+) -> None:
+    """Publish or clear person-context fail-closed repair hints from execution outcomes."""
+    routing = dict(execution_envelope.get("person_aware_productivity_routing", {}))
+    runtime_person_context = dict(execution_envelope.get("runtime_person_context", {}))
+    active_person_resolution = dict(execution_envelope.get("active_person_resolution", {}))
+
+    routing_enabled = bool(routing.get("routing_enabled", False))
+    reason_code = str(
+        routing.get("reason_code")
+        or runtime_person_context.get("reason_code")
+        or active_person_resolution.get("reason_code")
+        or "unknown"
+    ).strip().lower() or "unknown"
+
+    if routing_enabled:
+        await async_clear_person_context_issue(hass)
+        return
+
+    await async_create_or_update_person_context_issue(
+        hass,
+        person_context_state=str(
+            runtime_person_context.get("person_context_state", "person_context_unresolved")
+            or "person_context_unresolved"
+        ).strip().lower(),
+        reason_code=reason_code,
+        active_person_state=str(
+            active_person_resolution.get("active_person_state", "active_person_unavailable")
+            or "active_person_unavailable"
+        ).strip().lower(),
+        resolved_person_id=str(
+            active_person_resolution.get("resolved_person_id")
+            or runtime_person_context.get("resolved_person_id")
+            or ""
+        ).strip() or None,
+    )
+
+
 async def _async_handle_execute(hass: HomeAssistant, call: ServiceCall) -> dict[str, Any]:
     """Execute an orchestration target using deterministic hierarchy."""
     storage = ConciergeStorage(hass)
     state = await storage.async_load_state()
     capabilities = await _async_resolve_integration_capabilities(hass)
+    voice_identity_linked = bool(
+        capabilities.get("input_snapshot", {}).get("voice_identity_linked", False)
+    )
 
     area_id = call.data.get("area_id")
     composite_id = call.data.get("composite_id")
@@ -6567,8 +10255,22 @@ async def _async_handle_execute(hass: HomeAssistant, call: ServiceCall) -> dict[
             service = "turn_on"
             data = {"entity_id": resolved_target}
 
+        raw_context = call.data.get("context")
+        runtime_context: dict[str, Any]
+        if _context_requires_voice_identity_runtime_invocation(raw_context):
+            runtime_context = await _async_consume_voice_identity_runtime_context(
+                hass,
+                raw_context=raw_context,
+                voice_identity_linked=voice_identity_linked,
+            )
+        elif isinstance(raw_context, dict):
+            runtime_context = dict(raw_context)
+        else:
+            runtime_context = {}
+
         execution_envelope = _build_execute_envelope(
             state,
+            hass=hass,
             requested_area_id=area_id,
             call=call,
             capabilities=capabilities,
@@ -6580,6 +10282,12 @@ async def _async_handle_execute(hass: HomeAssistant, call: ServiceCall) -> dict[
             domain=domain,
             service=service,
             data=data,
+            runtime_context=runtime_context,
+        )
+
+        await _async_update_person_context_repairs(
+            hass,
+            execution_envelope=execution_envelope,
         )
 
         await hass.services.async_call(domain, service, data, blocking=True)
@@ -6589,7 +10297,7 @@ async def _async_handle_execute(hass: HomeAssistant, call: ServiceCall) -> dict[
             "resolved_target": resolved_target,
             "area_id": area_id,
             "composite_id": composite_id,
-            "context": call.data.get("context", {}),
+            "context": runtime_context,
             "execution_envelope": execution_envelope,
         }
         hass.bus.async_fire(EVENT_EXECUTION, payload)
@@ -7136,6 +10844,22 @@ async def _async_handle_update_person_profile(
 
     async def _runner() -> dict[str, Any]:
         storage = ConciergeStorage(hass)
+        email_source_bindings = _normalize_source_binding_rows(
+            call.data.get("email_source_bindings", []),
+            call.data.get("email_source_ref", ""),
+        )
+        calendar_source_bindings = _normalize_source_binding_rows(
+            call.data.get("calendar_source_bindings", []),
+            call.data.get("calendar_source_ref", ""),
+        )
+        shopping_source_bindings = _normalize_source_binding_rows(
+            call.data.get("shopping_source_bindings", []),
+            call.data.get("shopping_source_ref", ""),
+        )
+        task_source_bindings = _normalize_source_binding_rows(
+            call.data.get("task_source_bindings", []),
+            call.data.get("task_source_ref", ""),
+        )
         profile = PersonProfile(
             person_id=call.data["person_id"],
             name=call.data["name"],
@@ -7152,6 +10876,14 @@ async def _async_handle_update_person_profile(
             minor_allow_general_qna=minor_allow_general_qna,
             minor_allowed_intent_classes=minor_allowed_intent_classes,
             minor_content_filter_level=minor_content_filter_level,
+            email_source_ref=email_source_bindings[0]["entity_id"] if email_source_bindings else "",
+            calendar_source_ref=calendar_source_bindings[0]["entity_id"] if calendar_source_bindings else "",
+            task_source_ref=task_source_bindings[0]["entity_id"] if task_source_bindings else "",
+            shopping_source_ref=shopping_source_bindings[0]["entity_id"] if shopping_source_bindings else "",
+            email_source_bindings=email_source_bindings,
+            calendar_source_bindings=calendar_source_bindings,
+            task_source_bindings=task_source_bindings,
+            shopping_source_bindings=shopping_source_bindings,
             notes=call.data.get("notes", ""),
         )
         state = await storage.async_update_person_profile(
@@ -8069,6 +11801,102 @@ async def _async_handle_get_summary(hass: HomeAssistant, call: ServiceCall) -> d
         requested_target=None,
         resolved_target=None,
     )
+    latest_execution_ref = _latest_execution_envelope_ref_from_state(state)
+    active_person_resolution = _resolve_active_person_resolution_from_envelope(latest_execution_ref)
+    runtime_person_context = _build_runtime_person_context(
+        state,
+        active_person_resolution=active_person_resolution,
+    )
+    productivity_source_of_record_boundary = _build_productivity_source_of_record_boundary(
+        state=state,
+        hass=hass,
+        active_person_resolution=active_person_resolution,
+        runtime_person_context=runtime_person_context,
+    )
+    calendar_email_consumption_boundary = _build_calendar_email_consumption_boundary(
+        state=state,
+        hass=hass,
+        active_person_resolution=active_person_resolution,
+        runtime_person_context=runtime_person_context,
+    )
+    task_shopping_consumption_boundary = _build_task_shopping_consumption_boundary(
+        state=state,
+        hass=hass,
+        active_person_resolution=active_person_resolution,
+        runtime_person_context=runtime_person_context,
+    )
+    capture_knowledge_consumption_boundary = _build_capture_knowledge_consumption_boundary(
+        state=state,
+        hass=hass,
+    )
+    briefing_composition_boundary = _build_briefing_composition_boundary(
+        state=state,
+        hass=hass,
+    )
+    household_status_synthesis_boundary = _build_household_status_synthesis_boundary(
+        state=state,
+        hass=hass,
+    )
+    provenance_ownership_consumption_boundary = _build_release_6_provenance_ownership_consumption_boundary(
+        state=state,
+        hass=hass,
+    )
+    person_aware_productivity_routing = _build_person_aware_productivity_routing(
+        state=state,
+        hass=hass,
+        active_person_resolution=active_person_resolution,
+        runtime_person_context=runtime_person_context,
+    )
+    household_coordination_boundary = _build_household_coordination_boundary(
+        state=state,
+        hass=hass,
+        active_person_resolution=active_person_resolution,
+        runtime_person_context=runtime_person_context,
+        person_aware_productivity_routing=person_aware_productivity_routing,
+        household_status_synthesis_boundary=household_status_synthesis_boundary,
+        provenance_ownership_consumption_boundary=provenance_ownership_consumption_boundary,
+        route_scope=(
+            "composite"
+            if assembled_context.get("resolved_composite_id")
+            else ("room" if assembled_context.get("context_area_id") else "global")
+        ),
+        context_area_id=assembled_context.get("context_area_id"),
+        resolved_composite_id=assembled_context.get("resolved_composite_id"),
+    )
+    productivity_coordination_boundary = _build_productivity_coordination_boundary(
+        state=state,
+        hass=hass,
+        active_person_resolution=active_person_resolution,
+        runtime_person_context=runtime_person_context,
+        calendar_email_consumption_boundary=calendar_email_consumption_boundary,
+        task_shopping_consumption_boundary=task_shopping_consumption_boundary,
+        capture_knowledge_consumption_boundary=capture_knowledge_consumption_boundary,
+        provenance_ownership_consumption_boundary=provenance_ownership_consumption_boundary,
+        route_scope=(
+            "composite"
+            if assembled_context.get("resolved_composite_id")
+            else ("room" if assembled_context.get("context_area_id") else "global")
+        ),
+        context_area_id=assembled_context.get("context_area_id"),
+        resolved_composite_id=assembled_context.get("resolved_composite_id"),
+    )
+    provenance_diagnostics_explainability_boundary = _build_release_6_provenance_diagnostics_explainability_boundary(
+        state=state,
+        hass=hass,
+        route_scope=(
+            "composite"
+            if assembled_context.get("resolved_composite_id")
+            else ("room" if assembled_context.get("context_area_id") else "global")
+        ),
+        context_area_id=assembled_context.get("context_area_id"),
+        resolved_composite_id=assembled_context.get("resolved_composite_id"),
+        runtime_person_context=runtime_person_context,
+        person_aware_productivity_routing=person_aware_productivity_routing,
+        productivity_coordination_boundary=productivity_coordination_boundary,
+        household_status_synthesis_boundary=household_status_synthesis_boundary,
+        household_coordination_boundary=household_coordination_boundary,
+        provenance_ownership_consumption_boundary=provenance_ownership_consumption_boundary,
+    )
     return {
         "summary": assembled_context["summary"],
         "area_id": call.data.get("area_id"),
@@ -8089,6 +11917,21 @@ async def _async_handle_get_summary(hass: HomeAssistant, call: ServiceCall) -> d
         "occupancy_governance_boundary": occupancy_governance_boundary,
         "presence_governance_boundary": presence_governance_boundary,
         "guest_unknown_occupant_behavior": guest_unknown_occupant_behavior,
+        "productivity_source_of_record_boundary": productivity_source_of_record_boundary,
+        "calendar_email_consumption_boundary": calendar_email_consumption_boundary,
+        "task_shopping_consumption_boundary": task_shopping_consumption_boundary,
+        "capture_knowledge_consumption_boundary": capture_knowledge_consumption_boundary,
+        "briefing_composition_boundary": briefing_composition_boundary,
+        "productivity_coordination_boundary": productivity_coordination_boundary,
+        "household_status_synthesis_boundary": household_status_synthesis_boundary,
+        "provenance_ownership_consumption_boundary": provenance_ownership_consumption_boundary,
+        "household_coordination_boundary": household_coordination_boundary,
+        "provenance_diagnostics_explainability_boundary": provenance_diagnostics_explainability_boundary,
+        "active_person_resolution": active_person_resolution,
+        "runtime_person_context": runtime_person_context,
+        "active_person_state": active_person_resolution["active_person_state"],
+        "active_person_reason_code": active_person_resolution["reason_code"],
+        "active_person_available": active_person_resolution["active_person_available"],
         "experience_governance_boundary": experience_governance_boundary,
         "capability_to_experience_handoff": capability_to_experience_handoff,
         "experience_projection": experience_projection,

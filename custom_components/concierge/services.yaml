@@ -319,6 +319,21 @@ update_person_profile:
       required: false
       selector:
         text:
+    email_source_ref:
+      name: Email Source Reference
+      required: false
+      selector:
+        text:
+    calendar_source_ref:
+      name: Calendar Source Reference
+      required: false
+      selector:
+        text:
+    shopping_source_ref:
+      name: Shopping Source Reference
+      required: false
+      selector:
+        text:
     consent:
       name: Consent
       required: false

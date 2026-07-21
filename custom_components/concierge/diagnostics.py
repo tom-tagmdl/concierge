@@ -18,6 +18,19 @@ from .enrollment_orchestrator import resolve_enrollment_storage_provider_from_en
 from .enrollment_storage import MountedPathEnrollmentStorageProvider
 from .enrollment_telemetry import build_operational_telemetry
 from .services import _assemble_foundation_context
+from .services import _build_capture_knowledge_consumption_boundary
+from .services import _build_calendar_email_consumption_boundary
+from .services import _build_briefing_composition_boundary
+from .services import _build_household_coordination_boundary
+from .services import _build_household_status_synthesis_boundary
+from .services import _build_person_aware_productivity_routing
+from .services import _build_productivity_coordination_boundary
+from .services import _build_productivity_source_of_record_boundary
+from .services import _build_release_6_provenance_diagnostics_explainability_boundary
+from .services import _build_release_6_provenance_ownership_consumption_boundary
+from .services import _build_runtime_person_context
+from .services import _build_task_shopping_consumption_boundary
+from .voice_identity_bridge import async_get_voice_identity_enrollment_status
 from .storage import ConciergeStorage
 
 
@@ -91,6 +104,54 @@ def _repairs_health(hass: HomeAssistant) -> dict[str, Any]:
     return {
         "active_repairs_issue_count": len(active_types),
         "active_repairs_issue_types": active_types,
+    }
+
+
+async def _voice_identity_linkage_setup_boundary_visibility(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry,
+) -> dict[str, Any]:
+    linked = bool(
+        config_entry.options.get(
+            "voice_identity_linked",
+            config_entry.data.get("voice_identity_linked", False),
+        )
+    )
+    voice_identity_loaded = isinstance(hass.data.get("voice_identity"), dict)
+
+    if not linked:
+        return {
+            "linkage_configured": False,
+            "voice_identity_loaded": voice_identity_loaded,
+            "voice_identity_connected": False,
+            "voice_identity_available": False,
+            "voice_identity_compatible": False,
+            "voice_identity_discovery_state": "unavailable",
+            "voice_identity_enabled_capabilities": (),
+            "voice_identity_supported_capabilities": (),
+            "voice_identity_reason_code": "voice_identity_linkage_disabled",
+            "voice_identity_status_summary": "Voice Identity linkage is disabled in Concierge options.",
+            "safe_fallback_mode_active": True,
+        }
+
+    voice_identity_status = await async_get_voice_identity_enrollment_status(hass)
+    return {
+        "linkage_configured": True,
+        "voice_identity_loaded": voice_identity_loaded,
+        "voice_identity_connected": bool(voice_identity_status.get("voice_identity_connected", False)),
+        "voice_identity_available": bool(voice_identity_status.get("voice_identity_available", False)),
+        "voice_identity_compatible": bool(voice_identity_status.get("voice_identity_compatible", False)),
+        "voice_identity_discovery_state": str(voice_identity_status.get("voice_identity_discovery_state", "unavailable")),
+        "voice_identity_enabled_capabilities": tuple(voice_identity_status.get("voice_identity_enabled_capabilities", ())),
+        "voice_identity_supported_capabilities": tuple(voice_identity_status.get("voice_identity_supported_capabilities", ())),
+        "voice_identity_reason_code": str(voice_identity_status.get("voice_enrollment_reason_code", "voice_identity_unavailable")),
+        "voice_identity_status_summary": str(
+            voice_identity_status.get(
+                "voice_enrollment_status_summary",
+                "Voice Identity linkage is unavailable.",
+            )
+        ),
+        "safe_fallback_mode_active": not bool(voice_identity_status.get("voice_enrollment_enabled", False)),
     }
 
 
@@ -698,6 +759,98 @@ def _voice_identity_consumption_boundary_visibility(state) -> dict[str, Any]:
 
     latest_envelope = execution_envelope_refs[0] if execution_envelope_refs else None
 
+    active_person_resolution_visibility = {
+        "active_person_state": "active_person_unavailable",
+        "active_person_available": False,
+        "resolved_person_id": None,
+        "resolved_voice_profile_id": None,
+        "attribution_available": False,
+        "confidence_available": False,
+        "confidence_accepted": False,
+        "confidence_value": None,
+        "confidence_band": None,
+        "readiness_state": "unavailable",
+        "reason_code": "no_execution_envelope",
+        "resolution_posture": "fail_closed",
+        "fail_closed": True,
+        "authority_source": "voice_identity",
+        "consumption_only": True,
+    }
+
+    if latest_envelope is not None:
+        attribution_consumed = bool(latest_envelope.get("voice_identity_attribution_consumed", False))
+        attribution_state = str(latest_envelope.get("voice_identity_attribution_state", "") or "").strip().lower()
+        attribution_reason = str(latest_envelope.get("voice_identity_attribution_reason_code", "") or "").strip().lower()
+        person_id = str(latest_envelope.get("voice_identity_attribution_person_id", "") or "").strip() or None
+        voice_profile_id = str(
+            latest_envelope.get("voice_identity_attribution_voice_profile_id", "") or ""
+        ).strip() or None
+        confidence_consumed = bool(latest_envelope.get("voice_identity_confidence_consumed", False))
+        confidence_value = latest_envelope.get("voice_identity_confidence_value")
+        try:
+            confidence_value = float(confidence_value) if confidence_value is not None else None
+        except (TypeError, ValueError):
+            confidence_value = None
+        confidence_band = str(latest_envelope.get("voice_identity_confidence_band", "") or "").strip().lower() or None
+        readiness_raw = str(latest_envelope.get("voice_identity_attribution_readiness", "") or "").strip().lower()
+        readiness_state = readiness_raw or "unspecified"
+
+        ambiguous = bool(
+            attribution_state == "low_confidence"
+            or confidence_band in {"low", "ambiguous"}
+            or attribution_reason in {"low_confidence", "ambiguous_match"}
+        )
+        unavailable = bool(
+            (readiness_raw and readiness_raw != "ready")
+            or attribution_state == "unavailable"
+            or attribution_reason in {
+                "voice_identity_not_loaded",
+                "voice_identity_linkage_disabled",
+                "attribution_service_unavailable",
+                "identity_context_service_unavailable",
+                "attribution_unavailable",
+                "attribution_not_ready",
+            }
+        )
+        available = bool(attribution_consumed and person_id)
+
+        if available:
+            resolution_state = "active_person_available"
+            reason_code = attribution_reason or "attribution_ready"
+        elif ambiguous:
+            resolution_state = "active_person_ambiguous"
+            reason_code = attribution_reason or "low_confidence"
+        elif unavailable:
+            resolution_state = "active_person_unavailable"
+            reason_code = attribution_reason or "attribution_unavailable"
+        else:
+            resolution_state = "active_person_unknown"
+            reason_code = attribution_reason or "identity_unknown"
+
+        confidence_accepted = bool(
+            available
+            and confidence_consumed
+            and confidence_band not in {"low", "ambiguous", "unknown", "unavailable", "no_match"}
+        )
+
+        active_person_resolution_visibility = {
+            "active_person_state": resolution_state,
+            "active_person_available": available,
+            "resolved_person_id": person_id if available else None,
+            "resolved_voice_profile_id": voice_profile_id if available else None,
+            "attribution_available": attribution_consumed,
+            "confidence_available": confidence_consumed,
+            "confidence_accepted": confidence_accepted,
+            "confidence_value": confidence_value,
+            "confidence_band": confidence_band,
+            "readiness_state": readiness_state,
+            "reason_code": reason_code,
+            "resolution_posture": "resolved" if available else "fail_closed",
+            "fail_closed": not available,
+            "authority_source": "voice_identity",
+            "consumption_only": True,
+        }
+
     return {
         "authority_visibility": {
             "voice_identity_authority_external": (
@@ -779,6 +932,7 @@ def _voice_identity_consumption_boundary_visibility(state) -> dict[str, Any]:
                 if latest_envelope is not None
                 else None
             ),
+            "active_person_resolution": active_person_resolution_visibility,
         },
         "enrollment_boundary_visibility": {
             "latest_boundary_path": (
@@ -1320,6 +1474,299 @@ def _voice_identity_consumption_boundary_visibility(state) -> dict[str, Any]:
         },
     }
 
+
+def _productivity_source_of_record_boundary_visibility(hass, state) -> dict[str, Any]:
+    """Return bounded Release 6 source-of-record boundary visibility."""
+    return _build_productivity_source_of_record_boundary(state=state, hass=hass)
+
+
+def _calendar_email_consumption_boundary_visibility(hass, state) -> dict[str, Any]:
+    """Return bounded Release 6 calendar/email consumption visibility."""
+    return _build_calendar_email_consumption_boundary(state=state, hass=hass)
+
+
+def _task_shopping_consumption_boundary_visibility(hass, state) -> dict[str, Any]:
+    """Return bounded Release 6 task/shopping consumption visibility."""
+    return _build_task_shopping_consumption_boundary(state=state, hass=hass)
+
+
+def _capture_knowledge_consumption_boundary_visibility(hass, state) -> dict[str, Any]:
+    """Return bounded Release 6 capture/knowledge consumption visibility."""
+    return _build_capture_knowledge_consumption_boundary(state=state, hass=hass)
+
+
+def _briefing_composition_boundary_visibility(hass, state) -> dict[str, Any]:
+    """Return bounded Release 6 briefing composition visibility."""
+    return _build_briefing_composition_boundary(state=state, hass=hass)
+
+
+def _household_status_synthesis_boundary_visibility(hass, state) -> dict[str, Any]:
+    """Return bounded Release 6 household status synthesis visibility."""
+    return _build_household_status_synthesis_boundary(state=state, hass=hass)
+
+
+def _provenance_ownership_consumption_boundary_visibility(hass, state) -> dict[str, Any]:
+    """Return bounded Release 6 provenance ownership and consumption visibility."""
+    return _build_release_6_provenance_ownership_consumption_boundary(state=state, hass=hass)
+
+
+def _household_coordination_boundary_visibility(hass, state) -> dict[str, Any]:
+    """Return bounded Release 6 household coordination visibility."""
+    household_status_synthesis_boundary = _build_household_status_synthesis_boundary(state=state, hass=hass)
+    provenance_ownership_consumption_boundary = _build_release_6_provenance_ownership_consumption_boundary(
+        state=state,
+        hass=hass,
+    )
+    return _build_household_coordination_boundary(
+        state=state,
+        hass=hass,
+        household_status_synthesis_boundary=household_status_synthesis_boundary,
+        provenance_ownership_consumption_boundary=provenance_ownership_consumption_boundary,
+    )
+
+
+def _productivity_coordination_boundary_visibility(hass, state) -> dict[str, Any]:
+    """Return bounded Release 6 productivity coordination visibility."""
+    return _build_productivity_coordination_boundary(
+        state=state,
+        hass=hass,
+    )
+
+
+def _release_6_provenance_diagnostics_explainability_visibility(hass, state) -> dict[str, Any]:
+    """Return bounded Release 6 provenance diagnostics and explainability visibility."""
+    runtime_person_context = _build_runtime_person_context(state)
+    person_aware_productivity_routing = _build_person_aware_productivity_routing(
+        state=state,
+        hass=hass,
+        runtime_person_context=runtime_person_context,
+    )
+    household_status_synthesis_boundary = _build_household_status_synthesis_boundary(
+        state=state,
+        hass=hass,
+    )
+    provenance_ownership_consumption_boundary = _build_release_6_provenance_ownership_consumption_boundary(
+        state=state,
+        hass=hass,
+    )
+    productivity_coordination_boundary = _build_productivity_coordination_boundary(
+        state=state,
+        hass=hass,
+        runtime_person_context=runtime_person_context,
+        person_aware_productivity_routing=person_aware_productivity_routing,
+        provenance_ownership_consumption_boundary=provenance_ownership_consumption_boundary,
+    )
+    household_coordination_boundary = _build_household_coordination_boundary(
+        state=state,
+        hass=hass,
+        runtime_person_context=runtime_person_context,
+        person_aware_productivity_routing=person_aware_productivity_routing,
+        household_status_synthesis_boundary=household_status_synthesis_boundary,
+        provenance_ownership_consumption_boundary=provenance_ownership_consumption_boundary,
+    )
+    return _build_release_6_provenance_diagnostics_explainability_boundary(
+        state=state,
+        hass=hass,
+        runtime_person_context=runtime_person_context,
+        person_aware_productivity_routing=person_aware_productivity_routing,
+        productivity_coordination_boundary=productivity_coordination_boundary,
+        household_status_synthesis_boundary=household_status_synthesis_boundary,
+        household_coordination_boundary=household_coordination_boundary,
+        provenance_ownership_consumption_boundary=provenance_ownership_consumption_boundary,
+    )
+
+
+def _release_6_productivity_diagnostics_visibility(hass, state) -> dict[str, Any]:
+    """Return consolidated Release 6 productivity diagnostics visibility."""
+    boundary_entries = [
+        {
+            "boundary_name": "productivity_source_of_record_boundary",
+            "source_domain": "productivity",
+            "source_type": "productivity_source_of_record_boundary",
+            "visibility": _productivity_source_of_record_boundary_visibility(hass, state),
+            "available": True,
+        },
+        {
+            "boundary_name": "calendar_email_consumption_boundary",
+            "source_domain": "calendar_email",
+            "source_type": "calendar_email_consumption_boundary",
+            "visibility": _calendar_email_consumption_boundary_visibility(hass, state),
+            "available": bool(
+                _calendar_email_consumption_boundary_visibility(hass, state).get("configured_source_reference_count", 0)
+                or _calendar_email_consumption_boundary_visibility(hass, state).get("person_calendar_email_bindings", {}).get("person_count", 0)
+            ),
+        },
+        {
+            "boundary_name": "task_shopping_consumption_boundary",
+            "source_domain": "task_shopping",
+            "source_type": "task_shopping_consumption_boundary",
+            "visibility": _task_shopping_consumption_boundary_visibility(hass, state),
+            "available": bool(
+                _task_shopping_consumption_boundary_visibility(hass, state).get("configured_source_reference_count", 0)
+                or _task_shopping_consumption_boundary_visibility(hass, state).get("person_shopping_bindings", {}).get("person_count", 0)
+            ),
+        },
+        {
+            "boundary_name": "capture_knowledge_consumption_boundary",
+            "source_domain": "capture_knowledge",
+            "source_type": "capture_knowledge_consumption_boundary",
+            "visibility": _capture_knowledge_consumption_boundary_visibility(hass, state),
+            "available": bool(
+                _capture_knowledge_consumption_boundary_visibility(hass, state).get("knowledge_consumption", {}).get("knowledge_available", False)
+                or _capture_knowledge_consumption_boundary_visibility(hass, state).get("capture_consumption", {}).get("capture_available", False)
+            ),
+        },
+        {
+            "boundary_name": "briefing_composition_boundary",
+            "source_domain": "briefing",
+            "source_type": "briefing_composition_boundary",
+            "visibility": _briefing_composition_boundary_visibility(hass, state),
+            "available": bool(_briefing_composition_boundary_visibility(hass, state).get("briefing_available", False)),
+        },
+        {
+            "boundary_name": "household_status_synthesis_boundary",
+            "source_domain": "household_status",
+            "source_type": "household_status_synthesis_boundary",
+            "visibility": _household_status_synthesis_boundary_visibility(hass, state),
+            "available": bool(_household_status_synthesis_boundary_visibility(hass, state).get("household_status_available", False)),
+        },
+        {
+            "boundary_name": "household_coordination_boundary",
+            "source_domain": "household_coordination",
+            "source_type": "household_coordination_boundary",
+            "visibility": _household_coordination_boundary_visibility(hass, state),
+            "available": bool(_household_coordination_boundary_visibility(hass, state).get("available_contributor_count", 0)),
+        },
+        {
+            "boundary_name": "productivity_coordination_boundary",
+            "source_domain": "productivity_coordination",
+            "source_type": "productivity_coordination_boundary",
+            "visibility": _productivity_coordination_boundary_visibility(hass, state),
+            "available": bool(
+                _productivity_coordination_boundary_visibility(hass, state).get(
+                    "coordination_awareness", {}
+                ).get("participating_domain_count", 0)
+            ),
+        },
+        {
+            "boundary_name": "provenance_ownership_consumption_boundary",
+            "source_domain": "provenance_ownership",
+            "source_type": "provenance_ownership_consumption_boundary",
+            "visibility": _provenance_ownership_consumption_boundary_visibility(hass, state),
+            "available": bool(
+                _provenance_ownership_consumption_boundary_visibility(hass, state).get("readiness_assessment", {}).get("lineage_completeness_ready", False)
+            ),
+        },
+        {
+            "boundary_name": "release_6_provenance_diagnostics_explainability_boundary",
+            "source_domain": "provenance_diagnostics",
+            "source_type": "release_6_provenance_diagnostics_explainability_boundary",
+            "visibility": _release_6_provenance_diagnostics_explainability_visibility(hass, state),
+            "available": bool(
+                _release_6_provenance_diagnostics_explainability_visibility(hass, state).get(
+                    "provenance_diagnostics", {}
+                ).get("lineage_completeness_ready", False)
+            ),
+        },
+    ]
+
+    available_boundary_count = sum(1 for item in boundary_entries if bool(item["available"]))
+    safe_fallback_boundary_count = sum(
+        1
+        for item in boundary_entries
+        if bool(item["visibility"].get("safe_fallback_mode_active", False))
+        or bool(item["visibility"].get("safe_fallback_reason"))
+    )
+    configured_source_reference_count = sum(
+        int(item["visibility"].get("configured_source_reference_count", 0) or 0)
+        for item in boundary_entries
+    )
+
+    provenance_entries: list[dict[str, Any]] = []
+    explainability_entries: list[dict[str, Any]] = []
+    for item in boundary_entries:
+        visibility = item["visibility"]
+        provenance_visibility = visibility.get("provenance_visibility", {})
+        explainability_visibility = visibility.get("explainability_visibility", {})
+        available = bool(item["available"])
+        provenance_entries.append(
+            {
+                "boundary_name": item["boundary_name"],
+                "source_domain": item["source_domain"],
+                "source_type": item["source_type"],
+                "provenance_reference_count": int(provenance_visibility.get("provenance_reference_count", 0) or 0),
+                "provenance_visible": bool(provenance_visibility.get("provenance_visible", False)),
+                "available": available,
+            }
+        )
+        explainability_entries.append(
+            {
+                "boundary_name": item["boundary_name"],
+                "source_domain": item["source_domain"],
+                "source_type": item["source_type"],
+                "source_domain_visible": bool(explainability_visibility.get("source_domain_visible", False)),
+                "source_type_visible": bool(explainability_visibility.get("source_type_visible", False)),
+                "safe_fallback_visible": bool(explainability_visibility.get("safe_fallback_visible", False)),
+                "available": available,
+            }
+        )
+
+    return {
+        "release_6_productivity_diagnostics_boundary_version": 1,
+        "applicable": True,
+        "boundary_path": "governed_release_6_productivity_diagnostics_boundary",
+        "deterministic_boundary": True,
+        "boundary_status": "active",
+        "concierge_role": "bounded_consumer_orchestrator",
+        "diagnostics_visibility": {
+            "boundary_count": len(boundary_entries),
+            "available_boundary_count": available_boundary_count,
+            "configured_source_reference_count": configured_source_reference_count,
+            "safe_fallback_boundary_count": safe_fallback_boundary_count,
+            "boundary_names": [item["boundary_name"] for item in boundary_entries],
+            "source_domains": [item["source_domain"] for item in boundary_entries],
+        },
+        "provenance_visibility": {
+            "boundary_entries": provenance_entries,
+            "provenance_reference_count": sum(item["provenance_reference_count"] for item in provenance_entries),
+            "provenance_visible_boundary_count": sum(1 for item in provenance_entries if item["provenance_visible"]),
+            "provenance_ready_boundary_count": sum(1 for item in provenance_entries if item["available"]),
+        },
+        "explainability_visibility": {
+            "boundary_entries": explainability_entries,
+            "source_domain_visible_boundary_count": sum(1 for item in explainability_entries if item["source_domain_visible"]),
+            "source_type_visible_boundary_count": sum(1 for item in explainability_entries if item["source_type_visible"]),
+            "safe_fallback_visible_boundary_count": sum(1 for item in explainability_entries if item["safe_fallback_visible"]),
+        },
+        "safe_fallback_visibility": {
+            "boundary_count": safe_fallback_boundary_count,
+            "degraded_boundary_count": sum(1 for item in boundary_entries if not bool(item["available"])),
+            "missing_prerequisite_boundary_count": sum(
+                1
+                for item in boundary_entries
+                if not bool(item["available"])
+                or bool(item["visibility"].get("safe_fallback_mode_active", False))
+            ),
+        },
+        "non_authority_assertions": {
+            "creates_source_of_record": False,
+            "stores_duplicate_canonical_records": False,
+            "claims_diagnostics_authority": False,
+            "claims_provenance_authority": False,
+            "claims_explainability_authority": False,
+            "claims_retrieval_authority": False,
+        },
+        "deferred_release_6_owners": {
+            "person_productivity_source_bindings": "#375",
+            "calendar_and_email_consumption": "#363",
+            "task_and_shopping_consumption": "#364",
+            "capture_and_knowledge_consumption": "#365",
+            "briefing_and_household_status_synthesis": "#366",
+            "productivity_diagnostics_provenance_explainability": "#367",
+            "household_coordination": "#368-#372",
+            "release_6_validation": "#373",
+        },
+    }
 
 def _messaging_governance_boundary_visibility(state) -> dict[str, Any]:
     """Return bounded messaging governance visibility from recorded activity refs."""
@@ -3131,6 +3578,18 @@ async def async_get_config_entry_diagnostics(
         "vocabulary_diagnostics_visibility": _vocabulary_diagnostics_visibility(state),
         "capability_diagnostics_explainability_visibility": _capability_diagnostics_explainability_visibility(state),
         "experience_diagnostics_explainability_visibility": _experience_diagnostics_explainability_visibility(state),
+        "productivity_source_of_record_boundary_visibility": _productivity_source_of_record_boundary_visibility(hass, state),
+        "calendar_email_consumption_boundary_visibility": _calendar_email_consumption_boundary_visibility(hass, state),
+        "task_shopping_consumption_boundary_visibility": _task_shopping_consumption_boundary_visibility(hass, state),
+        "capture_knowledge_consumption_boundary_visibility": _capture_knowledge_consumption_boundary_visibility(hass, state),
+        "briefing_composition_boundary_visibility": _briefing_composition_boundary_visibility(hass, state),
+        "household_status_synthesis_boundary_visibility": _household_status_synthesis_boundary_visibility(hass, state),
+        "household_coordination_boundary_visibility": _household_coordination_boundary_visibility(hass, state),
+        "productivity_coordination_boundary_visibility": _productivity_coordination_boundary_visibility(hass, state),
+        "provenance_ownership_consumption_boundary_visibility": _provenance_ownership_consumption_boundary_visibility(hass, state),
+        "release_6_provenance_diagnostics_explainability_visibility": _release_6_provenance_diagnostics_explainability_visibility(hass, state),
+        "release_6_productivity_diagnostics_visibility": _release_6_productivity_diagnostics_visibility(hass, state),
+        "voice_identity_linkage_setup_boundary_visibility": await _voice_identity_linkage_setup_boundary_visibility(hass, config_entry),
         "voice_identity_consumption_boundary_visibility": _voice_identity_consumption_boundary_visibility(state),
         "messaging_governance_boundary_visibility": _messaging_governance_boundary_visibility(state),
         "messaging_provenance_visibility": _messaging_provenance_visibility(state),

@@ -536,6 +536,14 @@ var ConciergeApp = globalThis.ConciergeApp || class ConciergeApp extends HTMLEle
           this._editMergeName = target.value || "";
         }
 
+        if (target.matches(".cg-person-source-label")) {
+          const personId = target.getAttribute("data-person-id") || "";
+          const family = target.getAttribute("data-source-family") || "";
+          if (personId && family) {
+            this._markActiveFormDraftDirty(`person:${personId}`);
+          }
+        }
+
         if (this._isTrackedDataCaptureTarget(target)) {
           this._markActiveFormDraftDirty();
           const areaId = target.getAttribute("data-area-id") || "";
@@ -604,6 +612,14 @@ var ConciergeApp = globalThis.ConciergeApp || class ConciergeApp extends HTMLEle
           if (areaId) {
             this._markActiveFormDraftDirty(`room:${areaId}`);
             this._syncRoomDeviceGroupEntityOptions(areaId);
+          }
+        }
+
+        if (target.matches("ha-labels-picker[data-person-id][data-source-family]")) {
+          const personId = target.getAttribute("data-person-id") || "";
+          const family = target.getAttribute("data-source-family") || "";
+          if (personId && family) {
+            this._syncPersonSourceBindingPicker(personId, family);
           }
         }
       });
@@ -688,6 +704,56 @@ var ConciergeApp = globalThis.ConciergeApp || class ConciergeApp extends HTMLEle
           if (areaId && this._shouldAutoMarkSectionDirty(section, fieldKey)) {
             this._markRoomSectionDraftDirty(areaId, section);
           }
+        }
+
+        if (target.matches("ha-labels-picker[data-person-id][data-source-family]")) {
+          const personId = target.getAttribute("data-person-id") || "";
+          const family = target.getAttribute("data-source-family") || "";
+          if (personId && family) {
+            this._syncPersonSourceBindingPicker(personId, family);
+          }
+        }
+      });
+
+      this.addEventListener("click", (event) => {
+        const target = event.target instanceof Element ? event.target : null;
+        if (!target) return;
+
+        const addButton = target.closest(".cg-person-add-source-binding");
+        if (addButton) {
+          const personId = addButton.getAttribute("data-person-id") || "";
+          const family = addButton.getAttribute("data-source-family") || "";
+          const picker = this.querySelector(`ha-entity-picker[data-person-id="${CSS.escape(personId)}"][data-source-family="${CSS.escape(family)}"]`);
+          if (!personId || !family || !picker) return;
+
+          const entityId = this._readSelectControlValue(picker);
+          if (!entityId) return;
+
+          const allowedRows = this._sourceRowsForFamily(family, this._labelIdsFromValue(this.querySelector(`ha-labels-picker[data-person-id="${CSS.escape(personId)}"][data-source-family="${CSS.escape(family)}"]`)?.value || []));
+          const sourceRow = allowedRows.find((row) => String(row?.entity_id || "").trim() === entityId) || this._sourceCatalog.find((row) => String(row?.entity_id || "").trim() === entityId) || { entity_id: entityId };
+          const list = this.querySelector(`.cg-person-source-bindings[data-person-id="${CSS.escape(personId)}"][data-source-family="${CSS.escape(family)}"]`);
+          if (!list) return;
+
+          const existing = this._collectPersonSourceBindings(personId, family);
+          if (existing.some((row) => row.entity_id === entityId)) return;
+
+          list.insertAdjacentHTML("beforeend", this._renderPersonSourceBindingRow(personId, family, { label: "", entity_id: entityId }, existing.length));
+          try { picker.value = ""; } catch (err) {}
+          this._syncPersonSourceBindingPicker(personId, family);
+          this._markActiveFormDraftDirty(`person:${personId}`);
+          return;
+        }
+
+        const removeButton = target.closest(".cg-person-remove-source-binding");
+        if (removeButton) {
+          const personId = removeButton.getAttribute("data-person-id") || "";
+          const family = removeButton.getAttribute("data-source-family") || "";
+          const bindingRowId = removeButton.getAttribute("data-binding-row-id") || "";
+          const row = this.querySelector(`.cg-person-source-binding-row[data-person-id="${CSS.escape(personId)}"][data-source-family="${CSS.escape(family)}"][data-binding-row-id="${CSS.escape(bindingRowId)}"]`);
+          if (!personId || !family || !row) return;
+          row.remove();
+          this._syncPersonSourceBindingPicker(personId, family);
+          this._markActiveFormDraftDirty(`person:${personId}`);
         }
       });
 
@@ -1176,6 +1242,7 @@ var ConciergeApp = globalThis.ConciergeApp || class ConciergeApp extends HTMLEle
       this._roomCatalog = snapshot.room_catalog || {};
       this._compositeCatalog = snapshot.composite_catalog || {};
       this._globalCatalog = snapshot.global_catalog || this._globalCatalog;
+      this._sourceCatalog = Array.isArray(snapshot.source_catalog) ? snapshot.source_catalog : [];
       this._globalFeatures = snapshot.global_features || {};
       this._globalContextUsage = snapshot.global_context_usage || {};
       await this._refreshLabelRegistry();
@@ -1586,6 +1653,204 @@ var ConciergeApp = globalThis.ConciergeApp || class ConciergeApp extends HTMLEle
     }
 
     return this._sourceInfoFromLabel(entityId, String(sourceInfo || ""));
+  }
+
+  _sourceRowsForFamily(family, selectedLabelIds = []) {
+    const rows = Array.isArray(this._sourceCatalog) ? this._sourceCatalog : [];
+    const key = String(family || "").trim().toLowerCase();
+    const patternMap = {
+      calendar: ["calendar"],
+      email: ["mail", "email", "gmail", "outlook", "exchange", "imap", "smtp"],
+      shopping: ["todo", "to do", "shopping", "list"],
+    };
+    const tokens = patternMap[key] || [];
+    const labelSet = new Set((Array.isArray(selectedLabelIds) ? selectedLabelIds : []).map((value) => String(value || "").trim()).filter(Boolean));
+    if (!tokens.length && !labelSet.size) return rows;
+
+    return rows.filter((row) => {
+      const haystack = [row?.integration, row?.display_name, row?.name, row?.domain, row?.entity_id]
+        .map((value) => String(value || "").toLowerCase())
+        .join(" ");
+      if (tokens.length && !tokens.some((token) => haystack.includes(token))) return false;
+      if (labelSet.size) {
+        const rowLabels = new Set((Array.isArray(row?.label_ids) ? row.label_ids : []).map((value) => String(value || "").trim()).filter(Boolean));
+        for (const labelId of labelSet) {
+          if (!rowLabels.has(labelId)) return false;
+        }
+      }
+      return true;
+    });
+  }
+
+  _sourceEntityIdsForFamily(family) {
+    return this._sourceRowsForFamily(family)
+      .map((row) => String(row?.entity_id || "").trim())
+      .filter(Boolean);
+  }
+
+  _personSourceBindingLabelIds(personId, family) {
+    const state = this._personSourceBindingLabelFilters || {};
+    const key = `${personId}:${String(family || "").trim().toLowerCase()}`;
+    const value = state[key];
+    return Array.isArray(value) ? value : [];
+  }
+
+  _personSourceBindingsForFamily(profile, family) {
+    const familyKey = String(family || "").trim().toLowerCase();
+    const bindingKey = `${familyKey}_source_bindings`;
+    const legacyKey = `${familyKey}_source_ref`;
+    const rows = Array.isArray(profile?.[bindingKey]) ? profile[bindingKey] : [];
+    if (rows.length) {
+      return rows
+        .map((row) => ({
+          label: String(row?.label || row?.name || "").trim(),
+          entity_id: String(row?.entity_id || row?.entityId || "").trim(),
+        }))
+        .filter((row) => row.entity_id);
+    }
+    const legacyValue = String(profile?.[legacyKey] || "").trim();
+    return legacyValue ? [{ label: "", entity_id: legacyValue }] : [];
+  }
+
+  _renderPersonSourceBindingRow(personId, family, row, index) {
+    const rowId = `cg-person-${personId}-${family}-${index}`.replace(/[^a-zA-Z0-9_-]/g, "_");
+    const entityId = String(row?.entity_id || "").trim();
+    const label = String(row?.label || "").trim();
+    const sourceInfo = this._sourceInfoFromRow(
+      (Array.isArray(this._sourceCatalog) ? this._sourceCatalog : []).find((item) => String(item?.entity_id || "").trim() === entityId)
+        || { entity_id: entityId, name: this._friendlyEntityName(entityId), integration: this._integrationNameFromEntityId(entityId), display_name: entityId }
+    );
+    return `
+      <div class="cg-selected-source cg-person-source-binding-row" data-person-id="${this._escapeHtml(personId)}" data-source-family="${this._escapeHtml(family)}" data-binding-row-id="${this._escapeHtml(rowId)}" data-entity-id="${this._escapeHtml(entityId)}">
+        <div class="cg-selected-source-label" style="display:grid; gap:6px; width:100%;">
+          <div class="cg-selected-source-text" style="display:grid; gap:4px;">
+            <input class="cg-person-source-label" data-person-id="${this._escapeHtml(personId)}" data-source-family="${this._escapeHtml(family)}" data-binding-row-id="${this._escapeHtml(rowId)}" type="text" placeholder="What do you call this?" value="${this._escapeHtml(label)}">
+            <div class="cg-selected-source-secondary">${this._escapeHtml(sourceInfo.display_name || sourceInfo.name || entityId)}</div>
+          </div>
+        </div>
+        <ha-button class="cg-remove-source cg-person-remove-source-binding" appearance="plain" data-person-id="${this._escapeHtml(personId)}" data-source-family="${this._escapeHtml(family)}" data-binding-row-id="${this._escapeHtml(rowId)}" aria-label="Remove source">Remove</ha-button>
+      </div>
+    `;
+  }
+
+  _renderPersonSourceBindingEditor(personId, family, title, profile, emptyLabel, labelFilterLabel) {
+    const selectedRows = this._personSourceBindingsForFamily(profile, family);
+    const selectedEntityIds = selectedRows.map((row) => String(row?.entity_id || "").trim()).filter(Boolean);
+    const selectedLabelIds = this._personSourceBindingLabelIds(personId, family);
+    const labelPickerId = `cg-person-${personId}-${family}-labels`.replace(/[^a-zA-Z0-9_-]/g, "_");
+    const allowedRows = this._sourceRowsForFamily(family, selectedLabelIds).filter((row) => !selectedEntityIds.includes(String(row?.entity_id || "").trim()));
+    const allowedEntityIdsJson = JSON.stringify(allowedRows.map((row) => String(row?.entity_id || "").trim()).filter(Boolean));
+    const sourceValueMapJson = JSON.stringify(
+      allowedRows.reduce((acc, row) => {
+        const entityId = String(row?.entity_id || "").trim();
+        if (entityId) acc[entityId] = entityId;
+        return acc;
+      }, {})
+    );
+    const labelMapJson = JSON.stringify(
+      allowedRows.reduce((acc, row) => {
+        const entityId = String(row?.entity_id || "").trim();
+        const label = String(row?.display_name || row?.name || entityId || "").trim();
+        if (entityId && label) acc[entityId] = label;
+        return acc;
+      }, {})
+    );
+    const sourceDetailsMapJson = JSON.stringify(
+      allowedRows.reduce((acc, row) => {
+        const entityId = String(row?.entity_id || "").trim();
+        if (entityId) acc[entityId] = this._sourceInfoFromRow(row);
+        return acc;
+      }, {})
+    );
+    const selectedMarkup = selectedRows.length
+      ? selectedRows.map((row, index) => this._renderPersonSourceBindingRow(personId, family, row, index)).join("")
+      : `<div class="cg-selected-empty">${this._escapeHtml(emptyLabel)}</div>`;
+
+    return `
+      <div class="cg-config-card">
+        <div class="cg-config-title">${this._escapeHtml(title)}</div>
+        <div class="cg-field" style="margin-top: 10px;">
+          <label>Labels</label>
+          <ha-labels-picker data-person-id="${this._escapeHtml(personId)}" data-source-family="${this._escapeHtml(family)}" data-label-picker-id="${this._escapeHtml(labelPickerId)}"></ha-labels-picker>
+        </div>
+        <div class="cg-field" style="margin-top: 10px;">
+          <label>Source</label>
+          <div class="cg-source-picker-row">
+            <ha-entity-picker
+              id="${this._escapeHtml(labelPickerId)}"
+              data-person-id="${this._escapeHtml(personId)}"
+              data-source-family="${this._escapeHtml(family)}"
+              data-field-key="${this._escapeHtml(family + "_source_picker")}" data-allowed-entity-ids="${this._escapeHtml(allowedEntityIdsJson)}"
+              data-all-entity-ids="${this._escapeHtml(allowedEntityIdsJson)}"
+              data-source-value-map="${this._escapeHtml(sourceValueMapJson)}"
+              data-label-map="${this._escapeHtml(labelMapJson)}"
+              data-source-details-map="${this._escapeHtml(sourceDetailsMapJson)}"
+            ></ha-entity-picker>
+            <ha-button class="cg-add-source cg-person-add-source-binding" data-person-id="${this._escapeHtml(personId)}" data-source-family="${this._escapeHtml(family)}" data-label-picker-id="${this._escapeHtml(labelPickerId)}">Add</ha-button>
+          </div>
+        </div>
+        <div class="cg-selected-sources cg-source-selection-list cg-person-source-bindings" data-person-id="${this._escapeHtml(personId)}" data-source-family="${this._escapeHtml(family)}" data-label-picker-id="${this._escapeHtml(labelPickerId)}">
+          ${selectedMarkup}
+        </div>
+      </div>
+    `;
+  }
+
+  _collectPersonSourceBindings(personId, family) {
+    return Array.from(this.querySelectorAll(`.cg-person-source-binding-row[data-person-id="${CSS.escape(personId)}"][data-source-family="${CSS.escape(family)}"]`))
+      .map((row) => {
+        const entityId = String(row.getAttribute("data-entity-id") || "").trim();
+        const labelInput = row.querySelector(".cg-person-source-label");
+        const label = String(labelInput?.value || "").trim();
+        return { label, entity_id: entityId };
+      })
+      .filter((row) => row.entity_id);
+  }
+
+  _syncPersonSourceBindingPicker(personId, family) {
+    if (!personId || !family) return;
+    const labelsPicker = this.querySelector(`ha-labels-picker[data-person-id="${CSS.escape(personId)}"][data-source-family="${CSS.escape(family)}"]`);
+    const picker = this.querySelector(`ha-entity-picker[data-person-id="${CSS.escape(personId)}"][data-source-family="${CSS.escape(family)}"]`);
+    if (!picker) return;
+
+    const selectedLabelIds = this._labelIdsFromValue(labelsPicker?.value || []);
+    if (!this._personSourceBindingLabelFilters) {
+      this._personSourceBindingLabelFilters = {};
+    }
+    this._personSourceBindingLabelFilters[`${personId}:${String(family || "").trim().toLowerCase()}`] = selectedLabelIds;
+    const selectedEntityIds = this._collectPersonSourceBindings(personId, family).map((row) => row.entity_id);
+    const allowedRows = this._sourceRowsForFamily(family, selectedLabelIds).filter((row) => !selectedEntityIds.includes(String(row?.entity_id || "").trim()));
+    const allowedEntityIds = allowedRows.map((row) => String(row?.entity_id || "").trim()).filter(Boolean);
+    const allowedSet = new Set(allowedEntityIds);
+
+    try {
+      picker.setAttribute("data-allowed-entity-ids", JSON.stringify(allowedEntityIds));
+      picker.includeEntities = allowedEntityIds;
+      picker.entityFilter = (candidate) => {
+        if (typeof candidate === "string") return allowedSet.has(candidate);
+        if (candidate && typeof candidate === "object") {
+          const entityId = String(
+            candidate.entity_id
+              || candidate.entityId
+              || candidate?.stateObj?.entity_id
+              || ""
+          ).trim();
+          return allowedSet.has(entityId);
+        }
+        return false;
+      };
+    } catch (err) {
+      // no-op
+    }
+
+    const currentValue = String(picker.value || "").trim();
+    if (currentValue && !allowedSet.has(currentValue)) {
+      try { picker.value = ""; } catch (err) {}
+    }
+
+    if (typeof picker.requestUpdate === "function") {
+      try { picker.requestUpdate(); } catch (err) {}
+    }
   }
 
   _personImage(person) {
@@ -2172,6 +2437,42 @@ var ConciergeApp = globalThis.ConciergeApp || class ConciergeApp extends HTMLEle
     });
   }
 
+  _entityDisplayLabelForScope(scopeId, entityId) {
+    const normalizedEntityId = String(entityId || "").trim();
+    if (!normalizedEntityId) return "Not set";
+
+    const row = this._roomDeviceCandidates(scopeId)
+      .find((candidate) => String(candidate?.entity_id || "").trim() === normalizedEntityId);
+    if (row) {
+      return String(row?.name || row?.display_name || normalizedEntityId).trim();
+    }
+
+    return this._friendlyEntityName(normalizedEntityId);
+  }
+
+  _categorySummaryValueForScope(scopeId, config, fieldKey) {
+    const selected = this._selectedIds(config, fieldKey)
+      .map((value) => String(value || "").trim())
+      .filter(Boolean);
+    if (!selected.length) return "Not Set";
+    if (selected.length > 1) return "Multiple";
+    return this._entityDisplayLabelForScope(scopeId, selected[0]);
+  }
+
+  _renderCategorySummaryRows(scopeId, config, cards) {
+    const rows = Array.isArray(cards) ? cards : [];
+    if (!rows.length) return `<div class="cg-room-meta"><strong>Categories:</strong> None</div>`;
+
+    return rows.map((card) => {
+      const title = String(card?.title || "").trim() || "Category";
+      const fieldKey = String(card?.fieldKey || "").trim();
+      const value = fieldKey
+        ? this._categorySummaryValueForScope(scopeId, config, fieldKey)
+        : "Not Set";
+      return `<div class="cg-room-meta"><strong>${this._escapeHtml(title)}:</strong> ${this._escapeHtml(value)}</div>`;
+    }).join("");
+  }
+
   _renderRoomDeviceGroupRow(areaId, group, index, readOnly = false) {
     const groupName = String(group?.group_name || "").trim();
     const entityIds = this._roomDeviceGroupEntityIds(group);
@@ -2185,7 +2486,7 @@ var ConciergeApp = globalThis.ConciergeApp || class ConciergeApp extends HTMLEle
       ? entityIds.map((entityId) => {
         const normalizedEntityId = String(entityId || "").trim();
         const row = candidateById.get(normalizedEntityId);
-        const label = String(row?.display_name || row?.name || normalizedEntityId || "").trim();
+        const label = String(row?.name || row?.display_name || normalizedEntityId || "").trim();
         return `
           <div class="cg-selected-source cg-room-device-group-device-row" data-entity-id="${this._escapeHtml(normalizedEntityId)}">
             <div class="cg-selected-source-label">
@@ -4034,9 +4335,62 @@ var ConciergeApp = globalThis.ConciergeApp || class ConciergeApp extends HTMLEle
     let payload = { area_id: areaId };
     if (section === "room_devices") {
       const deviceGroups = this._collectRoomDeviceGroups(areaId);
+      const catalog = this._roomCatalog?.[areaId] || {};
+      const fieldKeys = [
+        "voice_device_entity_ids",
+        "media_player_entity_ids",
+        "speaker_entity_ids",
+        "light_entity_ids",
+        "lamp_entity_ids",
+        "shade_entity_ids",
+        "room_sensor_entity_ids",
+        "room_health_entity_ids",
+        "human_health_entity_ids",
+        "tv_entity_ids",
+        "dashboard_entity_ids",
+        "other_entity_ids",
+      ];
+      const fieldSets = new Map(
+        fieldKeys.map((fieldKey) => {
+          const ids = new Set(
+            (Array.isArray(catalog[fieldKey]) ? catalog[fieldKey] : [])
+              .map((row) => String(row?.entity_id || "").trim())
+              .filter(Boolean)
+          );
+          return [fieldKey, ids];
+        })
+      );
+      const mappedPayload = {
+        voice_device_entity_ids: [],
+        media_player_entity_ids: [],
+        speaker_entity_ids: [],
+        light_entity_ids: [],
+        lamp_entity_ids: [],
+        shade_entity_ids: [],
+        room_sensor_entity_ids: [],
+        room_health_entity_ids: [],
+        human_health_entity_ids: [],
+        tv_entity_ids: [],
+        dashboard_entity_ids: [],
+        other_entity_ids: [],
+      };
+      const selectedEntityIds = Array.from(
+        new Set(
+          (Array.isArray(deviceGroups) ? deviceGroups : [])
+            .flatMap((group) => this._roomDeviceGroupEntityIds(group))
+        )
+      );
+      selectedEntityIds.forEach((entityId) => {
+        fieldKeys.forEach((fieldKey) => {
+          if (fieldSets.get(fieldKey)?.has(entityId)) {
+            mappedPayload[fieldKey].push(entityId);
+          }
+        });
+      });
       payload = {
         ...payload,
         device_groups: deviceGroups,
+        ...mappedPayload,
       };
     } else if (section === "information_sources") {
       payload = {
@@ -4323,12 +4677,21 @@ var ConciergeApp = globalThis.ConciergeApp || class ConciergeApp extends HTMLEle
     const allowedMinorIntentClasses = selectedIntentAbilities.filter((intentClass) => intentClass !== "general_qna");
 
     const currentName = String(currentProfile?.name || person?.name || personId || "").trim();
+    const emailSourceBindings = this._collectPersonSourceBindings(personId, "email");
+    const calendarSourceBindings = this._collectPersonSourceBindings(personId, "calendar");
+    const shoppingSourceBindings = this._collectPersonSourceBindings(personId, "shopping");
 
     const payload = this._normalizePersonProfilePayload({
       person_id: personId,
       name: readValue("name") || currentName,
       linked_area_id: readValue("linked_area_id") || undefined,
       voice_profile_id: readValue("voice_profile_id") || undefined,
+      email_source_ref: emailSourceBindings[0]?.entity_id || "",
+      calendar_source_ref: calendarSourceBindings[0]?.entity_id || "",
+      shopping_source_ref: shoppingSourceBindings[0]?.entity_id || "",
+      email_source_bindings: emailSourceBindings,
+      calendar_source_bindings: calendarSourceBindings,
+      shopping_source_bindings: shoppingSourceBindings,
       ble_device_ids: readList("ble_device_ids"),
       aqara_presence_entity_ids: readList("aqara_presence_entity_ids"),
       is_minor: Boolean(field("is_minor")?.checked),
@@ -5393,37 +5756,63 @@ var ConciergeApp = globalThis.ConciergeApp || class ConciergeApp extends HTMLEle
   }
 
   _bindEvents() {
-    this.querySelectorAll("ha-entity-picker[data-allowed-entity-ids]").forEach((picker) => {
+    this.querySelectorAll("ha-entity-picker[data-field-key]").forEach((picker) => {
       try {
         picker.hass = this._hass;
       } catch (err) {
         // no-op
       }
 
-      try {
-        const allowed = JSON.parse(picker.getAttribute("data-allowed-entity-ids") || "[]");
-        const allowedSet = new Set(Array.isArray(allowed) ? allowed.filter(Boolean) : []);
-        picker.includeEntities = Array.from(allowedSet);
-        picker.entityFilter = (candidate) => {
-          if (typeof candidate === "string") return allowedSet.has(candidate);
-          if (candidate && typeof candidate === "object") {
-            const entityId = String(
-              candidate.entity_id
+      if (picker.hasAttribute("data-allowed-entity-ids")) {
+        try {
+          const allowed = JSON.parse(picker.getAttribute("data-allowed-entity-ids") || "[]");
+          const allowedSet = new Set(Array.isArray(allowed) ? allowed.filter(Boolean) : []);
+          picker.includeEntities = Array.from(allowedSet);
+          picker.entityFilter = (candidate) => {
+            if (typeof candidate === "string") return allowedSet.has(candidate);
+            if (candidate && typeof candidate === "object") {
+              const entityId = String(
+                candidate.entity_id
+                  || candidate.entityId
+                  || candidate?.stateObj?.entity_id
+                  || ""
+              ).trim();
+              return allowedSet.has(entityId);
+            }
+            return false;
+          };
+        } catch (err) {
+          // no-op
+        }
+      } else if (picker.hasAttribute("data-source-family")) {
+        const family = String(picker.getAttribute("data-source-family") || "").trim();
+        const allowedEntityIds = this._sourceEntityIdsForFamily(family);
+        const allowedSet = new Set(allowedEntityIds);
+        try {
+          picker.setAttribute("data-allowed-entity-ids", JSON.stringify(allowedEntityIds));
+          picker.includeEntities = allowedEntityIds;
+          picker.entityFilter = (candidate) => {
+            if (typeof candidate === "string") return allowedSet.has(candidate);
+            if (candidate && typeof candidate === "object") {
+              const entityId = String(
+                candidate.entity_id
                 || candidate.entityId
                 || candidate?.stateObj?.entity_id
                 || ""
-            ).trim();
-            return allowedSet.has(entityId);
-          }
-          return false;
-        };
-      } catch (err) {
-        // no-op
+              ).trim();
+              return allowedSet.has(entityId);
+            }
+            return false;
+          };
+        } catch (err) {
+          // no-op
+        }
       }
 
-      if (picker.value === undefined || picker.value === null) {
+      const initialValue = picker.getAttribute("data-initial-value") || "";
+      if (picker.value === undefined || picker.value === null || String(picker.value || "").trim() === "") {
         try {
-          picker.value = "";
+          picker.value = initialValue;
         } catch (err) {
           // no-op
         }
@@ -6377,8 +6766,9 @@ var ConciergeApp = globalThis.ConciergeApp || class ConciergeApp extends HTMLEle
           const totalCount = availableCards.length;
           const voiceAssistantId = (room.voice_device_entity_ids || [])[0] || "";
           const primarySpeakerId = (room.speaker_entity_ids || room.media_player_entity_ids || [])[0] || "";
-          const voiceAssistant = voiceAssistantId ? this._friendlyEntityName(voiceAssistantId) : "Not set";
-          const primarySpeaker = primarySpeakerId ? this._friendlyEntityName(primarySpeakerId) : "Not set";
+          const voiceAssistant = voiceAssistantId ? this._entityDisplayLabelForScope(area.id, voiceAssistantId) : "Not set";
+          const primarySpeaker = primarySpeakerId ? this._entityDisplayLabelForScope(area.id, primarySpeakerId) : "Not set";
+          const categorySummaryRows = this._renderCategorySummaryRows(area.id, room, availableCards);
           const persona = room.persona || "Not set";
           const isConfigured = configuredCount > 0;
           const statusLine = totalCount
@@ -6399,10 +6789,9 @@ var ConciergeApp = globalThis.ConciergeApp || class ConciergeApp extends HTMLEle
                 ${mergeCheckbox}
               </div>
               <div class="cg-room-meta">${this._escapeHtml(statusLine)}</div>
-              <div class="cg-room-meta">Voice Assistant: ${this._escapeHtml(voiceAssistant)}</div>
-              <div class="cg-room-meta">Primary Speakers: ${this._escapeHtml(primarySpeaker)}</div>
-              <div class="cg-room-meta">Persona: ${this._escapeHtml(persona)}</div>
-              <div class="cg-room-meta">Floor: ${this._escapeHtml(roomFloorLabel)}</div>
+              ${categorySummaryRows}
+              <div class="cg-room-meta"><strong>Persona:</strong> ${this._escapeHtml(persona)}</div>
+              <div class="cg-room-meta"><strong>Floor:</strong> ${this._escapeHtml(roomFloorLabel)}</div>
               <div class="cg-row-end" style="margin-top: 8px;">
                 <a href="#" class="cg-room-link" data-area-id="${this._escapeHtml(area.id)}">${isConfigured ? "Open room configuration" : "Configure room"}</a>
               </div>
@@ -6423,8 +6812,9 @@ var ConciergeApp = globalThis.ConciergeApp || class ConciergeApp extends HTMLEle
           const configuredCount = this._configuredCardCount(composite, availableCards);
           const voiceAssistantId = (composite.voice_device_entity_ids || [])[0] || "";
           const primarySpeakerId = (composite.speaker_entity_ids || composite.media_player_entity_ids || [])[0] || "";
-          const voiceAssistant = voiceAssistantId ? this._friendlyEntityName(voiceAssistantId) : "Not set";
-          const primarySpeaker = primarySpeakerId ? this._friendlyEntityName(primarySpeakerId) : "Not set";
+          const voiceAssistant = voiceAssistantId ? this._entityDisplayLabelForScope(compositeId, voiceAssistantId) : "Not set";
+          const primarySpeaker = primarySpeakerId ? this._entityDisplayLabelForScope(compositeId, primarySpeakerId) : "Not set";
+          const categorySummaryRows = this._renderCategorySummaryRows(compositeId, composite, availableCards);
           const statusLine = totalCount
             ? `Configured ${configuredCount} of ${totalCount} categories`
             : "No configurable integrations detected";
@@ -6437,9 +6827,8 @@ var ConciergeApp = globalThis.ConciergeApp || class ConciergeApp extends HTMLEle
               </div>
               <div class="cg-room-meta">Rooms: ${this._escapeHtml(memberLabel)}</div>
               <div class="cg-room-meta">${this._escapeHtml(statusLine)}</div>
-              <div class="cg-room-meta">Voice Assistant: ${this._escapeHtml(voiceAssistant)}</div>
-              <div class="cg-room-meta">Primary Speakers: ${this._escapeHtml(primarySpeaker)}</div>
-              <div class="cg-room-meta">Persona: Composite context</div>
+              ${categorySummaryRows}
+              <div class="cg-room-meta"><strong>Persona:</strong> Composite context</div>
               <div class="cg-row-end" style="margin-top: 8px;">
                 <a href="#" class="cg-composite-link" data-composite-id="${this._escapeHtml(compositeId)}">Open room configuration</a>
               </div>
@@ -7315,7 +7704,7 @@ var ConciergeApp = globalThis.ConciergeApp || class ConciergeApp extends HTMLEle
         .cg-config-title { font-size: 16px; font-weight: 700; margin-bottom: 6px; }
         .cg-field { display: grid; gap: 4px; }
         .cg-field label { font-size: 12px; color: var(--secondary-text-color); }
-        .cg-field select, .cg-field input, .cg-field textarea, .cg-field ha-textfield, .cg-field ha-select { min-height: 34px; width: 100%; }
+        .cg-field select, .cg-field input, .cg-field textarea, .cg-field ha-textfield, .cg-field ha-select, .cg-field ha-entity-picker { min-height: 34px; width: 100%; }
         .cg-switch-field { margin-top: 10px; }
         .cg-switch-field ha-formfield { width: 100%; }
         .cg-voice-library { margin-top: 14px; display: grid; gap: 12px; }
@@ -7415,6 +7804,10 @@ var ConciergeApp = globalThis.ConciergeApp || class ConciergeApp extends HTMLEle
                 ${voiceOptions}
               </select>
             </div>
+            ${this._renderPersonSourceBindingEditor(personId, "email", "E-Mail Accounts", profile, "No e-mail accounts added yet.", "Label filter")}
+            ${this._renderPersonSourceBindingEditor(personId, "calendar", "Calendars", profile, "No calendars added yet.", "Label filter")}
+            ${this._renderPersonSourceBindingEditor(personId, "shopping", "Shopping Lists", profile, "No shopping lists added yet.", "Label filter")}
+            <div class="cg-muted" style="margin-top: 8px;">These are references only. Concierge does not become the source of record for email, calendar, or shopping systems.</div>
           </div>
 
           <div class="cg-config-card">

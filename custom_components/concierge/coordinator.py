@@ -39,6 +39,132 @@ from .storage import ConciergeStorage
 
 _LOGGER = logging.getLogger(__name__)
 
+_ACTIVE_PERSON_STATE_AVAILABLE = "active_person_available"
+_ACTIVE_PERSON_STATE_UNKNOWN = "active_person_unknown"
+_ACTIVE_PERSON_STATE_AMBIGUOUS = "active_person_ambiguous"
+_ACTIVE_PERSON_STATE_UNAVAILABLE = "active_person_unavailable"
+
+
+def _latest_execution_envelope_ref(state) -> dict[str, Any] | None:
+    """Return latest execution-envelope reference from activity history."""
+    refs: list[dict[str, Any]] = []
+    for activity in sorted(
+        state.activities.values(),
+        key=lambda item: str(getattr(item, "started_at", "")),
+        reverse=True,
+    ):
+        for ref in list(getattr(activity, "external_refs", [])):
+            if str(ref.get("ref_type", "") or "") == "execution_envelope":
+                refs.append(dict(ref))
+    return refs[0] if refs else None
+
+
+def _coerce_confidence(value: Any) -> float | None:
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _resolve_active_person_resolution(latest_envelope: dict[str, Any] | None) -> dict[str, Any]:
+    """Resolve active household person state from consumed Voice Identity outcomes."""
+    if latest_envelope is None:
+        return {
+            "resolution_enabled": True,
+            "active_person_state": _ACTIVE_PERSON_STATE_UNAVAILABLE,
+            "active_person_available": False,
+            "resolved_person_id": None,
+            "resolved_voice_profile_id": None,
+            "attribution_available": False,
+            "identity_context_available": False,
+            "confidence_available": False,
+            "confidence_accepted": False,
+            "confidence": None,
+            "confidence_band": None,
+            "readiness_state": "unavailable",
+            "reason_code": "no_execution_envelope",
+            "resolution_posture": "fail_closed",
+            "fail_closed": True,
+            "authority_source": "voice_identity",
+            "consumption_only": True,
+        }
+
+    attribution_consumed = bool(latest_envelope.get("voice_identity_attribution_consumed", False))
+    attribution_state = str(latest_envelope.get("voice_identity_attribution_state", "") or "").strip().lower()
+    attribution_reason = str(latest_envelope.get("voice_identity_attribution_reason_code", "") or "").strip().lower()
+    person_id = str(latest_envelope.get("voice_identity_attribution_person_id", "") or "").strip() or None
+    voice_profile_id = str(
+        latest_envelope.get("voice_identity_attribution_voice_profile_id", "") or ""
+    ).strip() or None
+    confidence_consumed = bool(latest_envelope.get("voice_identity_confidence_consumed", False))
+    confidence_value = _coerce_confidence(latest_envelope.get("voice_identity_confidence_value"))
+    confidence_band = str(latest_envelope.get("voice_identity_confidence_band", "") or "").strip().lower() or None
+    readiness_raw = str(latest_envelope.get("voice_identity_attribution_readiness", "") or "").strip().lower()
+    readiness_state = readiness_raw or "unspecified"
+
+    ambiguous_reason_codes = {"low_confidence", "ambiguous_match"}
+    unavailable_reason_codes = {
+        "voice_identity_not_loaded",
+        "voice_identity_linkage_disabled",
+        "attribution_service_unavailable",
+        "identity_context_service_unavailable",
+        "attribution_unavailable",
+        "attribution_not_ready",
+    }
+
+    available = bool(attribution_consumed and person_id)
+    ambiguous = bool(
+        attribution_state == "low_confidence"
+        or confidence_band in {"low", "ambiguous"}
+        or attribution_reason in ambiguous_reason_codes
+    )
+    unavailable = bool(
+        (readiness_raw and readiness_raw != "ready")
+        or attribution_state == "unavailable"
+        or attribution_reason in unavailable_reason_codes
+    )
+
+    if available:
+        state = _ACTIVE_PERSON_STATE_AVAILABLE
+        reason_code = attribution_reason or "attribution_ready"
+    elif ambiguous:
+        state = _ACTIVE_PERSON_STATE_AMBIGUOUS
+        reason_code = attribution_reason or "low_confidence"
+    elif unavailable:
+        state = _ACTIVE_PERSON_STATE_UNAVAILABLE
+        reason_code = attribution_reason or "attribution_unavailable"
+    else:
+        state = _ACTIVE_PERSON_STATE_UNKNOWN
+        reason_code = attribution_reason or "identity_unknown"
+
+    confidence_accepted = bool(
+        available
+        and confidence_consumed
+        and confidence_band not in {"low", "ambiguous", "unknown", "unavailable", "no_match"}
+    )
+
+    return {
+        "resolution_enabled": True,
+        "active_person_state": state,
+        "active_person_available": available,
+        "resolved_person_id": person_id if available else None,
+        "resolved_voice_profile_id": voice_profile_id if available else None,
+        "attribution_available": attribution_consumed,
+        "identity_context_available": attribution_state in {"known", "unknown", "low_confidence"},
+        "confidence_available": confidence_consumed,
+        "confidence_accepted": confidence_accepted,
+        "confidence": confidence_value,
+        "confidence_band": confidence_band,
+        "readiness_state": readiness_state,
+        "reason_code": reason_code,
+        "resolution_posture": "resolved" if available else "fail_closed",
+        "fail_closed": not available,
+        "authority_source": "voice_identity",
+        "consumption_only": True,
+    }
+
 
 class ConciergeCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     """Coordinates runtime state for Concierge."""
@@ -378,6 +504,8 @@ class ConciergeCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
 
         state = await self._storage.async_load_state()
+        latest_execution_ref = _latest_execution_envelope_ref(state)
+        active_person_resolution = _resolve_active_person_resolution(latest_execution_ref)
         foundation_area_ids = {area.id for area in ar.async_get(self.hass).async_list_areas()}
         configured_room_outside_foundation_count = sum(
             1 for area_id in state.rooms if area_id not in foundation_area_ids
@@ -481,7 +609,7 @@ class ConciergeCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "privacy_boundary_preserved": True,
                 "presence_detection_enabled": False,
                 "presence_inference_enabled": False,
-                "presence_attribution_enabled": False,
+                "presence_attribution_enabled": True,
                 "presence_behavior_enabled": False,
                 "presence_diagnostics_behavior_enabled": False,
                 "deferred_release_3_owners": {
@@ -502,7 +630,7 @@ class ConciergeCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "household_memory_authority_external": True,
                 "guest_safe_boundary_preserved": True,
                 "privacy_boundary_preserved": True,
-                "identity_attribution_enabled": False,
+                "identity_attribution_enabled": True,
                 "occupancy_truth_modification_enabled": False,
                 "presence_truth_modification_enabled": False,
                 "behavior_enabled": True,
@@ -524,7 +652,7 @@ class ConciergeCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "household_memory_authority_external": True,
                 "guest_safe_boundary_preserved": True,
                 "privacy_boundary_preserved": True,
-                "identity_attribution_enabled": False,
+                "identity_attribution_enabled": True,
                 "occupancy_truth_modification_enabled": False,
                 "presence_truth_modification_enabled": False,
                 "conflict_visibility_enabled": True,
@@ -560,6 +688,10 @@ class ConciergeCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "voice_profile_count": len(state.voice_profiles),
             "configured_room_outside_foundation_count": configured_room_outside_foundation_count,
             "composites_with_missing_area_count": composites_with_missing_area_count,
+            "active_person_resolution_enabled": True,
+            "active_person_state": active_person_resolution["active_person_state"],
+            "active_person_reason_code": active_person_resolution["reason_code"],
+            "active_person_available": active_person_resolution["active_person_available"],
         }
         room_configs = {
             area_id: {
@@ -597,4 +729,5 @@ class ConciergeCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 }
                 for voice_profile_id, profile in state.voice_profiles.items()
             },
+            "active_person_resolution": active_person_resolution,
         }

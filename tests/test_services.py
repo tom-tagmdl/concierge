@@ -4,15 +4,117 @@ from __future__ import annotations
 
 import pytest
 
-from homeassistant.core import Event
+from homeassistant.core import Event, SupportsResponse
 from homeassistant.helpers import area_registry as ar
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import floor_registry as fr
 from homeassistant.core import HomeAssistant
 
+from custom_components.concierge import services as services_module
+from custom_components.concierge.archive_runtime import (
+    CONF_AUDIT_ARCHIVE_DESTINATION_URI,
+    CONF_AUDIT_ARCHIVE_ENABLED,
+)
+from custom_components.concierge.const import CONF_VOICE_IDENTITY_LINKED
 from custom_components.concierge.const import DOMAIN, EVENT_EXECUTION
-from custom_components.concierge.models import PersonProfile
+from custom_components.concierge.models import ActivityEvent, PersonProfile
 from custom_components.concierge.storage import ConciergeStorage
+
+
+def _register_voice_identity_runtime_services(
+    hass: HomeAssistant,
+    *,
+    attribution_payload: dict[str, object] | None = None,
+    identity_context_payload: dict[str, object] | None = None,
+) -> None:
+    """Register test Voice Identity runtime services with deterministic payloads."""
+    if hass.services.has_service("voice_identity", "attribute_speaker"):
+        hass.services.async_remove("voice_identity", "attribute_speaker")
+    if hass.services.has_service("voice_identity", "get_identity_context"):
+        hass.services.async_remove("voice_identity", "get_identity_context")
+
+    async def _handle_attribute_speaker(call):
+        _ = call
+        payload = attribution_payload or {
+            "success": True,
+            "status": "attribution_unavailable",
+            "identity_confidence_level": "unknown",
+            "confidence": 0.0,
+            "confidence_band": "unavailable",
+            "reason_code": "attribution_unavailable",
+            "attribution_method": "none",
+            "is_confident": False,
+            "is_ambiguous": False,
+            "is_abstained": True,
+            "diagnostic_summary": {
+                "diagnostic_available": False,
+                "diagnostic_reason_code": "diagnostics_unavailable",
+                "repair_available": False,
+                "health_status": "unavailable",
+                "attribution_readiness": "unavailable",
+                "compatibility_readiness": "unavailable",
+            },
+            "repair_hint_code": "review_component_health",
+            "suggested_next_action_code": "reload_voice_identity",
+            "health_status": "unavailable",
+            "readiness_status": "unavailable",
+        }
+        return {"success": True, "reason_code": "ready", "entry_id": "entry", "attribution": payload}
+
+    async def _handle_get_identity_context(call):
+        _ = call
+        payload = identity_context_payload or {
+            "state": "unavailable",
+            "reason_code": "attribution_unavailable",
+            "source": "voice_identity",
+        }
+        return {"success": True, "reason_code": "ready", "entry_id": "entry", "identity_context": payload}
+
+    hass.services.async_register(
+        "voice_identity",
+        "attribute_speaker",
+        _handle_attribute_speaker,
+        supports_response=SupportsResponse.ONLY,
+    )
+    hass.services.async_register(
+        "voice_identity",
+        "get_identity_context",
+        _handle_get_identity_context,
+        supports_response=SupportsResponse.ONLY,
+    )
+
+
+async def test_capability_resolution_uses_entry_scoped_voice_identity_discovery(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """Capability evaluation should succeed using entry-scoped Voice Identity discovery runtime."""
+    capabilities = await services_module._async_resolve_integration_capabilities(hass)
+
+    assert capabilities["cap_voice_enrollment"] is True
+    assert capabilities["voice_enrollment_reason_code"] == "ready"
+    assert capabilities["input_snapshot"]["voice_identity_linked"] is True
+
+
+async def test_capability_resolution_reports_linkage_disabled(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """Capability evaluation should fail closed when Voice Identity linkage is disabled."""
+    hass.config_entries.async_update_entry(
+        setup_integration,
+        options={
+            **dict(setup_integration.options),
+            CONF_VOICE_IDENTITY_LINKED: False,
+            CONF_AUDIT_ARCHIVE_ENABLED: True,
+            CONF_AUDIT_ARCHIVE_DESTINATION_URI: "/media/concierge-tests",
+        },
+    )
+
+    capabilities = await services_module._async_resolve_integration_capabilities(hass)
+
+    assert capabilities["cap_voice_enrollment"] is False
+    assert capabilities["voice_enrollment_reason_code"] == "voice_identity_linkage_disabled"
 
 
 async def test_interaction_services_round_trip(hass: HomeAssistant, setup_integration) -> None:
@@ -198,6 +300,26 @@ async def test_context_and_summary_services(hass: HomeAssistant, setup_integrati
     assert messaging["deferred_release_4_owners"]["messaging_provenance"] == "#340"
     assert messaging["deferred_release_4_owners"]["notification_and_delivery_boundary"] == "#341"
     assert messaging["deferred_release_4_owners"]["recipient_consent_privacy_visibility_boundary"] == "#342"
+    productivity_boundary = summary["productivity_source_of_record_boundary"]
+    assert productivity_boundary["applicable"] is True
+    assert productivity_boundary["boundary_path"] == "governed_productivity_source_of_record_boundary"
+    assert productivity_boundary["deterministic_boundary"] is True
+    assert productivity_boundary["concierge_role"] == "bounded_consumer_orchestrator"
+    assert productivity_boundary["representation_kinds"] == [
+        "configuration_reference",
+        "consumed_projection",
+        "generated_explanation",
+        "coordination_context",
+    ]
+    assert productivity_boundary["configured_source_reference_count"] == 0
+    assert productivity_boundary["domain_boundaries"]["calendar"]["source_of_record_external"] is True
+    assert productivity_boundary["domain_boundaries"]["calendar"]["configured_reference_present"] is False
+    assert productivity_boundary["domain_boundaries"]["calendar"]["concierge_canonical_state_owned"] is False
+    assert productivity_boundary["domain_boundaries"]["briefing"]["derived_context_only"] is True
+    assert productivity_boundary["provenance_requirements"]["provenance_reference_required"] is True
+    assert productivity_boundary["diagnostics_visibility"]["safe_source_metadata_only"] is True
+    assert productivity_boundary["non_authority_assertions"]["creates_source_of_record"] is False
+    assert productivity_boundary["non_authority_assertions"]["stores_duplicate_canonical_records"] is False
     occupancy = summary["occupancy_governance_boundary"]
     assert occupancy["applicable"] is True
     assert occupancy["occupancy_path"] == "governed_occupancy_boundary"
@@ -394,6 +516,337 @@ async def test_summary_preserves_global_context_when_room_context_is_unavailable
     assert summary["fallback_context_applied"] is True
     assert summary["fallback_reason"] == "no_room_context"
     assert summary["global_context_continuity_available"] is True
+
+
+async def test_summary_includes_person_productivity_source_bindings(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """Summary boundary should expose person productivity source bindings with safe fallback state."""
+    storage = ConciergeStorage(hass)
+    await storage.async_update_person_profile(
+        PersonProfile(
+            person_id="person.tom",
+            name="Tom",
+            email_source_ref="sensor.mailbox_tom",
+            calendar_source_ref="sensor.calendar_tom",
+            task_source_ref="tasks_provider_tom",
+            shopping_source_ref="shopping_provider_household",
+        )
+    )
+
+    summary = await hass.services.async_call(
+        DOMAIN,
+        "get_summary",
+        {"include_context": True, "include_signals": False},
+        blocking=True,
+        return_response=True,
+    )
+
+    boundary = summary["productivity_source_of_record_boundary"]
+    bindings = boundary["person_productivity_source_bindings"]
+    assert bindings["person_count"] == 1
+    assert bindings["configured_reference_present"]["email"] is False
+    assert bindings["configured_reference_present"]["calendar"] is False
+    assert bindings["configured_reference_present"]["task"] is True
+    assert bindings["configured_reference_present"]["shopping"] is True
+    assert bindings["safe_fallback_person_count"] == 1
+
+    person_binding = bindings["person_bindings"][0]
+    assert person_binding["person_id"] == "person.tom"
+    assert person_binding["configuration_complete"] is False
+    assert person_binding["safe_fallback_mode_active"] is True
+    assert "source_missing_or_configuration_incomplete" in person_binding["safe_fallback_reasons"]
+    assert "source_unavailable_or_removed" in person_binding["safe_fallback_reasons"]
+    assert person_binding["sources"]["email"]["binding_status"] == "unavailable_or_removed"
+    assert person_binding["sources"]["calendar"]["binding_status"] == "unavailable_or_removed"
+    assert person_binding["sources"]["task"]["binding_status"] == "configured"
+    assert person_binding["sources"]["shopping"]["binding_status"] == "configured"
+
+    calendar_email_boundary = summary["calendar_email_consumption_boundary"]
+    assert calendar_email_boundary["applicable"] is True
+    assert calendar_email_boundary["boundary_path"] == "governed_calendar_email_consumption_boundary"
+    assert calendar_email_boundary["configured_source_reference_count"] == 0
+    assert calendar_email_boundary["person_aware_routing"]["routing_enabled"] is False
+    assert calendar_email_boundary["person_aware_routing"]["reason_code"] == "no_execution_envelope"
+    assert calendar_email_boundary["person_aware_routing"]["domains"]["calendar"]["enabled"] is False
+    assert calendar_email_boundary["person_aware_routing"]["domains"]["email"]["enabled"] is False
+
+    task_shopping_boundary = summary["task_shopping_consumption_boundary"]
+    assert task_shopping_boundary["applicable"] is True
+    assert task_shopping_boundary["boundary_path"] == "governed_task_shopping_consumption_boundary"
+    assert task_shopping_boundary["consumption_only"] is True
+    assert task_shopping_boundary["person_aware_routing"]["routing_enabled"] is False
+    assert task_shopping_boundary["person_aware_routing"]["reason_code"] == "no_execution_envelope"
+    assert task_shopping_boundary["person_aware_routing"]["domains"]["task"]["enabled"] is False
+    assert task_shopping_boundary["person_aware_routing"]["domains"]["shopping"]["enabled"] is False
+    assert task_shopping_boundary["task_reference_kinds"] == [
+        "ownership_references",
+        "assignment_references",
+        "completion_references",
+        "due_awareness_references",
+        "provenance_references",
+    ]
+    assert task_shopping_boundary["shopping_reference_kinds"] == [
+        "shopping_item_references",
+        "ownership_references",
+        "duplicate_indicators",
+        "completion_references",
+        "provenance_references",
+        "shopping_explainability_references",
+    ]
+    assert task_shopping_boundary["clarification_behavior"]["supported"] is True
+    assert task_shopping_boundary["clarification_behavior"]["ambiguity_visible"] is True
+    assert task_shopping_boundary["clarification_behavior"]["hidden_intent_inference"] is False
+    assert task_shopping_boundary["task_reference_boundaries"]["task"]["reference_only_model"] is True
+    assert "claims_task_authority" not in task_shopping_boundary["task_reference_boundaries"]["task"]
+    assert task_shopping_boundary["person_shopping_bindings"]["required_domains"] == ["shopping"]
+    assert task_shopping_boundary["person_shopping_bindings"]["person_count"] == 1
+    assert task_shopping_boundary["person_shopping_bindings"]["configured_reference_present"]["shopping"] is True
+    assert task_shopping_boundary["person_shopping_bindings"]["safe_fallback_person_count"] == 0
+    assert task_shopping_boundary["person_shopping_bindings"]["person_bindings"][0]["sources"]["shopping"]["binding_status"] == "configured"
+
+    calendar_email_bindings = calendar_email_boundary["person_calendar_email_bindings"]
+    assert calendar_email_bindings["required_domains"] == ["email", "calendar"]
+    assert calendar_email_bindings["person_count"] == 1
+    assert calendar_email_bindings["configured_reference_present"]["email"] is False
+    assert calendar_email_bindings["configured_reference_present"]["calendar"] is False
+    assert calendar_email_bindings["safe_fallback_person_count"] == 1
+
+    calendar_email_person_binding = calendar_email_bindings["person_bindings"][0]
+    assert calendar_email_person_binding["person_id"] == "person.tom"
+    assert calendar_email_person_binding["configuration_complete"] is False
+    assert calendar_email_person_binding["safe_fallback_mode_active"] is True
+    assert "source_missing_or_configuration_incomplete" in calendar_email_person_binding["safe_fallback_reasons"]
+    assert "source_unavailable_or_removed" in calendar_email_person_binding["safe_fallback_reasons"]
+    assert calendar_email_person_binding["sources"]["email"]["binding_status"] == "unavailable_or_removed"
+    assert calendar_email_person_binding["sources"]["calendar"]["binding_status"] == "unavailable_or_removed"
+
+
+async def test_summary_handles_missing_calendar_binding_with_safe_fallback(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """Missing calendar setup should surface a safe fallback posture without guessing."""
+    storage = ConciergeStorage(hass)
+    await storage.async_update_person_profile(
+        PersonProfile(
+            person_id="person.tom",
+            name="Tom",
+            email_source_ref="sensor.mailbox_tom",
+        )
+    )
+
+    summary = await hass.services.async_call(
+        DOMAIN,
+        "get_summary",
+        {"include_context": True, "include_signals": False},
+        blocking=True,
+        return_response=True,
+    )
+
+    calendar_email_boundary = summary["calendar_email_consumption_boundary"]
+    calendar_email_bindings = calendar_email_boundary["person_calendar_email_bindings"]
+    assert calendar_email_bindings["person_count"] == 1
+    assert calendar_email_bindings["safe_fallback_person_count"] == 1
+
+    person_binding = calendar_email_bindings["person_bindings"][0]
+    assert person_binding["configuration_complete"] is False
+    assert person_binding["safe_fallback_mode_active"] is True
+    assert "source_missing_or_configuration_incomplete" in person_binding["safe_fallback_reasons"]
+    assert person_binding["sources"]["calendar"]["binding_status"] == "missing"
+    assert person_binding["sources"]["email"]["binding_status"] == "unavailable_or_removed"
+
+    capture_knowledge_boundary = summary["capture_knowledge_consumption_boundary"]
+    assert capture_knowledge_boundary["applicable"] is True
+    assert capture_knowledge_boundary["boundary_path"] == "governed_capture_knowledge_consumption_boundary"
+    assert capture_knowledge_boundary["knowledge_consumption"]["knowledge_available"] is False
+    assert capture_knowledge_boundary["knowledge_consumption"]["safe_fallback_mode_active"] is True
+    assert capture_knowledge_boundary["capture_consumption"]["capture_available"] is False
+    assert capture_knowledge_boundary["capture_consumption"]["safe_fallback_mode_active"] is True
+    assert capture_knowledge_boundary["provenance_visibility"]["provenance_reference_present"] is False
+
+    briefing_boundary = summary["briefing_composition_boundary"]
+    assert briefing_boundary["applicable"] is True
+    assert briefing_boundary["boundary_path"] == "governed_briefing_composition_boundary"
+    assert briefing_boundary["briefing_available"] is True
+    assert briefing_boundary["safe_fallback_mode_active"] is True
+    assert briefing_boundary["briefing_composition"]["briefing_composition_state"] == "active"
+    assert briefing_boundary["briefing_composition"]["priority_ordering"] == [
+        "calendar_email",
+        "task_shopping",
+        "capture_knowledge",
+    ]
+
+    household_status_boundary = summary["household_status_synthesis_boundary"]
+    assert household_status_boundary["applicable"] is True
+    assert household_status_boundary["boundary_path"] == "governed_household_status_synthesis_boundary"
+    assert household_status_boundary["household_status_available"] is True
+    assert household_status_boundary["safe_fallback_mode_active"] is True
+    assert household_status_boundary["coordination_snapshot"]["coordination_snapshot_state"] == "active"
+    assert household_status_boundary["briefing_composition_boundary"]["boundary_path"] == "governed_briefing_composition_boundary"
+    assert household_status_boundary["open_loop_coordination_visibility"]["open_loop_supported"] is True
+    assert household_status_boundary["open_loop_coordination_visibility"]["informational_only"] is True
+    assert household_status_boundary["open_loop_coordination_visibility"]["coordination_authority_external"] is True
+
+
+async def test_summary_includes_capture_and_knowledge_consumption(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """Summary boundary should expose bounded capture and knowledge references with safe provenance visibility."""
+    area = ar.async_get(hass).async_create(name="Library")
+    storage = ConciergeStorage(hass)
+    await storage.async_update_room_config(area_id=area.id, ai_knowledge_enabled=True)
+    await storage.async_record_activity_event(
+        ActivityEvent(
+            activity_id="activity.capture-knowledge-1",
+            correlation_id="corr.capture-knowledge-1",
+            started_at="2026-07-20T00:00:00Z",
+            channel="summary",
+            actor_class="system",
+            intent_class="capture_and_knowledge_consumption",
+            request_summary="Seed capture and knowledge references",
+            external_refs=[
+                {"ref_type": "knowledge_request_references", "reference_id": "know.req.1"},
+                {"ref_type": "knowledge_response_references", "reference_id": "know.res.1"},
+                {"ref_type": "source_references", "reference_id": "know.src.1"},
+                {"ref_type": "uncertainty_references", "reference_id": "know.unc.1"},
+                {"ref_type": "knowledge_explainability_references", "reference_id": "know.exp.1"},
+                {"ref_type": "utterance_reference", "reference_id": "cap.utt.1"},
+                {"ref_type": "decomposition_references", "reference_id": "cap.dec.1"},
+                {"ref_type": "item_lineage_references", "reference_id": "cap.lineage.1"},
+                {"ref_type": "decomposition_explainability_references", "reference_id": "cap.exp.1"},
+                {"ref_type": "ambiguity_reference", "reference_id": "cap.amb.1"},
+                {"ref_type": "confirmation_reference", "reference_id": "cap.confirm.1"},
+                {"ref_type": "provenance_references", "reference_id": "prov.1"},
+            ],
+        )
+    )
+
+    summary = await hass.services.async_call(
+        DOMAIN,
+        "get_summary",
+        {"include_context": True, "include_signals": False},
+        blocking=True,
+        return_response=True,
+    )
+
+    capture_knowledge_boundary = summary["capture_knowledge_consumption_boundary"]
+    assert capture_knowledge_boundary["applicable"] is True
+    assert capture_knowledge_boundary["boundary_path"] == "governed_capture_knowledge_consumption_boundary"
+    assert capture_knowledge_boundary["configured_source_reference_count"] == 11
+    assert capture_knowledge_boundary["knowledge_reference_kinds"] == [
+        "knowledge_request_references",
+        "knowledge_response_references",
+        "source_references",
+        "uncertainty_references",
+        "knowledge_explainability_references",
+    ]
+    assert capture_knowledge_boundary["capture_reference_kinds"] == [
+        "utterance_reference",
+        "decomposition_references",
+        "item_lineage_references",
+        "decomposition_explainability_references",
+        "ambiguity_reference",
+        "confirmation_reference",
+    ]
+    assert capture_knowledge_boundary["knowledge_consumption"]["knowledge_available"] is True
+    assert capture_knowledge_boundary["knowledge_consumption"]["knowledge_enabled_room_count"] == 1
+    assert capture_knowledge_boundary["capture_consumption"]["capture_available"] is True
+    assert capture_knowledge_boundary["capture_consumption"]["reference_count"] == 6
+    assert capture_knowledge_boundary["provenance_visibility"]["provenance_reference_count"] == 1
+    assert capture_knowledge_boundary["clarification_behavior"]["supported"] is True
+    assert capture_knowledge_boundary["clarification_behavior"]["ambiguity_visible"] is True
+    assert capture_knowledge_boundary["clarification_behavior"]["hidden_intent_inference"] is False
+    assert capture_knowledge_boundary["domain_boundaries"]["knowledge"]["source_of_record"] == "configured_knowledge_provider"
+    assert capture_knowledge_boundary["domain_boundaries"]["capture"]["source_of_record"] == "configured_capture_provider"
+    assert capture_knowledge_boundary["non_authority_assertions"]["claims_knowledge_authority"] is False
+    assert capture_knowledge_boundary["non_authority_assertions"]["claims_capture_authority"] is False
+
+    briefing_boundary = summary["briefing_composition_boundary"]
+    assert briefing_boundary["applicable"] is True
+    assert briefing_boundary["boundary_path"] == "governed_briefing_composition_boundary"
+    assert briefing_boundary["configured_source_reference_count"] == 11
+    assert briefing_boundary["briefing_available"] is True
+    assert briefing_boundary["source_boundary_count"] == 3
+    assert briefing_boundary["briefing_composition"]["briefing_composition_state"] == "active"
+    assert briefing_boundary["briefing_composition"]["priority_ordering"] == [
+        "calendar_email",
+        "task_shopping",
+        "capture_knowledge",
+    ]
+    assert briefing_boundary["provenance_visibility"]["provenance_visible"] is True
+    assert briefing_boundary["non_authority_assertions"]["claims_briefing_authority"] is False
+    assert briefing_boundary["non_authority_assertions"]["claims_household_status_authority"] is False
+
+    household_status_boundary = summary["household_status_synthesis_boundary"]
+    assert household_status_boundary["applicable"] is True
+    assert household_status_boundary["boundary_path"] == "governed_household_status_synthesis_boundary"
+    assert household_status_boundary["configured_source_reference_count"] == 11
+    assert household_status_boundary["household_status_available"] is True
+    assert household_status_boundary["source_boundary_count"] == 5
+    assert household_status_boundary["coordination_snapshot"]["coordination_snapshot_state"] == "active"
+    assert household_status_boundary["briefing_composition_boundary"]["boundary_path"] == "governed_briefing_composition_boundary"
+    assert household_status_boundary["provenance_visibility"]["provenance_visible"] is True
+    assert household_status_boundary["open_loop_coordination_visibility"]["open_loop_supported"] is True
+    assert household_status_boundary["open_loop_coordination_visibility"]["source_of_record_external"] is True
+    assert household_status_boundary["open_loop_coordination_visibility"]["provenance_visibility_supported"] is True
+    assert household_status_boundary["non_authority_assertions"]["claims_household_status_authority"] is False
+    assert household_status_boundary["non_authority_assertions"]["creates_planning_engine"] is False
+
+    provenance_ownership_boundary = summary["provenance_ownership_consumption_boundary"]
+    assert provenance_ownership_boundary["applicable"] is True
+    assert provenance_ownership_boundary["boundary_path"] == "governed_release_6_provenance_ownership_consumption_boundary"
+    assert provenance_ownership_boundary["provenance_visibility"]["provenance_visible"] is True
+    assert provenance_ownership_boundary["explainability_visibility"]["safe_fallback_visible"] is True
+    assert provenance_ownership_boundary["readiness_assessment"]["ownership_visibility_ready"] is True
+    assert provenance_ownership_boundary["readiness_assessment"]["attribution_visibility_ready"] is True
+    assert provenance_ownership_boundary["readiness_assessment"]["lineage_completeness_ready"] is True
+    assert provenance_ownership_boundary["readiness_assessment"]["explainability_readiness"] is True
+    assert provenance_ownership_boundary["safe_fallback_mode_active"] is False
+    assert provenance_ownership_boundary["non_authority_assertions"]["claims_ownership_authority"] is False
+    assert provenance_ownership_boundary["non_authority_assertions"]["claims_provenance_authority"] is False
+    assert provenance_ownership_boundary["deferred_release_6_owners"]["provenance_ownership_and_consumption"] == "#368"
+
+    household_coordination_boundary = summary["household_coordination_boundary"]
+    assert household_coordination_boundary["applicable"] is True
+    assert household_coordination_boundary["boundary_path"] == "governed_household_coordination_boundary"
+    assert household_coordination_boundary["coordination_source"] == "governed_release_6_consumption_boundaries"
+    assert household_coordination_boundary["consumption_only"] is True
+    assert household_coordination_boundary["open_loop_coordination_visibility"]["open_loop_supported"] is True
+    assert household_coordination_boundary["open_loop_coordination_visibility"]["informational_only"] is True
+    assert household_coordination_boundary["non_authority_assertions"]["claims_coordination_authority"] is False
+    assert household_coordination_boundary["non_authority_assertions"]["claims_provenance_authority"] is False
+
+    productivity_coordination_boundary = summary["productivity_coordination_boundary"]
+    assert productivity_coordination_boundary["applicable"] is True
+    assert productivity_coordination_boundary["boundary_path"] == "governed_productivity_coordination_boundary"
+    assert productivity_coordination_boundary["consumption_only"] is True
+    assert productivity_coordination_boundary["informational_only"] is True
+    assert productivity_coordination_boundary["coordination_awareness"]["cross_domain_coordination_supported"] is True
+    assert productivity_coordination_boundary["explainability_visibility"]["routing_inputs_visible"] is True
+    assert productivity_coordination_boundary["non_authority_assertions"]["claims_productivity_authority"] is False
+    assert productivity_coordination_boundary["non_authority_assertions"]["creates_planning_engine"] is False
+
+    provenance_diagnostics_boundary = summary["provenance_diagnostics_explainability_boundary"]
+    assert provenance_diagnostics_boundary["applicable"] is True
+    assert (
+        provenance_diagnostics_boundary["boundary_path"]
+        == "governed_release_6_provenance_diagnostics_explainability_boundary"
+    )
+    assert provenance_diagnostics_boundary["consumption_only"] is True
+    assert provenance_diagnostics_boundary["informational_only"] is True
+    assert provenance_diagnostics_boundary["provenance_visibility"]["provenance_visible"] is True
+    assert provenance_diagnostics_boundary["diagnostics_visibility"]["safe_source_metadata_only"] is True
+    assert (
+        provenance_diagnostics_boundary["non_authority_assertions"]["claims_provenance_authority"]
+        is False
+    )
+    assert (
+        provenance_diagnostics_boundary["non_authority_assertions"]["creates_planning_engine"]
+        is False
+    )
 
 async def test_push_person_message_reports_messaging_governance_boundary(
     hass: HomeAssistant,
@@ -1378,6 +1831,10 @@ async def test_person_profile_service_persists_bindings(
             "ble_device_ids": ["ble.tom_tag"],
             "aqara_presence_entity_ids": ["binary_sensor.tom_presence"],
             "voice_profile_id": "tom_voice",
+            "email_source_ref": "mailbox.tom@example.com",
+            "calendar_source_ref": "calendar.tom",
+            "task_source_ref": "tasks.tom",
+            "shopping_source_ref": "shopping_list.household",
             "consent": {"person_identity": True},
             "notes": "Primary person profile",
             "set_as_default": True,
@@ -1392,8 +1849,301 @@ async def test_person_profile_service_persists_bindings(
     assert profile.linked_area_id == "living_room"
     assert profile.ble_device_ids == ["ble.tom_tag"]
     assert profile.voice_profile_id == "tom_voice"
+    assert profile.email_source_ref == "mailbox.tom@example.com"
+    assert profile.calendar_source_ref == "calendar.tom"
+    assert profile.task_source_ref == "tasks.tom"
+    assert profile.shopping_source_ref == "shopping_list.household"
     assert state.default_person_profile is not None
     assert state.default_person_profile.person_id == "tom"
+
+
+async def test_runtime_person_context_resolves_exact_person_id_and_exposes_bindings(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """Runtime person context should resolve canonical person_id matches and expose approved bindings."""
+    area = ar.async_get(hass).async_create(name="Living Room")
+    storage = ConciergeStorage(hass)
+    await storage.async_update_person_profile(
+        PersonProfile(
+            person_id="person.tom",
+            name="Tom",
+            linked_area_id=area.id,
+            voice_profile_id="voice.tom",
+            ble_device_ids=["ble.tom_tag"],
+            aqara_presence_entity_ids=["binary_sensor.tom_presence"],
+            mobile_notify_targets=["mobile_app.tom"],
+            preferred_mobile_target="mobile_app.tom",
+            email_source_ref="sensor.mailbox_tom",
+            calendar_source_ref="sensor.calendar_tom",
+            task_source_ref="tasks_provider_tom",
+            shopping_source_ref="shopping_list.household",
+            consent={"delivery_consent_granted": True},
+            minor_allowed_intent_classes=["calendar", "email"],
+            guardian_controls_required=True,
+        )
+    )
+    state = await storage.async_load_state()
+
+    active_person_resolution = {
+        "active_person_state": "active_person_available",
+        "active_person_available": True,
+        "resolved_person_id": "person.tom",
+        "resolved_voice_profile_id": "voice.tom",
+        "reason_code": "attribution_ready",
+    }
+
+    runtime_person_context = services_module._build_runtime_person_context(
+        state,
+        active_person_resolution=active_person_resolution,
+    )
+    routing = services_module._build_person_aware_productivity_routing(
+        state=state,
+        hass=hass,
+        active_person_resolution=active_person_resolution,
+        runtime_person_context=runtime_person_context,
+    )
+
+    assert runtime_person_context["person_context_state"] == "person_context_resolved"
+    assert runtime_person_context["reason_code"] == "person_context_resolved"
+    assert runtime_person_context["resolved_person_id"] == "person.tom"
+    assert runtime_person_context["resolved_concierge_person_profile_id"] == "person.tom"
+    assert runtime_person_context["identity"]["voice_profile_ref"] == "voice.tom"
+    assert runtime_person_context["productivity"]["email_source_refs"][0] == "sensor.mailbox_tom"
+    assert runtime_person_context["productivity"]["calendar_source_refs"][0] == "sensor.calendar_tom"
+    assert runtime_person_context["productivity"]["task_source_refs"][0] == "tasks_provider_tom"
+    assert runtime_person_context["productivity"]["shopping_source_refs"][0] == "shopping_list.household"
+    assert runtime_person_context["presence"]["ble_device_refs"] == ["ble.tom_tag"]
+    assert runtime_person_context["presence"]["presence_entity_refs"] == ["binary_sensor.tom_presence"]
+    assert runtime_person_context["presence"]["location_ref"] == area.id
+    assert runtime_person_context["mobility"]["mobile_device_refs"] == ["mobile_app.tom"]
+    assert runtime_person_context["mobility"]["read_later_target"] == "mobile_app.tom"
+    assert runtime_person_context["policy"]["available"] is True
+    assert runtime_person_context["policy"]["allowed_intent_abilities"] == ["calendar", "email"]
+    assert runtime_person_context["policy"]["minor_controls"]["guardian_controls_required"] is True
+    assert routing["routing_enabled"] is True
+    assert routing["runtime_person_context"]["person_context_state"] == "person_context_resolved"
+    assert routing["domain_routing"]["email"]["selected_source_ref"] == "sensor.mailbox_tom"
+    assert routing["domain_routing"]["calendar"]["selected_source_ref"] == "sensor.calendar_tom"
+    assert routing["domain_routing"]["task"]["selected_source_ref"] == "tasks_provider_tom"
+    assert routing["domain_routing"]["task"]["selection_mode"] == "person_binding"
+    assert routing["domain_routing"]["shopping"]["selected_source_ref"] == "shopping_list.household"
+
+
+async def test_runtime_person_context_resolves_via_voice_profile_reference(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """Runtime person context should use voice-profile references when the active person id is not the stored person_id."""
+    storage = ConciergeStorage(hass)
+    await storage.async_update_person_profile(
+        PersonProfile(
+            person_id="person.tom_grounds",
+            name="Tom Grounds",
+            voice_profile_id="person.tom",
+            email_source_ref="sensor.mailbox_tom",
+            calendar_source_ref="sensor.calendar_tom",
+            task_source_ref="tasks_provider_tom",
+            shopping_source_ref="shopping_list.household",
+            consent={"delivery_consent_granted": True},
+            minor_allowed_intent_classes=["calendar"],
+        )
+    )
+    state = await storage.async_load_state()
+
+    active_person_resolution = {
+        "active_person_state": "active_person_available",
+        "active_person_available": True,
+        "resolved_person_id": "person.tom",
+        "resolved_voice_profile_id": "voice.tom",
+        "reason_code": "attribution_ready",
+    }
+
+    runtime_person_context = services_module._build_runtime_person_context(
+        state,
+        active_person_resolution=active_person_resolution,
+    )
+
+    assert runtime_person_context["person_context_state"] == "person_context_resolved"
+    assert runtime_person_context["reason_code"] == "person_context_resolved"
+    assert runtime_person_context["resolved_concierge_person_profile_id"] == "person.tom_grounds"
+    assert runtime_person_context["match_mode"] == "voice_profile_reference"
+    assert runtime_person_context["identity"]["resolved_person_id"] == "person.tom"
+
+
+async def test_runtime_person_context_fails_closed_for_missing_profile(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """Missing person profiles should fail closed without inventing routing inputs."""
+    state = await ConciergeStorage(hass).async_load_state()
+
+    active_person_resolution = {
+        "active_person_state": "active_person_available",
+        "active_person_available": True,
+        "resolved_person_id": "person.david",
+        "resolved_voice_profile_id": "voice.david",
+        "reason_code": "attribution_ready",
+    }
+
+    runtime_person_context = services_module._build_runtime_person_context(
+        state,
+        active_person_resolution=active_person_resolution,
+    )
+    routing = services_module._build_person_aware_productivity_routing(
+        state=state,
+        hass=hass,
+        active_person_resolution=active_person_resolution,
+        runtime_person_context=runtime_person_context,
+    )
+
+    assert runtime_person_context["person_context_state"] == "person_context_unresolved"
+    assert runtime_person_context["reason_code"] == "person_profile_not_configured"
+    assert runtime_person_context["resolved_concierge_person_profile_id"] is None
+    assert runtime_person_context["fail_closed"] is True
+    assert routing["routing_enabled"] is False
+    assert routing["reason_code"] == "person_profile_not_configured"
+    assert routing["domain_routing"]["email"]["enabled"] is False
+    assert routing["domain_routing"]["calendar"]["enabled"] is False
+    assert routing["domain_routing"]["shopping"]["enabled"] is False
+
+
+async def test_runtime_person_context_reports_partial_states_safely(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """Partial person profiles should fail closed with explicit missing-binding reason codes."""
+    area = ar.async_get(hass).async_create(name="Bedroom")
+    storage = ConciergeStorage(hass)
+    await storage.async_update_person_profile(
+        PersonProfile(
+            person_id="person.tom",
+            name="Tom",
+            email_source_ref="sensor.mailbox_tom",
+            calendar_source_ref="sensor.calendar_tom",
+            shopping_source_ref="shopping_list.household",
+            consent={"delivery_consent_granted": True},
+            minor_allowed_intent_classes=["calendar"],
+        )
+    )
+    state = await storage.async_load_state()
+
+    active_person_resolution = {
+        "active_person_state": "active_person_available",
+        "active_person_available": True,
+        "resolved_person_id": "person.tom",
+        "resolved_voice_profile_id": "voice.tom",
+        "reason_code": "attribution_ready",
+    }
+
+    runtime_person_context = services_module._build_runtime_person_context(
+        state,
+        active_person_resolution=active_person_resolution,
+    )
+    routing = services_module._build_person_aware_productivity_routing(
+        state=state,
+        hass=hass,
+        active_person_resolution=active_person_resolution,
+        runtime_person_context=runtime_person_context,
+    )
+
+    assert runtime_person_context["person_context_state"] == "person_context_partial"
+    assert runtime_person_context["reason_code"] == "presence_bindings_missing"
+    assert runtime_person_context["presence"]["available"] is False
+    assert runtime_person_context["presence"]["location_ref"] is None
+    assert runtime_person_context["productivity"]["available"] is True
+    assert runtime_person_context["policy"]["available"] is True
+    assert routing["routing_enabled"] is False
+    assert routing["reason_code"] == "presence_bindings_missing"
+    assert routing["domain_routing"]["email"]["enabled"] is False
+    assert routing["domain_routing"]["calendar"]["enabled"] is False
+    assert routing["domain_routing"]["task"]["enabled"] is False
+    assert routing["domain_routing"]["shopping"]["enabled"] is False
+
+    await storage.async_update_person_profile(
+        PersonProfile(
+            person_id="person.jane",
+            name="Jane",
+            linked_area_id=area.id,
+            ble_device_ids=["ble.jane_tag"],
+            aqara_presence_entity_ids=["binary_sensor.jane_presence"],
+            mobile_notify_targets=["mobile_app.jane"],
+            preferred_mobile_target="mobile_app.jane",
+            consent={"delivery_consent_granted": True},
+            minor_allowed_intent_classes=["calendar"],
+        )
+    )
+    state = await storage.async_load_state()
+    active_person_resolution = {
+        "active_person_state": "active_person_available",
+        "active_person_available": True,
+        "resolved_person_id": "person.jane",
+        "resolved_voice_profile_id": "voice.jane",
+        "reason_code": "attribution_ready",
+    }
+
+    runtime_person_context = services_module._build_runtime_person_context(
+        state,
+        active_person_resolution=active_person_resolution,
+    )
+    routing = services_module._build_person_aware_productivity_routing(
+        state=state,
+        hass=hass,
+        active_person_resolution=active_person_resolution,
+        runtime_person_context=runtime_person_context,
+    )
+
+    assert runtime_person_context["person_context_state"] == "person_context_partial"
+    assert runtime_person_context["reason_code"] == "productivity_bindings_missing"
+    assert runtime_person_context["productivity"]["available"] is False
+    assert runtime_person_context["presence"]["available"] is True
+    assert routing["routing_enabled"] is False
+    assert routing["reason_code"] == "productivity_bindings_missing"
+    assert routing["domain_routing"]["email"]["enabled"] is False
+    assert routing["domain_routing"]["calendar"]["enabled"] is False
+    assert routing["domain_routing"]["task"]["enabled"] is False
+    assert routing["domain_routing"]["shopping"]["enabled"] is False
+
+    await storage.async_update_person_profile(
+        PersonProfile(
+            person_id="person.alex",
+            name="Alex",
+            linked_area_id=area.id,
+            voice_profile_id="voice.alex",
+            ble_device_ids=["ble.alex_tag"],
+            aqara_presence_entity_ids=["binary_sensor.alex_presence"],
+            mobile_notify_targets=["mobile_app.alex"],
+            preferred_mobile_target="mobile_app.alex",
+            email_source_ref="sensor.mailbox_alex",
+            calendar_source_ref="sensor.calendar_alex",
+            shopping_source_ref="shopping_list.household",
+        )
+    )
+    state = await storage.async_load_state()
+    active_person_resolution = {
+        "active_person_state": "active_person_available",
+        "active_person_available": True,
+        "resolved_person_id": "person.alex",
+        "resolved_voice_profile_id": "voice.alex",
+        "reason_code": "attribution_ready",
+    }
+
+    runtime_person_context = services_module._build_runtime_person_context(
+        state,
+        active_person_resolution=active_person_resolution,
+    )
+    routing = services_module._build_person_aware_productivity_routing(
+        state=state,
+        hass=hass,
+        active_person_resolution=active_person_resolution,
+        runtime_person_context=runtime_person_context,
+    )
+
+    assert runtime_person_context["person_context_state"] == "person_context_partial"
+    assert runtime_person_context["reason_code"] == "policy_context_missing"
+    assert runtime_person_context["policy"]["available"] is False
+    assert routing["routing_enabled"] is False
+    assert routing["reason_code"] == "policy_context_missing"
 
 
 async def test_voice_profile_service_persists_enrollment(
@@ -3660,6 +4410,171 @@ async def test_update_person_profile_records_activity_with_person_scope(
     )
 
 
+async def test_update_person_profile_persists_productivity_source_bindings(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """Person productivity source bindings should be stored as setup-only configuration state."""
+    await hass.services.async_call(
+        DOMAIN,
+        "update_person_profile",
+        {
+            "person_id": "tom",
+            "name": "Tom",
+            "email_source_ref": "sensor.mailbox_tom",
+            "calendar_source_ref": "sensor.calendar_tom",
+            "shopping_source_ref": "shopping_provider_household",
+            "email_source_bindings": [
+                {"entity_id": "sensor.mailbox_tom", "label": "Mail"},
+                {"entity_id": "sensor.mailbox_backup", "label": "Backup mail"},
+            ],
+            "calendar_source_bindings": [
+                {"entity_id": "sensor.calendar_tom", "label": "Calendar"},
+            ],
+            "shopping_source_bindings": [
+                {"entity_id": "shopping_provider_household", "label": "Shopping"},
+            ],
+        },
+        blocking=True,
+    )
+
+    storage = ConciergeStorage(hass)
+    state = await storage.async_load_state()
+    profile = state.person_profiles["tom"]
+
+    assert profile.email_source_ref == "sensor.mailbox_tom"
+    assert profile.calendar_source_ref == "sensor.calendar_tom"
+    assert profile.shopping_source_ref == "shopping_provider_household"
+    assert [binding["entity_id"] for binding in profile.email_source_bindings] == [
+        "sensor.mailbox_tom",
+        "sensor.mailbox_backup",
+    ]
+    assert [binding["entity_id"] for binding in profile.calendar_source_bindings] == [
+        "sensor.calendar_tom",
+    ]
+    assert [binding["entity_id"] for binding in profile.shopping_source_bindings] == [
+        "shopping_provider_household",
+    ]
+
+
+async def test_execute_invokes_voice_identity_runtime_services_and_consumes_outputs(
+    hass: HomeAssistant,
+    setup_integration,
+    monkeypatch,
+) -> None:
+    """Execute should actively invoke Voice Identity runtime services and consume outputs."""
+    _register_voice_identity_runtime_services(
+        hass,
+        attribution_payload={
+            "success": True,
+            "status": "ready",
+            "identity_confidence_level": "recognized",
+            "attributed_person_id": "person.tom",
+            "attributed_profile_id": "vp_tom",
+            "confidence": 0.91,
+            "confidence_band": "high",
+            "reason_code": "attribution_ready",
+            "diagnostic_summary": {
+                "diagnostic_available": True,
+                "diagnostic_reason_code": "voice_identity_ready",
+                "repair_available": True,
+                "health_status": "healthy",
+                "attribution_readiness": "ready",
+                "compatibility_readiness": "ready",
+            },
+            "repair_hint_code": "no_action_required",
+            "suggested_next_action_code": "no_action_required",
+        },
+        identity_context_payload={
+            "state": "known",
+            "person_id": "person.tom",
+            "voice_profile_id": "vp_tom",
+            "confidence": 0.91,
+            "confidence_band": "high",
+            "reason_code": "attribution_ready",
+            "source": "voice_identity",
+        },
+    )
+
+    observed_calls: list[tuple[str, str, dict[str, object]]] = []
+    original_async_call = hass.services.async_call
+
+    async def _tracking_async_call(domain, service, service_data=None, **kwargs):
+        payload = dict(service_data or {})
+        if domain == "voice_identity" and service in {"attribute_speaker", "get_identity_context"}:
+            observed_calls.append((domain, service, payload))
+        return await original_async_call(domain, service, service_data, **kwargs)
+
+    monkeypatch.setattr(hass.services, "async_call", _tracking_async_call)
+
+    result = await hass.services.async_call(
+        DOMAIN,
+        "execute",
+        {
+            "target": "light.kitchen",
+            "intent_class": "home_control",
+            "context": {
+                "audio_ref": "media://voice/runtime-sample-001.wav",
+                "candidate_scope": ["person.tom"],
+                "model_preference": "ecapa_v1",
+            },
+        },
+        blocking=True,
+        return_response=True,
+    )
+
+    invoked_services = [service for _, service, _ in observed_calls]
+    assert "attribute_speaker" in invoked_services
+    assert "get_identity_context" in invoked_services
+    for _, service, payload in observed_calls:
+        if service in {"attribute_speaker", "get_identity_context"}:
+            assert payload.get("audio_ref") == "media://voice/runtime-sample-001.wav"
+            assert payload.get("candidate_scope") == ["person.tom"]
+            assert payload.get("model_preference") == "ecapa_v1"
+
+    consumption = result["execution_envelope"]["voice_identity_attribution_confidence_consumption"]
+    assert consumption["attribution"]["consumed"] is True
+    assert consumption["attribution"]["person_id"] == "person.tom"
+    assert consumption["attribution"]["voice_profile_id"] == "vp_tom"
+    assert consumption["confidence"]["consumed"] is True
+    assert consumption["confidence"]["value"] == pytest.approx(0.91)
+    assert consumption["confidence"]["band"] == "high"
+    diagnostics = consumption["diagnostics_boundary"]["diagnostics"]
+    assert diagnostics["diagnostic_available"] is True
+    assert diagnostics["attribution_readiness"] == "ready"
+
+
+async def test_execute_fails_closed_when_voice_identity_runtime_services_unavailable(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """Execute should fail closed to no active attribution when Voice Identity services are unavailable."""
+    if hass.services.has_service("voice_identity", "attribute_speaker"):
+        hass.services.async_remove("voice_identity", "attribute_speaker")
+    if hass.services.has_service("voice_identity", "get_identity_context"):
+        hass.services.async_remove("voice_identity", "get_identity_context")
+
+    result = await hass.services.async_call(
+        DOMAIN,
+        "execute",
+        {
+            "target": "light.kitchen",
+            "intent_class": "home_control",
+            "context": {
+                "audio_ref": "media://voice/runtime-sample-002.wav",
+            },
+        },
+        blocking=True,
+        return_response=True,
+    )
+
+    consumption = result["execution_envelope"]["voice_identity_attribution_confidence_consumption"]
+    assert consumption["attribution"]["consumed"] is False
+    assert consumption["attribution"]["state"] == "unavailable"
+    assert consumption["attribution"]["reason_code"] == "attribution_service_unavailable"
+    assert consumption["confidence"]["consumed"] is False
+
+
 async def test_execute_consumes_voice_identity_attribution_and_confidence_outcomes(
     hass: HomeAssistant,
     setup_integration,
@@ -3698,6 +4613,172 @@ async def test_execute_consumes_voice_identity_attribution_and_confidence_outcom
     assert consumption["confidence"]["consumed"] is True
     assert consumption["confidence"]["value"] == pytest.approx(0.93)
     assert consumption["confidence"]["band"] == "high"
+
+
+async def test_execute_enables_person_aware_productivity_routing_when_active_person_available(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """Execute should enable person-aware productivity routing only for active resolved person context."""
+    storage = ConciergeStorage(hass)
+    await storage.async_update_person_profile(
+        PersonProfile(
+            person_id="person.tom",
+            name="Tom",
+            email_source_ref="sensor.mailbox_tom",
+            calendar_source_ref="sensor.calendar_tom",
+            task_source_ref="tasks_provider_tom",
+            shopping_source_ref="shopping_provider_household",
+        )
+    )
+    hass.states.async_set("sensor.mailbox_tom", "ok")
+    hass.states.async_set("sensor.calendar_tom", "ok")
+
+    result = await hass.services.async_call(
+        DOMAIN,
+        "execute",
+        {
+            "target": "light.kitchen",
+            "intent_class": "home_control",
+            "context": {
+                "identity_context": {
+                    "state": "known",
+                    "person_id": "person.tom",
+                    "voice_profile_id": "vp_tom",
+                    "confidence": 0.95,
+                    "confidence_band": "high",
+                    "reason_code": "recognized",
+                    "source": "voice_identity",
+                }
+            },
+        },
+        blocking=True,
+        return_response=True,
+    )
+
+    routing = result["execution_envelope"]["person_aware_productivity_routing"]
+    assert routing["routing_enabled"] is True
+    assert routing["reason_code"] == "person_routing_available"
+    assert routing["active_person_state"] == "active_person_available"
+    assert routing["active_person_available"] is True
+    assert routing["resolved_person_id"] == "person.tom"
+    assert routing["domain_routing"]["calendar"]["enabled"] is True
+    assert routing["domain_routing"]["calendar"]["selection_mode"] == "person_binding"
+    assert routing["domain_routing"]["shopping"]["enabled"] is True
+    assert routing["domain_routing"]["shopping"]["selected_source_ref"] == "shopping_provider_household"
+    assert routing["domain_routing"]["task"]["enabled"] is True
+    assert routing["domain_routing"]["task"]["selection_mode"] == "person_binding"
+    assert routing["domain_routing"]["task"]["selected_source_ref"] == "tasks_provider_tom"
+
+    calendar_routing = result["execution_envelope"]["calendar_email_consumption_boundary"]["person_aware_routing"]
+    assert calendar_routing["routing_enabled"] is True
+    assert calendar_routing["domains"]["calendar"]["enabled"] is True
+    assert calendar_routing["domains"]["email"]["enabled"] is True
+
+    task_shopping_routing = result["execution_envelope"]["task_shopping_consumption_boundary"]["person_aware_routing"]
+    assert task_shopping_routing["routing_enabled"] is True
+    assert task_shopping_routing["domains"]["task"]["enabled"] is True
+    assert task_shopping_routing["domains"]["shopping"]["enabled"] is True
+
+    household_coordination_boundary = result["execution_envelope"]["household_coordination_boundary"]
+    assert household_coordination_boundary["boundary_path"] == "governed_household_coordination_boundary"
+    assert household_coordination_boundary["coordination_context"]["active_person_state"] == "active_person_available"
+    assert household_coordination_boundary["person_aware_productivity_routing"]["routing_enabled"] is True
+    assert household_coordination_boundary["open_loop_coordination_visibility"]["open_loop_supported"] is True
+    assert household_coordination_boundary["open_loop_coordination_visibility"]["coordination_state"] == household_coordination_boundary["coordination_state"]
+
+    productivity_coordination_boundary = result["execution_envelope"]["productivity_coordination_boundary"]
+    assert productivity_coordination_boundary["boundary_path"] == "governed_productivity_coordination_boundary"
+    assert productivity_coordination_boundary["person_aware_routing_inputs"]["routing_enabled"] is True
+    assert productivity_coordination_boundary["person_aware_routing_inputs"]["domain_routing"]["calendar"]["enabled"] is True
+    assert productivity_coordination_boundary["provenance_inputs"]["provenance_visible"] is True
+    assert productivity_coordination_boundary["non_authority_assertions"]["claims_productivity_authority"] is False
+
+    provenance_diagnostics_boundary = result["execution_envelope"][
+        "provenance_diagnostics_explainability_boundary"
+    ]
+    assert (
+        provenance_diagnostics_boundary["boundary_path"]
+        == "governed_release_6_provenance_diagnostics_explainability_boundary"
+    )
+    assert provenance_diagnostics_boundary["governance_context"]["route_scope"] == "global"
+    assert provenance_diagnostics_boundary["provenance_visibility"]["provenance_visible"] is True
+    assert (
+        provenance_diagnostics_boundary["explainability_visibility"]["provenance_inputs_visible"]
+        is True
+    )
+    assert (
+        provenance_diagnostics_boundary["non_authority_assertions"]["claims_ownership_authority"]
+        is False
+    )
+
+
+async def test_execute_disables_person_aware_productivity_routing_for_ambiguous_identity(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """Execute should fail closed when active person is ambiguous or unavailable."""
+    result = await hass.services.async_call(
+        DOMAIN,
+        "execute",
+        {
+            "target": "light.kitchen",
+            "intent_class": "home_control",
+            "context": {
+                "identity_context": {
+                    "state": "low_confidence",
+                    "confidence": 0.42,
+                    "confidence_band": "low",
+                    "reason_code": "low_confidence",
+                    "source": "voice_identity",
+                }
+            },
+        },
+        blocking=True,
+        return_response=True,
+    )
+
+    routing = result["execution_envelope"]["person_aware_productivity_routing"]
+    assert routing["routing_enabled"] is False
+    assert routing["active_person_state"] == "active_person_ambiguous"
+    assert routing["active_person_available"] is False
+    assert routing["reason_code"] == "low_confidence"
+    assert routing["domain_routing"]["calendar"]["enabled"] is False
+    assert routing["domain_routing"]["task"]["enabled"] is False
+    assert routing["domain_routing"]["shopping"]["enabled"] is False
+
+    calendar_routing = result["execution_envelope"]["calendar_email_consumption_boundary"]["person_aware_routing"]
+    assert calendar_routing["routing_enabled"] is False
+    assert calendar_routing["reason_code"] == "low_confidence"
+
+    task_shopping_routing = result["execution_envelope"]["task_shopping_consumption_boundary"]["person_aware_routing"]
+    assert task_shopping_routing["routing_enabled"] is False
+    assert task_shopping_routing["reason_code"] == "low_confidence"
+
+    household_coordination_boundary = result["execution_envelope"]["household_coordination_boundary"]
+    assert household_coordination_boundary["boundary_path"] == "governed_household_coordination_boundary"
+    assert household_coordination_boundary["coordination_context"]["active_person_state"] == "active_person_ambiguous"
+    assert household_coordination_boundary["person_aware_productivity_routing"]["routing_enabled"] is False
+    assert household_coordination_boundary["open_loop_coordination_visibility"]["open_loop_supported"] is True
+    assert household_coordination_boundary["open_loop_coordination_visibility"]["informational_only"] is True
+
+    productivity_coordination_boundary = result["execution_envelope"]["productivity_coordination_boundary"]
+    assert productivity_coordination_boundary["boundary_path"] == "governed_productivity_coordination_boundary"
+    assert productivity_coordination_boundary["person_aware_routing_inputs"]["routing_enabled"] is False
+    assert productivity_coordination_boundary["person_aware_routing_inputs"]["active_person_state"] == "active_person_ambiguous"
+    assert productivity_coordination_boundary["non_authority_assertions"]["claims_coordination_authority"] is False
+
+    provenance_diagnostics_boundary = result["execution_envelope"][
+        "provenance_diagnostics_explainability_boundary"
+    ]
+    assert provenance_diagnostics_boundary["governance_context"]["route_scope"] == "global"
+    assert provenance_diagnostics_boundary["diagnostics_visibility"]["ownership_visibility_supported"] is True
+    assert provenance_diagnostics_boundary["safe_fallback_mode_active"] is True
+    assert provenance_diagnostics_boundary["safe_fallback_reason"] == "provenance_lineage_incomplete"
+    assert (
+        provenance_diagnostics_boundary["non_authority_assertions"]["claims_lineage_authority"]
+        is False
+    )
 
 
 async def test_execute_consumes_voice_identity_enrollment_and_lifecycle_state(

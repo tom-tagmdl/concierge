@@ -40,3 +40,10 @@ No roadmap scope was expanded.
 - #309 - Release 1 device and entity vocabulary consumption implementation evidence: `docs/governance/phase-3/issue-309-device-entity-vocabulary-consumption-evidence.md`
 - #310 - Release 1 asset vocabulary and Asset Intelligence handoff implementation evidence: `docs/governance/phase-3/issue-310-asset-vocabulary-handoff-evidence.md`
 - #311 - Release 1 vocabulary diagnostics and explainability implementation evidence: `docs/governance/phase-3/issue-311-vocabulary-diagnostics-explainability-evidence.md`
+- #369 - Release 6 household coordination boundary implementation evidence: `docs/governance/phase-3/release-6-implementation-tracker.md` (Issue #369 section)
+- #370 - Release 6 household status and open-loop coordination implementation evidence: `docs/governance/phase-3/release-6-implementation-tracker.md` (Issue #370 section)
+- #371 - Release 6 productivity coordination implementation evidence: `docs/governance/phase-3/release-6-implementation-tracker.md` (Issue #371 section)
+- #372 - Release 6 provenance diagnostics and explainability implementation evidence: `docs/governance/phase-3/release-6-implementation-tracker.md` (Issue #372 section)
+- #373 - Release 6 governed implementation validation evidence: `docs/governance/phase-3/release-6-implementation-tracker.md` (Issue #373 section)
+- #374 - Final Phase 3 governed implementation validation and closure evidence: `docs/governance/phase-3/final-implementation-validation-tracker.md` (Issue #374 section)
+- #378 - Release 6 room and merged-room device selection visibility consistency implementation evidence: `docs/governance/phase-3/release-6-implementation-tracker.md` (Issue #378 section)

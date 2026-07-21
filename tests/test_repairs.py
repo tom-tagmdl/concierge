@@ -5,13 +5,17 @@ from __future__ import annotations
 from homeassistant.core import HomeAssistant
 
 from custom_components.concierge.const import VOICE_ENROLLMENT_PREFLIGHT_STORAGE_PROBE_FAILED
+from custom_components.concierge.const import PERSON_CONTEXT_REPAIRS_PARTIAL
+from custom_components.concierge.const import PERSON_CONTEXT_REPAIRS_UNRESOLVED
 from custom_components.concierge.const import VOICE_ENROLLMENT_REPAIRS_CAPTURE_PROVIDER_UNAVAILABLE
 from custom_components.concierge.const import VOICE_ENROLLMENT_REPAIRS_CAPTURE_PROVIDER_UNSUPPORTED
 from custom_components.concierge.const import VOICE_ENROLLMENT_REPAIRS_INVALID_MANIFEST
 from custom_components.concierge.const import VOICE_ENROLLMENT_REPAIRS_ORPHAN_CLEANUP_FAILED
 from custom_components.concierge.const import VOICE_ENROLLMENT_REPAIRS_STORAGE_PROBE_FAILED
 from custom_components.concierge.repairs import async_clear_capture_provider_issue
+from custom_components.concierge.repairs import async_clear_person_context_issue
 from custom_components.concierge.repairs import async_create_or_update_capture_provider_issue
+from custom_components.concierge.repairs import async_create_or_update_person_context_issue
 from custom_components.concierge.repairs import async_clear_storage_issue
 from custom_components.concierge.repairs import async_create_or_update_reconciliation_issue
 from custom_components.concierge.repairs import async_create_or_update_storage_issue
@@ -142,3 +146,48 @@ async def test_capture_provider_issue_clear_is_safe_when_issue_missing(
     monkeypatch.setattr("custom_components.concierge.repairs.ir.async_delete_issue", _fake_delete_issue)
 
     await async_clear_capture_provider_issue(hass)
+
+
+async def test_person_context_issue_mapping_is_stable(hass: HomeAssistant, monkeypatch) -> None:
+    """Person-context fail-closed states should map to stable issue ids."""
+    created: list[tuple[str, dict[str, str]]] = []
+
+    def _fake_create_issue(hass, domain, issue_id, **kwargs):
+        created.append((issue_id, dict(kwargs["translation_placeholders"])))
+
+    monkeypatch.setattr("custom_components.concierge.repairs.ir.async_create_issue", _fake_create_issue)
+
+    unresolved = await async_create_or_update_person_context_issue(
+        hass,
+        person_context_state="person_context_unresolved",
+        reason_code="person_profile_not_configured",
+        active_person_state="active_person_unavailable",
+        resolved_person_id=None,
+    )
+    partial = await async_create_or_update_person_context_issue(
+        hass,
+        person_context_state="person_context_partial",
+        reason_code="productivity_bindings_missing",
+        active_person_state="active_person_available",
+        resolved_person_id="person.tom",
+    )
+
+    assert unresolved == PERSON_CONTEXT_REPAIRS_UNRESOLVED
+    assert partial == PERSON_CONTEXT_REPAIRS_PARTIAL
+    assert created[0][0] == PERSON_CONTEXT_REPAIRS_UNRESOLVED
+    assert created[1][0] == PERSON_CONTEXT_REPAIRS_PARTIAL
+    assert created[1][1]["resolved_person_id"] == "person.tom"
+
+
+async def test_person_context_issue_clear_is_safe_when_issue_missing(
+    hass: HomeAssistant,
+    monkeypatch,
+) -> None:
+    """Clearing person-context issues should be safe when issue ids are absent."""
+
+    def _fake_delete_issue(hass, domain, issue_id):
+        raise RuntimeError("missing issue")
+
+    monkeypatch.setattr("custom_components.concierge.repairs.ir.async_delete_issue", _fake_delete_issue)
+
+    await async_clear_person_context_issue(hass)

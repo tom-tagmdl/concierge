@@ -199,9 +199,30 @@ class EnrollmentOrchestrator:
     def __init__(self, hass: HomeAssistant) -> None:
         self.hass = hass
 
+    @staticmethod
+    def _select_voice_identity_runtime_bucket(domain_data: dict[str, Any]) -> dict[str, Any]:
+        """Return the runtime bucket that exposes Voice Identity operations.
+
+        Supports both legacy top-level operation keys and entry-scoped runtime
+        dictionaries used by Voice Identity production setup.
+        """
+        if _VI_GENERATE_OPERATION_KEY in domain_data or _VI_STATUS_OPERATION_KEY in domain_data:
+            return domain_data
+
+        for key in sorted(domain_data):
+            candidate = domain_data.get(key)
+            if not isinstance(candidate, dict):
+                continue
+            if _VI_GENERATE_OPERATION_KEY in candidate or _VI_STATUS_OPERATION_KEY in candidate:
+                return candidate
+
+        return {}
+
     def _voice_identity_runtime(self) -> dict[str, Any]:
-        runtime = self.hass.data.get(_VOICE_IDENTITY_DOMAIN)
-        return runtime if isinstance(runtime, dict) else {}
+        domain_data = self.hass.data.get(_VOICE_IDENTITY_DOMAIN)
+        if not isinstance(domain_data, dict):
+            return {}
+        return self._select_voice_identity_runtime_bucket(domain_data)
 
     def _voice_identity_generate_operation(self) -> Any:
         return self._voice_identity_runtime().get(_VI_GENERATE_OPERATION_KEY)
