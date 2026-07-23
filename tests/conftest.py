@@ -41,6 +41,12 @@ def mock_config_entry() -> MockConfigEntry:
     )
 
 
+@pytest.fixture
+def enable_custom_integrations() -> None:
+    """Fallback fixture for standalone runs when pytest plugin autoload is disabled."""
+    return None
+
+
 @pytest.fixture(autouse=True)
 def auto_enable_custom_integrations(enable_custom_integrations):
     """Enable loading integration code from custom_components during tests."""

@@ -2,12 +2,31 @@
 
 from __future__ import annotations
 
+import pytest
+
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import area_registry as ar
 
+from custom_components.concierge import services as services_module
 from custom_components.concierge.const import DOMAIN
-from custom_components.concierge.models import ContextState, IdentityProfile, Interaction, PersonProfile, SignalState, VoiceProfile
+from custom_components.concierge.models import (
+    ContextState,
+    ContinuityConfidenceBand,
+    IdentityProfile,
+    Interaction,
+    PersonProfile,
+    PreferenceIdentityState,
+    PreferenceResolutionRequest,
+    SignalState,
+    VoiceProfile,
+)
 from custom_components.concierge.storage import ConciergeStorage
+
+
+@pytest.fixture
+def enable_custom_integrations() -> None:
+    """Satisfy the shared test conftest autouse dependency for targeted standalone runs."""
+    return None
 
 
 async def test_foundation_defaults_created(hass: HomeAssistant) -> None:
@@ -415,6 +434,60 @@ async def test_coordinator_resolves_active_person_unavailable_when_voice_identit
     assert resolution["fail_closed"] is True
 
 
+def test_coordinator_resolves_guest_identity_to_fail_closed_unknown_state() -> None:
+    """Guest identity context should remain fail-closed in active-person resolution."""
+    resolution = services_module._resolve_active_person_resolution_from_voice_identity_consumption(
+        {
+            "attribution": {
+                "consumed": True,
+                "state": "unknown",
+                "person_id": None,
+                "voice_profile_id": None,
+                "reason_code": "guest_identity",
+            },
+            "confidence": {
+                "consumed": True,
+                "value": 0.0,
+                "band": "unknown",
+            },
+            "diagnostics_boundary": {
+                "diagnostics": {
+                    "attribution_readiness": "ready",
+                }
+            },
+        }
+    )
+
+    assert resolution["active_person_state"] == "active_person_unknown"
+    assert resolution["active_person_available"] is False
+    assert resolution["reason_code"] == "guest_identity"
+    assert resolution["fail_closed"] is True
+
+
+def test_foundation_policy_disallow_enforces_room_default_fallback() -> None:
+    """Foundation-level policy behavior should fail closed even for known/high-confidence identity."""
+    outcome = services_module._resolve_preference_hierarchy(
+        PreferenceResolutionRequest(
+            preference_key="music_preference",
+            identity_state=PreferenceIdentityState.KNOWN,
+            confidence_band=ContinuityConfidenceBand.HIGH,
+            person_preference_value="person-choice",
+            person_room_exception_value="person-room-choice",
+            person_room_exception_enabled=True,
+            room_default_value="room-default",
+            household_default_value="household-default",
+            system_safe_value="system-safe",
+            personalization_policy_allowed=False,
+            personalization_policy_reason="guardian_controls_required",
+        )
+    )
+
+    assert outcome.identity_decision["personalization_allowed"] is False
+    assert outcome.identity_decision["reason_code"] == "identity_policy_disallowed"
+    assert outcome.selected_tier.value == "room_default"
+    assert outcome.metadata["selected_source"] == "room_default"
+
+
 async def test_coordinator_nightly_archive_records_activity_lifecycle(
     hass: HomeAssistant,
     setup_integration,
@@ -436,3 +509,34 @@ async def test_coordinator_nightly_archive_records_activity_lifecycle(
     assert latest.channel == "coordinator_job"
     assert latest.outcome == "success"
     assert latest.actions_taken
+
+
+def test_ec416_identity_degraded_paths_remain_fail_closed() -> None:
+    """EC416: degraded identity contexts must remain deterministic and fail closed."""
+    low_confidence = services_module._resolve_active_person_resolution_from_envelope(
+        {
+            "identity_context": {
+                "state": "low_confidence",
+                "confidence": 0.41,
+                "confidence_band": "low",
+                "reason_code": "low_confidence",
+            }
+        }
+    )
+    unknown = services_module._resolve_active_person_resolution_from_envelope(
+        {
+            "identity_context": {
+                "state": "unknown",
+                "confidence": 0.0,
+                "confidence_band": "unknown",
+                "reason_code": "identity_unknown",
+            }
+        }
+    )
+
+    assert low_confidence["active_person_available"] is False
+    assert low_confidence["fail_closed"] is True
+    assert low_confidence["active_person_state"] in {"active_person_ambiguous", "active_person_unknown"}
+    assert unknown["active_person_state"] == "active_person_unknown"
+    assert unknown["active_person_available"] is False
+    assert unknown["fail_closed"] is True

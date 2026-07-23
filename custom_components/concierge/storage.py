@@ -15,11 +15,13 @@ from .models import (
     ConciergeState,
     ContextState,
     EnrollmentSession,
+    ExperienceSnapshot,
     IdentityProfile,
     Interaction,
     PersonProfile,
     RoomConfig,
     SignalState,
+    UsualState,
     VoiceProfile,
 )
 
@@ -326,6 +328,27 @@ class ConciergeStorage:
         await self.async_save_state(state)
         return state
 
+    async def async_append_activity_external_refs(
+        self,
+        *,
+        activity_id: str,
+        external_refs: list[dict[str, Any]],
+    ) -> ConciergeState:
+        """Append explainability references to an existing activity event."""
+        state = await self.async_load_state()
+        activity = state.activities.get(activity_id)
+        if activity is None:
+            return state
+
+        appended_refs = [dict(ref) for ref in external_refs if isinstance(ref, dict)]
+        if not appended_refs:
+            return state
+
+        activity.external_refs = list(activity.external_refs) + appended_refs
+        state.activities[activity_id] = activity
+        await self.async_save_state(state)
+        return state
+
     async def async_close_activity_event(
         self,
         *,
@@ -445,6 +468,25 @@ class ConciergeStorage:
         state.contexts[context.context_type] = context
         await self.async_save_state(state)
         return state
+
+    async def async_upsert_experience_snapshot(self, snapshot: ExperienceSnapshot) -> ConciergeState:
+        """Insert or update one explicit continuity experience snapshot."""
+        state = await self.async_load_state()
+        state.experience_snapshots[snapshot.snapshot_id] = snapshot
+        await self.async_save_state(state)
+        return state
+
+    async def async_upsert_usual_state(self, usual_state: UsualState) -> ConciergeState:
+        """Insert or update one explicit continuity usual-state record."""
+        state = await self.async_load_state()
+        state.usual_states[usual_state.state_id] = usual_state
+        await self.async_save_state(state)
+        return state
+
+    async def async_get_usual_state(self, state_id: str) -> UsualState | None:
+        """Return one continuity usual-state record by identifier."""
+        state = await self.async_load_state()
+        return state.usual_states.get(state_id)
 
     async def async_update_composite_config(
         self,

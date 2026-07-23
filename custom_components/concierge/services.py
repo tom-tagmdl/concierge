@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import json
+import logging
 from pathlib import Path
+import re
 from typing import Any, Awaitable, Callable
 from urllib.parse import unquote, urlparse
 from uuid import uuid4
@@ -67,9 +69,22 @@ from .const import (
 from .enrollment_orchestrator import EnrollmentOrchestrator
 from .models import (
     ActivityEvent,
+    ContinuityConfidenceBand,
     ContextState,
+    ContinuityScope,
     IdentityProfile,
+    UsualState,
+    UsualStateBasis,
     Interaction,
+    LearningOwnershipScope,
+    LearningPolicyEvaluationOutcome,
+    LearningPolicyEvaluationRequest,
+    LearningWritePath,
+    LearningWriteRequest,
+    PreferenceIdentityState,
+    PreferenceResolutionOutcome,
+    PreferenceResolutionRequest,
+    PreferenceResolutionTier,
     PersonProfile,
     SignalState,
 )
@@ -80,8 +95,11 @@ from .repairs import (
 from .storage import ConciergeStorage
 from .voice_identity_bridge import async_get_voice_identity_enrollment_status
 
+_LOGGER = logging.getLogger(__name__)
+
 _PROVIDER_NONE = "none"
 _PROVIDER_ASSET_INTELLIGENCE = "asset_intelligence"
+_PROVIDER_MUSIC_ASSISTANT = "music_assistant"
 _DEFAULT_TARGET_SAMPLE_COUNT = 3
 _VOICE_IDENTITY_DOMAIN = "voice_identity"
 _VOICE_IDENTITY_SERVICE_ATTRIBUTE_SPEAKER = "attribute_speaker"
@@ -560,6 +578,360 @@ _MESSAGE_WEB_UI_TARGETS = {"web_ui", "persistent_notification", "dashboard", "ki
 _MESSAGE_VOICE_ASSISTANT_TARGETS = {"assist_satellite", "satellite", "voice_assistant", "assistant"}
 _MESSAGE_TTS_TARGETS = {"speaker", "speakers", "tts", "media_player"}
 _MESSAGE_MOBILE_TARGET_PREFIXES = ("notify.",)
+_LEARNING_POLICY_NAME = "experience_continuity_learning_governance_ec_b_03"
+_LEARNING_POLICY_REASON_ALLOW = "learning_allowed"
+_LEARNING_DENIAL_IDENTITY_REASONS = {
+    PreferenceIdentityState.GUEST: "guest_identity_blocked",
+    PreferenceIdentityState.UNKNOWN: "unknown_identity_blocked",
+    PreferenceIdentityState.UNAVAILABLE: "unavailable_identity_blocked",
+    PreferenceIdentityState.LOW_CONFIDENCE: "low_confidence_identity_blocked",
+}
+_LEARNING_SCOPE_STORAGE_TARGET = {
+    LearningOwnershipScope.PERSON: "person_profile_learning",
+    LearningOwnershipScope.ROOM: "room_config_learning",
+    LearningOwnershipScope.HOUSEHOLD: "household_default_learning",
+}
+_USUAL_LIGHTING_POLICY_NAME = "experience_continuity_learned_lighting_ec_c_01"
+_USUAL_LIGHTING_MEMBERSHIP_SOURCE = "room_configuration_membership"
+_USUAL_LIGHTING_LEARNING_POLICY_FEATURE_KEY = "experience_continuity_lighting_learning_policy"
+_USUAL_LIGHTING_DEFAULT_STABILITY_SECONDS = 30
+_USUAL_LIGHTING_DEFAULT_BRIGHTNESS_PCT = 50
+_USUAL_LIGHTING_VALIDATION_SOURCE = "configured_room_capability_mapping"
+_USUAL_LIGHTING_UNAVAILABLE_STATES = {"unknown", "unavailable"}
+_USUAL_LIGHTING_FALLBACK_POLICY_SOURCE = "experience_continuity_lighting_fallback_policy"
+_USUAL_LIGHTING_COMMAND_ALIASES = {
+    "turn on lamps": "lamps",
+    "lamps on": "lamps",
+    "turn on lights": "lights",
+    "lights on": "lights",
+    "resume lights": "resume",
+    "usual lights": "usual",
+    "lights usual": "usual",
+}
+_ROOM_AUDIO_POLICY_NAME = "experience_continuity_room_audio_memory_ec_d_01"
+_ROOM_AUDIO_MEMBERSHIP_SOURCE = "room_configuration_speaker_membership"
+_ROOM_AUDIO_LEARNING_POLICY_FEATURE_KEY = "experience_continuity_room_audio_learning_policy"
+_ROOM_AUDIO_DEFAULT_STABILITY_SECONDS = 30
+_ROOM_AUDIO_DEFAULT_VOLUME_PCT = 35
+_ROOM_AUDIO_UNAVAILABLE_STATES = {"unknown", "unavailable"}
+_ROOM_AUDIO_FALLBACK_POLICY_SOURCE = "experience_continuity_room_audio_fallback_policy"
+_ROOM_AUDIO_CHANNELS = {"music", "duck", "tts"}
+_ROOM_AUDIO_PLAYBACK_START_ALIASES = {
+    "play music": "music_start",
+    "start music": "music_start",
+    "music on": "music_start",
+}
+_ROOM_MEDIA_PLAYBACK_GENERAL_ALIASES = {
+    "play music",
+    "start music",
+    "music on",
+    "play some music",
+}
+_ROOM_MEDIA_PLAYBACK_GENRE_HINTS = {
+    "jazz",
+    "classic rock",
+    "rock",
+    "smooth jazz",
+    "pop",
+    "classical",
+    "country",
+    "easy listening",
+    "latin",
+    "opera",
+    "soundtrack",
+    "musicals",
+    "r and b",
+    "r&b",
+    "80s",
+    "80's",
+    "eighties",
+}
+_ROOM_MEDIA_REQUEST_KIND_HINTS = {"general_music", "genre", "artist", "album", "playlist"}
+_ROOM_MEDIA_CONTINUATION_ALIASES = {
+    "continue",
+    "continue music",
+    "continue playing",
+    "continue what was playing",
+    "continue in this room",
+    "resume",
+    "resume music",
+    "resume playing",
+    "resume what was playing",
+    "resume in this room",
+}
+_ROOM_MEDIA_FOLLOW_ME_ALIASES = {
+    "follow me music",
+    "move music here",
+    "bring music here",
+    "move playback here",
+    "follow me",
+}
+_MONITORING_FOLLOW_UP_CAPABILITY_ALIASES = {
+    "what is the temperature": "temperature",
+    "what is the room temperature": "temperature",
+    "current temperature": "temperature",
+    "how warm is it": "temperature",
+    "temperature": "temperature",
+    "what is the humidity": "humidity",
+    "humidity": "humidity",
+    "humidity level": "humidity",
+    "moisture": "humidity",
+    "what is the light level": "light",
+    "light level": "light",
+    "room brightness": "light",
+    "how bright is it": "light",
+    "brightness": "light",
+    "what is the air quality": "air_quality",
+    "air quality": "air_quality",
+    "aqi": "air_quality",
+    "environmental quality": "air_quality",
+    "what is the noise level": "noise",
+    "noise level": "noise",
+    "sound level": "noise",
+    "how noisy is it": "noise",
+}
+_MONITORING_CAPABILITY_FIELDS = {
+    "temperature": ["room_sensor_entity_ids"],
+    "humidity": ["room_sensor_entity_ids"],
+    "light": ["room_sensor_entity_ids"],
+    "air_quality": ["room_health_entity_ids", "human_health_entity_ids", "room_sensor_entity_ids"],
+    "noise": ["room_sensor_entity_ids"],
+}
+_MONITORING_MEASUREMENT_KEYS = {
+    "temperature": ["temperature", "current_temperature", "measured_temperature"],
+    "humidity": ["humidity", "current_humidity"],
+    "light": ["illuminance", "light_level", "lux", "brightness"],
+    "air_quality": ["aqi", "air_quality_index", "pm2_5", "pm25"],
+    "noise": ["noise_level", "sound_level", "sound_pressure", "db", "decibel"],
+}
+_REFUSAL_CATEGORY_BY_REASON = {
+    "composite_configuration_missing": "authority_scope_missing",
+    "room_scope_missing": "authority_scope_missing",
+    "configured_capability_mapping_missing": "capability_unavailable",
+    "configured_capability_measurement_unavailable": "capability_unavailable",
+    "configured_room_authority_validation": "authority_scope_missing",
+    "source_missing_or_configuration_incomplete": "configuration_unavailable",
+    "source_unavailable_or_removed": "capability_unavailable",
+    "media_provider_disabled": "configuration_unavailable",
+    "music_assistant_unavailable": "capability_unavailable",
+    "manual_stop_cooldown_active": "policy_denied",
+    "manual_stop_active_follow_me": "policy_denied",
+    "follow_me_disabled": "policy_denied",
+    "identity_authority_insufficient": "policy_denied",
+    "competing_identity_sources": "policy_denied",
+    "room_transition_unavailable": "authority_scope_missing",
+    "room_transition_ambiguous": "authority_scope_missing",
+    "source_room_unavailable": "authority_scope_missing",
+    "destination_room_unavailable": "authority_scope_missing",
+    "no_room_change_detected": "authority_scope_missing",
+    "merged_room_scope_not_supported": "policy_denied",
+    "no_usable_room_media_context": "capability_unavailable",
+    "recipient_not_eligible": "policy_denied",
+    "consent_required_not_granted": "policy_denied",
+    "delivery_target_blocked": "policy_denied",
+    "delivery_channel_not_allowed": "policy_denied",
+    "privacy_boundary_channel_restricted": "policy_denied",
+    "visibility_boundary_channel_restricted": "policy_denied",
+    "person_profile_not_configured": "configuration_unavailable",
+    "person_profile_ambiguous": "configuration_unavailable",
+    "productivity_bindings_missing": "configuration_unavailable",
+    "presence_bindings_missing": "configuration_unavailable",
+    "policy_context_missing": "policy_denied",
+    "no_active_person_resolution": "policy_denied",
+    "active_person_unavailable": "policy_denied",
+}
+_ROOM_MEDIA_CONTEXT_POLICY_NAME = "experience_continuity_room_media_context_ec_e_03"
+_ROOM_MEDIA_CONTINUATION_POLICY_NAME = "experience_continuity_room_media_continuation_ec_e_02"
+_ROOM_MEDIA_MANUAL_STOP_POLICY_SOURCE = "experience_continuity_manual_stop_cooldown_policy"
+_SONOS_SPEECH_CONTINUITY_POLICY_NAME = "experience_continuity_sonos_speech_ec_d_02"
+_SONOS_SPEECH_FALLBACK_POLICY_SOURCE = "experience_continuity_sonos_speech_fallback_policy"
+
+
+def _classify_refusal_category(refusal_reason: str | None) -> str | None:
+    """Map deterministic refusal reasons to a stable taxonomy category."""
+    normalized_reason = str(refusal_reason or "").strip().lower() or None
+    if normalized_reason is None:
+        return None
+    return _REFUSAL_CATEGORY_BY_REASON.get(normalized_reason, "capability_unavailable")
+
+
+def _attach_refusal_explainability(
+    payload: dict[str, Any],
+    *,
+    refusal_reason_key: str,
+    capability_requested: str | None,
+    capability_available: bool,
+    capability_configured: bool,
+    room_authority_source: str,
+    merged_room_authority_source: str | None,
+    person_policy_evaluated: bool,
+) -> dict[str, Any]:
+    """Attach deterministic refusal explainability fields required by #414."""
+    refusal_reason = str(payload.get(refusal_reason_key) or "").strip() or None
+    payload["refusal_reason"] = refusal_reason
+    payload["refusal_category"] = _classify_refusal_category(refusal_reason)
+    payload["room_authority_source"] = room_authority_source
+    payload["merged_room_authority_source"] = merged_room_authority_source
+    payload["capability_requested"] = capability_requested
+    payload["capability_available"] = bool(capability_available)
+    payload["capability_configured"] = bool(capability_configured)
+    payload["person_policy_evaluated"] = bool(person_policy_evaluated)
+    return payload
+
+
+def _build_direct_refusal_message(
+    refusal_reason: str | None,
+    *,
+    capability_requested: str | None,
+) -> str | None:
+    """Return deterministic direct-refusal language with no suggestion fallback."""
+    normalized_reason = str(refusal_reason or "").strip().lower() or None
+    if normalized_reason is None:
+        return None
+
+    refusal_messages = {
+        "room_scope_missing": "I cannot complete that because no room is currently resolved.",
+        "composite_configuration_missing": "I cannot complete that because this merged room is not configured.",
+        "configured_capability_mapping_missing": "This room is not configured with that capability.",
+        "configured_capability_measurement_unavailable": "That capability is configured, but readings are unavailable right now.",
+        "configured_speaker_mapping_missing": "This room is not configured with speaker output for that capability.",
+        "configured_room_authority_failure": "I cannot complete that because room authority validation failed.",
+        "configured_room_authority_validation": "I cannot complete that because room authority validation failed.",
+        "media_provider_disabled": "That capability is not currently enabled.",
+        "music_assistant_unavailable": "That capability is not currently available.",
+        "manual_stop_cooldown_active": "I cannot continue playback because manual-stop cooldown is active.",
+        "manual_stop_active_follow_me": "I cannot move playback because manual-stop protection is active.",
+        "follow_me_disabled": "I cannot move playback because Follow-Me is disabled.",
+        "identity_authority_insufficient": "I cannot move playback because identity authority is insufficient.",
+        "competing_identity_sources": "I cannot move playback because identity sources are conflicting.",
+        "room_transition_unavailable": "I cannot move playback because a room transition was not resolved.",
+        "room_transition_ambiguous": "I cannot move playback because the room transition is ambiguous.",
+        "source_room_unavailable": "I cannot move playback because the source room is unavailable.",
+        "destination_room_unavailable": "I cannot move playback because the destination room is unavailable.",
+        "no_room_change_detected": "I cannot move playback because no room change was detected.",
+        "merged_room_scope_not_supported": "I cannot move playback because Follow-Me does not override merged-room playback.",
+        "no_usable_room_media_context": "I cannot continue playback because no usable room media context is available.",
+        "recipient_not_eligible": "Message delivery is denied by recipient eligibility policy.",
+        "consent_required_not_granted": "Message delivery is denied because required consent is not granted.",
+        "delivery_target_blocked": "Message delivery is denied for the selected target.",
+        "delivery_channel_not_allowed": "Message delivery is denied for the selected channel.",
+        "privacy_boundary_channel_restricted": "Message delivery is denied by privacy boundary policy.",
+        "visibility_boundary_channel_restricted": "Message delivery is denied by visibility boundary policy.",
+        "person_profile_not_configured": "Person policy context is not configured for that request.",
+        "productivity_bindings_missing": "Productivity capability is unavailable because required source bindings are missing.",
+        "presence_bindings_missing": "Person presence context is unavailable for that request.",
+        "policy_context_missing": "That request is denied because required policy context is missing.",
+        "room_configuration_missing": "This room is not configured with that capability.",
+        "configured_device_unavailable": "That configured capability is currently unavailable.",
+        "configured_entity_invalid": "That configured capability mapping is invalid.",
+        "unsupported_device_capability": "That capability is not currently supported.",
+        "lighting_command_not_supported": "That capability is not currently supported.",
+        "lighting_command_not_supported_by_configured_room_capability": "This room is not configured with that capability.",
+        "no_eligible_lighting_targets": "This room is not configured with eligible targets for that capability.",
+    }
+
+    message = refusal_messages.get(normalized_reason)
+    if message is not None:
+        return message
+    if capability_requested:
+        return f"I cannot complete {capability_requested} because the capability is unavailable."
+    return "That capability is not currently available."
+
+
+def _build_execute_outcome_metadata(
+    response: dict[str, Any],
+    *,
+    runtime_context: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Classify execute outcomes into execute/answer/refusal/silence success categories."""
+    monitoring = dict(response.get("monitoring_follow_up") or {})
+    media = dict(response.get("media_provider_resolution") or {})
+    learned_lighting = dict(response.get("learned_usual_lighting") or {})
+    room_audio = dict(response.get("room_audio_continuity") or {})
+
+    refusal_reason = (
+        str(monitoring.get("refusal_reason") or "").strip()
+        or str(media.get("refusal_reason") or media.get("failure_reason") or "").strip()
+        or str(learned_lighting.get("failure_reason") or "").strip()
+        or str(room_audio.get("failure_reason") or "").strip()
+        or None
+    )
+    refusal_category = (
+        str(monitoring.get("refusal_category") or "").strip()
+        or str(media.get("refusal_category") or "").strip()
+        or _classify_refusal_category(refusal_reason)
+    )
+    if not refusal_category:
+        refusal_category = None
+
+    generated_response_text = (
+        str(monitoring.get("generated_speech") or "").strip()
+        or _build_direct_refusal_message(
+            refusal_reason,
+            capability_requested=(
+                monitoring.get("capability_requested")
+                or media.get("capability_requested")
+                or learned_lighting.get("command_kind")
+            ),
+        )
+        or None
+    )
+
+    response_generated = generated_response_text is not None
+    response_required_hint = (runtime_context or {}).get("response_required")
+    if isinstance(response_required_hint, bool):
+        response_required = response_required_hint
+    else:
+        response_required = bool(response_generated or refusal_reason)
+
+    if refusal_reason is not None:
+        execution_outcome_category = "REFUSAL_SUCCESS"
+        silence_as_success = False
+        response_required = True
+    elif response_generated:
+        execution_outcome_category = "ANSWER_SUCCESS"
+        silence_as_success = False
+        response_required = True
+    elif bool(response.get("executed", False)):
+        if response_required:
+            execution_outcome_category = "EXECUTE_SUCCESS"
+            silence_as_success = False
+        else:
+            execution_outcome_category = "SILENCE_SUCCESS"
+            silence_as_success = True
+    else:
+        execution_outcome_category = "EXECUTE_SUCCESS"
+        silence_as_success = False
+
+    room_authority_source = (
+        str(monitoring.get("room_authority_source") or "").strip()
+        or str(media.get("room_authority_source") or "").strip()
+        or str(learned_lighting.get("room_source") or "").strip()
+        or "room_configuration"
+    )
+    merged_room_authority_source = (
+        str(monitoring.get("merged_room_authority_source") or "").strip()
+        or str(media.get("merged_room_authority_source") or "").strip()
+        or None
+    )
+    person_policy_evaluated = bool(
+        monitoring.get("person_policy_evaluated")
+        or media.get("person_policy_evaluated")
+        or False
+    )
+
+    return {
+        "execution_outcome_category": execution_outcome_category,
+        "silence_as_success": bool(silence_as_success),
+        "response_required": bool(response_required),
+        "response_generated": bool(response_generated),
+        "response_message": generated_response_text,
+        "refusal_reason": refusal_reason,
+        "refusal_category": refusal_category,
+        "room_authority_source": room_authority_source,
+        "person_policy_evaluated": person_policy_evaluated,
+        "merged_room_authority_source": merged_room_authority_source,
+    }
 
 
 def _normalize_message_target(target: str | None) -> str:
@@ -571,6 +943,2764 @@ def _room_entity_ids(room, field_name: str) -> list[str]:
     """Return a room entity list filtered to non-empty string identifiers."""
     values = getattr(room, field_name, []) if room is not None else []
     return [entity_id for entity_id in values if isinstance(entity_id, str) and entity_id]
+
+
+def _normalize_spoken_command_phrase(value: str | None) -> str:
+    """Normalize a spoken command phrase for deterministic matching."""
+    return " ".join(str(value or "").strip().lower().split())
+
+
+def _classify_usual_lighting_command(target: str | None) -> str | None:
+    """Classify supported EC-C-01 usual lighting command phrases."""
+    if target is None:
+        return None
+    normalized = _normalize_spoken_command_phrase(target)
+    if "." in normalized:
+        return None
+    return _USUAL_LIGHTING_COMMAND_ALIASES.get(normalized)
+
+
+def _classify_room_audio_playback_start_command(target: str | None) -> str | None:
+    """Classify supported EC-D-01 room-audio playback-start command phrases."""
+    if target is None:
+        return None
+    normalized = _normalize_spoken_command_phrase(target)
+    if "." in normalized:
+        return None
+    return _ROOM_AUDIO_PLAYBACK_START_ALIASES.get(normalized)
+
+
+def _classify_room_media_playback_request(target: str | None) -> dict[str, Any] | None:
+    """Classify governed EC-E-01 media playback requests."""
+    if target is None:
+        return None
+
+    raw = str(target or "").strip()
+    normalized = _normalize_spoken_command_phrase(raw)
+    if not normalized or "." in normalized:
+        return None
+
+    if normalized in _ROOM_MEDIA_PLAYBACK_GENERAL_ALIASES:
+        return {
+            "request_kind": "general_music",
+            "media_query": "music",
+            "request_text": raw,
+        }
+
+    if normalized.startswith("play "):
+        raw_query = raw[5:].strip()
+        normalized_query = normalized[5:].strip()
+        if not raw_query:
+            return None
+        request_kind = "genre" if normalized_query in _ROOM_MEDIA_PLAYBACK_GENRE_HINTS else "named_music"
+        return {
+            "request_kind": request_kind,
+            "media_query": raw_query,
+            "request_text": raw,
+        }
+
+    return None
+
+
+def _classify_room_media_continuation_request(target: str | None) -> dict[str, Any] | None:
+    """Classify governed EC-E-02 room-level continue/resume requests."""
+    if target is None:
+        return None
+
+    raw = str(target or "").strip()
+    normalized = _normalize_spoken_command_phrase(raw)
+    if not normalized or "." in normalized:
+        return None
+
+    if normalized in _ROOM_MEDIA_CONTINUATION_ALIASES or normalized.startswith("continue ") or normalized.startswith("resume "):
+        return {
+            "request_kind": "continue_resume",
+            "request_text": raw,
+        }
+
+    return None
+
+
+def _classify_room_media_follow_me_request(target: str | None) -> dict[str, Any] | None:
+    """Classify explicit Follow-Me media requests for EC-REQ-044."""
+    if target is None:
+        return None
+
+    raw = str(target or "").strip()
+    normalized = _normalize_spoken_command_phrase(raw)
+    if not normalized or "." in normalized:
+        return None
+
+    if normalized in _ROOM_MEDIA_FOLLOW_ME_ALIASES:
+        return {
+            "request_kind": "follow_me",
+            "request_text": raw,
+        }
+
+    return None
+
+
+def _resolve_follow_me_media_decision(
+    *,
+    runtime_context: dict[str, Any],
+    request_explicit: bool,
+    area_id: str | None,
+    composite_id: str | None,
+    room_media_context: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Resolve deterministic Follow-Me eligibility and explainability without changing ownership boundaries."""
+    transition = runtime_context.get("room_transition")
+    transition = dict(transition) if isinstance(transition, dict) else {}
+    identity_context = runtime_context.get("identity_context")
+    identity_context = dict(identity_context) if isinstance(identity_context, dict) else {}
+
+    source_room = (
+        str(transition.get("source_room_id") or "").strip()
+        or str((room_media_context or {}).get("source_room_id") or "").strip()
+        or None
+    )
+    destination_room = (
+        str(transition.get("destination_room_id") or "").strip()
+        or str(area_id or "").strip()
+        or None
+    )
+    transition_source = (
+        str(transition.get("source") or "").strip()
+        or str(runtime_context.get("room_transition_source") or "").strip()
+        or "runtime_context"
+    )
+
+    follow_me_enabled = bool(runtime_context.get("follow_me_enabled", False))
+    transition_candidate = bool(source_room and destination_room and source_room != destination_room)
+    follow_me_candidate = bool(request_explicit or transition_candidate)
+
+    identity_state, confidence_band = _resolve_media_identity_state(runtime_context)
+    confidence_value = str(confidence_band.value if confidence_band is not None else "unknown").strip().lower()
+    identity_allowed = identity_state is PreferenceIdentityState.KNOWN and confidence_value not in {
+        "low",
+        "unknown",
+        "unavailable",
+        "ambiguous",
+        "no_match",
+    }
+
+    competing_identity_sources = bool(
+        runtime_context.get("identity_competing", False)
+        or identity_context.get("multiple_matches", False)
+        or (isinstance(identity_context.get("candidate_person_ids"), list) and len(identity_context.get("candidate_person_ids")) > 1)
+    )
+    transition_ambiguous = bool(
+        transition.get("ambiguous", False)
+        or transition.get("overlap", False)
+        or transition.get("boundary_ambiguous", False)
+    )
+
+    media_context_payload = dict((room_media_context or {}).get("room_media_context") or {})
+    manual_stop_blocked = bool(media_context_payload.get("manual_stop", False))
+    cooldown_blocked = bool((room_media_context or {}).get("manual_stop_cooldown_active", False))
+
+    follow_me_allowed = False
+    follow_me_reason = "follow_me_not_requested"
+    follow_me_decision = "no_handoff"
+
+    if not follow_me_enabled:
+        follow_me_reason = "follow_me_disabled"
+    elif composite_id is not None:
+        follow_me_reason = "merged_room_scope_not_supported"
+    elif not follow_me_candidate:
+        follow_me_reason = "follow_me_not_requested"
+    elif source_room is None:
+        follow_me_reason = "source_room_unavailable"
+    elif destination_room is None:
+        follow_me_reason = "destination_room_unavailable"
+    elif source_room == destination_room:
+        follow_me_reason = "no_room_change_detected"
+    elif transition_ambiguous:
+        follow_me_reason = "room_transition_ambiguous"
+    elif competing_identity_sources:
+        follow_me_reason = "competing_identity_sources"
+    elif not identity_allowed:
+        follow_me_reason = "identity_authority_insufficient"
+    elif manual_stop_blocked:
+        follow_me_reason = "manual_stop_active_follow_me"
+    elif cooldown_blocked:
+        follow_me_reason = "manual_stop_cooldown_active"
+    else:
+        follow_me_allowed = True
+        follow_me_reason = "handoff_allowed"
+        follow_me_decision = "handoff_execute"
+
+    return {
+        "follow_me_enabled": follow_me_enabled,
+        "follow_me_candidate": follow_me_candidate,
+        "follow_me_allowed": follow_me_allowed,
+        "follow_me_decision": follow_me_decision,
+        "follow_me_reason": follow_me_reason,
+        "identity_authority_source": "voice_identity_runtime_context",
+        "room_transition_source": transition_source,
+        "cooldown_blocked": cooldown_blocked,
+        "manual_stop_blocked": manual_stop_blocked,
+        "destination_room": destination_room,
+        "source_room": source_room,
+        "identity_state": identity_state.value,
+        "identity_confidence_band": confidence_value,
+        "competing_identity_sources": competing_identity_sources,
+        "room_transition_ambiguous": transition_ambiguous,
+        "request_explicit": bool(request_explicit),
+    }
+
+
+def _classify_monitoring_follow_up_request(target: str | None) -> dict[str, Any] | None:
+    """Classify room monitoring follow-up questions for EC-F-02 configuration-bounded handling."""
+    if target is None:
+        return None
+
+    raw = str(target or "").strip()
+    normalized = _normalize_spoken_command_phrase(raw).rstrip("?!. ")
+    if not normalized or "." in normalized:
+        return None
+
+    capability = _MONITORING_FOLLOW_UP_CAPABILITY_ALIASES.get(normalized)
+    if capability is None:
+        return None
+
+    return {
+        "request_kind": "monitoring_follow_up",
+        "request_text": raw,
+        "monitoring_capability": capability,
+    }
+
+
+def _resolve_monitoring_rooms(
+    state: Any,
+    *,
+    area_id: str | None,
+    composite_id: str | None,
+) -> tuple[list[str], Any | None]:
+    """Resolve deterministic room participation order for monitoring authority consumption."""
+    if composite_id:
+        composite = getattr(state, "composites", {}).get(composite_id)
+        if composite is None:
+            return [], None
+
+        configured_rooms = list(dict.fromkeys(list(getattr(composite, "area_ids", []) or [])))
+        if not configured_rooms and getattr(composite, "primary_area", None):
+            configured_rooms = [str(composite.primary_area)]
+
+        ordered: list[str] = []
+        primary_area = str(getattr(composite, "primary_area", "") or "").strip()
+        if primary_area and primary_area in configured_rooms:
+            ordered.append(primary_area)
+        if area_id and area_id in configured_rooms and area_id not in ordered:
+            ordered.append(area_id)
+        for room_area_id in configured_rooms:
+            if room_area_id not in ordered:
+                ordered.append(room_area_id)
+
+        return ordered, composite
+
+    if area_id:
+        return [area_id], None
+
+    return [], None
+
+
+def _configured_monitoring_membership(room: Any, capability: str) -> dict[str, Any]:
+    """Resolve configured monitoring entity membership for one capability from room configuration."""
+    fields = list(_MONITORING_CAPABILITY_FIELDS.get(capability, []))
+    configured_membership: list[str] = []
+    for field_name in fields:
+        configured_membership.extend(_room_entity_ids(room, field_name))
+    configured_membership = list(dict.fromkeys(configured_membership))
+    return {
+        "capability": capability,
+        "mapping_fields": fields,
+        "configured_membership": configured_membership,
+    }
+
+
+def _validate_configured_monitoring_entities(
+    hass: HomeAssistant,
+    configured_membership: list[str],
+) -> tuple[list[str], list[dict[str, Any]]]:
+    """Validate configured monitoring entities without expanding room capability ownership."""
+    registry = er.async_get(hass)
+    valid_targets: list[str] = []
+    validations: list[dict[str, Any]] = []
+
+    for entity_id in configured_membership:
+        normalized = str(entity_id or "").strip()
+        if not normalized or "." not in normalized:
+            validations.append(
+                {
+                    "entity_id": normalized,
+                    "valid": False,
+                    "status": "invalid_entity",
+                    "reason": "configured_entity_invalid",
+                }
+            )
+            continue
+
+        state_obj = hass.states.get(normalized)
+        registry_entry = registry.async_get(normalized)
+        if state_obj is None and registry_entry is None:
+            validations.append(
+                {
+                    "entity_id": normalized,
+                    "valid": False,
+                    "status": "missing_entity",
+                    "reason": "configured_entity_missing",
+                }
+            )
+            continue
+
+        if state_obj is None:
+            validations.append(
+                {
+                    "entity_id": normalized,
+                    "valid": False,
+                    "status": "missing_state",
+                    "reason": "configured_entity_missing",
+                }
+            )
+            continue
+
+        state_value = str(getattr(state_obj, "state", "") or "").strip().lower()
+        if state_value in _USUAL_LIGHTING_UNAVAILABLE_STATES:
+            validations.append(
+                {
+                    "entity_id": normalized,
+                    "valid": False,
+                    "status": "unavailable_entity",
+                    "reason": "configured_device_unavailable",
+                }
+            )
+            continue
+
+        valid_targets.append(normalized)
+        validations.append(
+            {
+                "entity_id": normalized,
+                "valid": True,
+                "status": "validated",
+                "reason": "configured_entity_valid",
+            }
+        )
+
+    return valid_targets, validations
+
+
+def _extract_monitoring_measurement(entity_state: Any, capability: str) -> dict[str, Any] | None:
+    """Extract one monitoring measurement from a configured entity state."""
+    if entity_state is None:
+        return None
+
+    attributes = getattr(entity_state, "attributes", {}) or {}
+    if not isinstance(attributes, dict):
+        attributes = {}
+
+    measurement_keys = list(_MONITORING_MEASUREMENT_KEYS.get(capability, []))
+    for key in measurement_keys:
+        value = _coerce_float(attributes.get(key))
+        if value is None:
+            continue
+        return {
+            "value": value,
+            "unit": attributes.get("unit_of_measurement"),
+            "attribute_key": key,
+            "state": str(getattr(entity_state, "state", "") or ""),
+        }
+
+    state_value = _coerce_float(getattr(entity_state, "state", None))
+    if state_value is not None:
+        unit = str(attributes.get("unit_of_measurement") or "").strip().lower()
+        compatible_units = {
+            "temperature": {"f", "c", "\u00b0f", "\u00b0c", "fahrenheit", "celsius", "degrees"},
+            "humidity": {"%", "percent", "percentage"},
+            "light": {"lux", "lx"},
+            "air_quality": {"aqi", "pm2.5", "pm10"},
+            "noise": {"db", "dba", "decibel", "decibels"},
+        }
+        capability_units = compatible_units.get(capability, set())
+        if capability == "temperature" and not unit:
+            unit = "degrees"
+        if not capability_units or unit in capability_units:
+            return {
+                "value": state_value,
+                "unit": attributes.get("unit_of_measurement") or unit,
+                "attribute_key": "state",
+                "state": str(getattr(entity_state, "state", "") or ""),
+            }
+
+    return None
+
+
+def _monitoring_value_label(capability: str) -> str:
+    return {
+        "temperature": "temperature",
+        "humidity": "humidity",
+        "light": "light level",
+        "air_quality": "air quality",
+        "noise": "noise level",
+    }.get(capability, capability.replace("_", " "))
+
+
+def _format_monitoring_value(measurement: dict[str, Any], capability: str) -> str:
+    value = measurement.get("value")
+    if isinstance(value, float) and value.is_integer():
+        value = int(value)
+    unit = str(measurement.get("unit") or "").strip()
+    if not unit:
+        unit = {
+            "temperature": "degrees",
+            "humidity": "%",
+            "light": "lux",
+            "air_quality": "AQI",
+            "noise": "dB",
+        }.get(capability, "")
+    return f"{value} {unit}".strip()
+
+
+def _build_monitoring_follow_up_resolution(
+    hass: HomeAssistant,
+    *,
+    state: Any,
+    area_id: str | None,
+    composite_id: str | None,
+    monitoring_capability: str,
+    room_authority_traceability: dict[str, Any],
+) -> dict[str, Any]:
+    """Resolve monitoring follow-up answers from configured room capability mappings only."""
+    participating_rooms, composite = _resolve_monitoring_rooms(
+        state,
+        area_id=area_id,
+        composite_id=composite_id,
+    )
+
+    merged_room_authority_source = room_authority_traceability.get("merged_room_authority_source")
+    if composite_id and composite is None:
+        return _attach_refusal_explainability({
+            "handled": True,
+            "executed": False,
+            "monitoring_capability": monitoring_capability,
+            "configured_capability_mapping": {
+                "mapping_source": "room_configuration",
+                "mapping_fields": list(_MONITORING_CAPABILITY_FIELDS.get(monitoring_capability, [])),
+                "configured_device_set": [],
+                "participating_rooms": [],
+                "room_mappings": [],
+            },
+            "resolved_monitoring_device": None,
+            "resolution_strategy": "configured_priority_first_valid_measurement",
+            "resolution_priority": [],
+            "refusal_reason": "composite_configuration_missing",
+            "room_authority_source": room_authority_traceability.get("room_authority_source", "room_configuration"),
+            "merged_room_authority_source": merged_room_authority_source,
+            "runtime_discovery_reliance": "validation_only",
+            "generated_speech": "I cannot answer that yet because this merged room configuration is unavailable.",
+        },
+            refusal_reason_key="refusal_reason",
+            capability_requested=monitoring_capability,
+            capability_available=False,
+            capability_configured=False,
+            room_authority_source=room_authority_traceability.get("room_authority_source", "room_configuration"),
+            merged_room_authority_source=merged_room_authority_source,
+            person_policy_evaluated=False,
+        )
+
+    if not participating_rooms:
+        return _attach_refusal_explainability({
+            "handled": True,
+            "executed": False,
+            "monitoring_capability": monitoring_capability,
+            "configured_capability_mapping": {
+                "mapping_source": "room_configuration",
+                "mapping_fields": list(_MONITORING_CAPABILITY_FIELDS.get(monitoring_capability, [])),
+                "configured_device_set": [],
+                "participating_rooms": [],
+                "room_mappings": [],
+            },
+            "resolved_monitoring_device": None,
+            "resolution_strategy": "configured_priority_first_valid_measurement",
+            "resolution_priority": [],
+            "refusal_reason": "room_scope_missing",
+            "room_authority_source": room_authority_traceability.get("room_authority_source", "room_configuration"),
+            "merged_room_authority_source": merged_room_authority_source,
+            "runtime_discovery_reliance": "validation_only",
+            "generated_speech": "I cannot answer that yet because no room is currently resolved.",
+        },
+            refusal_reason_key="refusal_reason",
+            capability_requested=monitoring_capability,
+            capability_available=False,
+            capability_configured=False,
+            room_authority_source=room_authority_traceability.get("room_authority_source", "room_configuration"),
+            merged_room_authority_source=merged_room_authority_source,
+            person_policy_evaluated=False,
+        )
+
+    room_mappings: list[dict[str, Any]] = []
+    configured_candidates: list[str] = []
+
+    if composite is not None:
+        composite_membership = _configured_monitoring_membership(composite, monitoring_capability)
+        if composite_membership["configured_membership"]:
+            configured_candidates.extend(composite_membership["configured_membership"])
+            room_mappings.append(
+                {
+                    "area_id": None,
+                    "mapping_scope": "composite",
+                    "mapping_ref": str(getattr(composite, "composite_id", "") or ""),
+                    "mapping_fields": list(composite_membership["mapping_fields"]),
+                    "configured_device_set": list(composite_membership["configured_membership"]),
+                }
+            )
+
+    for room_area_id in participating_rooms:
+        room = getattr(state, "rooms", {}).get(room_area_id)
+        membership = _configured_monitoring_membership(room, monitoring_capability)
+        room_mappings.append(
+            {
+                "area_id": room_area_id,
+                "mapping_scope": "room",
+                "mapping_ref": room_area_id,
+                "mapping_fields": list(membership["mapping_fields"]),
+                "configured_device_set": list(membership["configured_membership"]),
+            }
+        )
+        configured_candidates.extend(membership["configured_membership"])
+
+    configured_candidates = list(dict.fromkeys(configured_candidates))
+    if not configured_candidates:
+        return _attach_refusal_explainability({
+            "handled": True,
+            "executed": False,
+            "monitoring_capability": monitoring_capability,
+            "configured_capability_mapping": {
+                "mapping_source": "room_configuration",
+                "mapping_fields": list(_MONITORING_CAPABILITY_FIELDS.get(monitoring_capability, [])),
+                "configured_device_set": [],
+                "participating_rooms": participating_rooms,
+                "room_mappings": room_mappings,
+            },
+            "resolved_monitoring_device": None,
+            "resolution_strategy": "configured_priority_first_valid_measurement",
+            "resolution_priority": [],
+            "refusal_reason": "configured_capability_mapping_missing",
+            "room_authority_source": room_authority_traceability.get("room_authority_source", "room_configuration"),
+            "merged_room_authority_source": merged_room_authority_source,
+            "runtime_discovery_reliance": "validation_only",
+            "generated_speech": f"I do not have { _monitoring_value_label(monitoring_capability) } configured for this room yet.",
+        },
+            refusal_reason_key="refusal_reason",
+            capability_requested=monitoring_capability,
+            capability_available=False,
+            capability_configured=False,
+            room_authority_source=room_authority_traceability.get("room_authority_source", "room_configuration"),
+            merged_room_authority_source=merged_room_authority_source,
+            person_policy_evaluated=False,
+        )
+
+    valid_entities, validation_results = _validate_configured_monitoring_entities(hass, configured_candidates)
+    capability_measurements: dict[str, dict[str, Any]] = {}
+    for entity_id in valid_entities:
+        measurement = _extract_monitoring_measurement(hass.states.get(entity_id), monitoring_capability)
+        if measurement is not None:
+            capability_measurements[entity_id] = measurement
+
+    capability_priority = [
+        entity_id
+        for entity_id in configured_candidates
+        if entity_id in capability_measurements
+    ]
+
+    resolved_device: str | None = capability_priority[0] if capability_priority else None
+    resolved_measurement: dict[str, Any] | None = (
+        capability_measurements.get(resolved_device)
+        if resolved_device is not None
+        else None
+    )
+
+    refusal_reason: str | None = None
+    generated_speech: str
+    if resolved_device is None or resolved_measurement is None:
+        refusal_reason = "configured_capability_measurement_unavailable"
+        generated_speech = (
+            f"I found configured devices for { _monitoring_value_label(monitoring_capability) }, "
+            "but they are not reporting usable readings right now."
+        )
+    else:
+        rendered_value = _format_monitoring_value(resolved_measurement, monitoring_capability)
+        generated_speech = (
+            f"The room { _monitoring_value_label(monitoring_capability) } is {rendered_value} "
+            f"from {resolved_device}."
+        )
+
+    return _attach_refusal_explainability({
+        "handled": True,
+        "executed": False,
+        "monitoring_capability": monitoring_capability,
+        "configured_capability_mapping": {
+            "mapping_source": "room_configuration",
+            "mapping_fields": list(_MONITORING_CAPABILITY_FIELDS.get(monitoring_capability, [])),
+            "configured_device_set": capability_priority,
+            "participating_rooms": participating_rooms,
+            "room_mappings": room_mappings,
+        },
+        "resolved_monitoring_device": resolved_device,
+        "resolved_measurement": resolved_measurement,
+        "resolution_strategy": "configured_priority_first_valid_measurement",
+        "resolution_priority": capability_priority,
+        "validation_results": validation_results,
+        "refusal_reason": refusal_reason,
+        "room_authority_source": room_authority_traceability.get("room_authority_source", "room_configuration"),
+        "merged_room_authority_source": merged_room_authority_source,
+        "runtime_discovery_reliance": "validation_only",
+        "generated_speech": generated_speech,
+    },
+        refusal_reason_key="refusal_reason",
+        capability_requested=monitoring_capability,
+        capability_available=resolved_device is not None and resolved_measurement is not None,
+        capability_configured=bool(configured_candidates),
+        room_authority_source=room_authority_traceability.get("room_authority_source", "room_configuration"),
+        merged_room_authority_source=merged_room_authority_source,
+        person_policy_evaluated=False,
+    )
+
+
+def _build_monitoring_follow_up_summary(
+    hass: HomeAssistant,
+    *,
+    state: Any,
+    assembled_context: dict[str, Any],
+    room_authority_traceability: dict[str, Any],
+) -> dict[str, Any]:
+    """Build room monitoring follow-up traceability snapshot for summary diagnostics."""
+    monitoring: dict[str, Any] = {}
+    for monitoring_capability in ("temperature", "humidity", "light", "air_quality", "noise"):
+        monitoring[monitoring_capability] = _build_monitoring_follow_up_resolution(
+            hass,
+            state=state,
+            area_id=assembled_context.get("context_area_id"),
+            composite_id=assembled_context.get("resolved_composite_id"),
+            monitoring_capability=monitoring_capability,
+            room_authority_traceability=room_authority_traceability,
+        )
+
+    return {
+        "mapping_authority": "room_configuration",
+        "runtime_discovery_reliance": "validation_only",
+        "capabilities": monitoring,
+    }
+
+
+def _room_media_state_id(*, area_id: str) -> str:
+    """Build a stable room-media continuity state identifier."""
+    return f"room_media::{area_id}"
+
+
+def _resolve_room_media_source_rooms(
+    state: Any,
+    *,
+    area_id: str | None,
+    composite_id: str | None,
+) -> list[str]:
+    """Return deterministic candidate source rooms for room-level media continuity."""
+    if composite_id:
+        composite = getattr(state, "composites", {}).get(composite_id)
+        if composite is None:
+            return []
+        participating_rooms = list(dict.fromkeys(list(getattr(composite, "area_ids", []) or [])))
+        if not participating_rooms and getattr(composite, "primary_area", None):
+            participating_rooms = [str(composite.primary_area)]
+        prioritized: list[str] = []
+        primary_area = str(getattr(composite, "primary_area", "") or "").strip()
+        if primary_area and primary_area in participating_rooms:
+            prioritized.append(primary_area)
+        if area_id and area_id in participating_rooms and area_id not in prioritized:
+            prioritized.append(area_id)
+        for room_area_id in sorted(participating_rooms):
+            if room_area_id not in prioritized:
+                prioritized.append(room_area_id)
+        return prioritized
+
+    if area_id:
+        return [area_id]
+
+    return []
+
+
+def _resolve_room_media_context(state: Any, *, area_id: str | None, composite_id: str | None) -> dict[str, Any]:
+    """Resolve room-level media continuity context using deterministic room authority."""
+    candidate_rooms = _resolve_room_media_source_rooms(state, area_id=area_id, composite_id=composite_id)
+    room_media_state = None
+    source_room_id: str | None = None
+    source_room_selection_reason = "room_media_context_missing"
+
+    for index, candidate_room_id in enumerate(candidate_rooms):
+        state_id = _room_media_state_id(area_id=candidate_room_id)
+        candidate_state = None
+        if state is not None and hasattr(state, "usual_states"):
+            candidate_state = state.usual_states.get(state_id)
+        if candidate_state is None:
+            continue
+        room_media_state = candidate_state
+        source_room_id = candidate_room_id
+        if composite_id and candidate_room_id == area_id:
+            source_room_selection_reason = "initiating_room_selected"
+        elif composite_id and index == 0:
+            source_room_selection_reason = "primary_room_selected"
+        elif area_id and candidate_room_id == area_id:
+            source_room_selection_reason = "requested_room_selected"
+        else:
+            source_room_selection_reason = "deterministic_room_priority_selected"
+        break
+
+    if room_media_state is None:
+        return {
+            "source_room_id": None,
+            "source_room_selection_reason": source_room_selection_reason,
+            "source_room_candidates": candidate_rooms,
+            "room_media_state": None,
+            "room_media_context": None,
+            "manual_stop_cooldown_active": False,
+            "manual_stop_cooldown_reason": None,
+        }
+
+    values = dict(getattr(room_media_state, "values", {}) or {})
+    metadata = dict(getattr(room_media_state, "metadata", {}) or {})
+    last_media = values.get("last_media") if isinstance(values.get("last_media"), dict) else {}
+    if not isinstance(last_media, dict):
+        last_media = {}
+
+    cooldown_until = str(
+        values.get("manual_stop_cooldown_until")
+        or metadata.get("manual_stop_cooldown_until")
+        or ""
+    ).strip()
+    cooldown_seconds = values.get("manual_stop_cooldown_seconds", metadata.get("manual_stop_cooldown_seconds"))
+    manual_stop_marked = bool(values.get("manual_stop", metadata.get("manual_stop", False)))
+    now = datetime.now(timezone.utc)
+    cooldown_active = False
+    cooldown_reason = None
+    if cooldown_until:
+        try:
+            cooldown_dt = datetime.fromisoformat(cooldown_until.replace("Z", "+00:00"))
+            if cooldown_dt.tzinfo is None:
+                cooldown_dt = cooldown_dt.replace(tzinfo=timezone.utc)
+            cooldown_active = cooldown_dt > now
+        except ValueError:
+            cooldown_active = False
+    elif manual_stop_marked and isinstance(cooldown_seconds, (int, float)):
+        try:
+            cooldown_window = max(0, int(cooldown_seconds))
+        except (TypeError, ValueError):
+            cooldown_window = 0
+        if cooldown_window > 0:
+            cooldown_active = True
+
+    if cooldown_active:
+        cooldown_reason = "manual_stop_cooldown_active"
+
+    room_media_context = {
+        "room_id": source_room_id,
+        "source_room_id": source_room_id,
+        "source_room_selection_reason": source_room_selection_reason,
+        "provider_source": str(last_media.get("provider_source") or values.get("provider_source") or "").strip() or None,
+        "provider_media_id": str(last_media.get("provider_media_id") or values.get("provider_media_id") or "").strip() or None,
+        "media_type": str(last_media.get("media_type") or values.get("media_type") or "").strip() or None,
+        "track_title": str(last_media.get("track_title") or values.get("track_title") or values.get("last_song") or "").strip() or None,
+        "artist_name": str(last_media.get("artist_name") or values.get("artist_name") or values.get("last_artist") or "").strip() or None,
+        "album_name": str(last_media.get("album_name") or values.get("album_name") or values.get("last_album") or "").strip() or None,
+        "genre": str(last_media.get("genre") or values.get("genre") or values.get("last_genre") or "").strip() or None,
+        "media_query": str(last_media.get("media_query") or values.get("media_query") or "").strip() or None,
+        "last_song": str(values.get("last_song") or last_media.get("track_title") or "").strip() or None,
+        "last_genre": str(values.get("last_genre") or last_media.get("genre") or "").strip() or None,
+        "manual_stop": manual_stop_marked,
+        "manual_stop_cooldown_until": cooldown_until or None,
+        "manual_stop_cooldown_seconds": int(cooldown_seconds) if isinstance(cooldown_seconds, (int, float, str)) and str(cooldown_seconds).strip().isdigit() else None,
+        "captured_at": str(values.get("captured_at") or last_media.get("captured_at") or room_media_state.updated_at or "").strip() or None,
+        "state": room_media_state.as_dict(),
+    }
+    return {
+        "source_room_id": source_room_id,
+        "source_room_selection_reason": source_room_selection_reason,
+        "source_room_candidates": candidate_rooms,
+        "room_media_state": room_media_state.as_dict(),
+        "room_media_context": room_media_context,
+        "manual_stop_cooldown_active": cooldown_active,
+        "manual_stop_cooldown_reason": cooldown_reason,
+    }
+
+
+def _resolve_room_media_continuation_plan(
+    *,
+    room_media_context: dict[str, Any] | None,
+    runtime_context: dict[str, Any],
+) -> dict[str, Any]:
+    """Resolve a governed continuation plan from room media context and optional person assistance."""
+    context = dict(room_media_context or {})
+    media_context = dict(context.get("room_media_context") or {})
+    preferred_query_inputs = _resolve_media_preference_inputs(runtime_context)
+    identity_state, confidence_band = _resolve_media_identity_state(runtime_context)
+    room_default_query = runtime_context.get("room_default_media_query")
+    household_default_query = runtime_context.get("household_default_media_query")
+    system_safe_query = runtime_context.get("system_safe_media_query", "music")
+
+    provider_source = str(media_context.get("provider_source") or "").strip() or None
+    provider_media_id = str(media_context.get("provider_media_id") or "").strip() or None
+    media_type = str(media_context.get("media_type") or "").strip() or None
+    track_title = str(media_context.get("track_title") or "").strip() or None
+    artist_name = str(media_context.get("artist_name") or "").strip() or None
+    album_name = str(media_context.get("album_name") or "").strip() or None
+    genre = str(media_context.get("genre") or media_context.get("last_genre") or "").strip() or None
+
+    if context.get("manual_stop_cooldown_active"):
+        return {
+            "continuation_strategy": "governed_refusal",
+            "strategy_reason": context.get("manual_stop_cooldown_reason") or "manual_stop_cooldown_active",
+            "continuation_query": None,
+            "music_assistant_request": None,
+            "personalization_applied": False,
+            "personalization_reason": None,
+            "cooldown_decision": {
+                "manual_stop_cooldown_active": True,
+                "decision_reason": context.get("manual_stop_cooldown_reason") or "manual_stop_cooldown_active",
+            },
+        }
+
+    plan = {
+        "continuation_strategy": "governed_fallback",
+        "strategy_reason": "room_media_context_missing",
+        "continuation_query": None,
+        "media_type": None,
+        "radio_mode": False,
+        "personalization_applied": False,
+        "personalization_reason": None,
+        "cooldown_decision": {
+            "manual_stop_cooldown_active": False,
+            "decision_reason": "cooldown_not_active",
+        },
+    }
+
+    if provider_source and provider_source != _PROVIDER_MUSIC_ASSISTANT:
+        plan.update(
+            {
+                "continuation_strategy": "governed_refusal",
+                "strategy_reason": "media_provider_disabled",
+                "continuation_query": None,
+            }
+        )
+        return plan
+
+    if provider_source == _PROVIDER_MUSIC_ASSISTANT and not provider_media_id and not track_title and not artist_name and not album_name and not genre:
+        plan.update(
+            {
+                "continuation_strategy": "governed_fallback",
+                "strategy_reason": "room_media_context_incomplete",
+            }
+        )
+    elif media_type == "album" and album_name:
+        plan.update(
+            {
+                "continuation_strategy": "same_album",
+                "strategy_reason": "album_reference_available",
+                "continuation_query": album_name,
+                "media_type": "album",
+            }
+        )
+    elif media_type == "artist" and artist_name:
+        plan.update(
+            {
+                "continuation_strategy": "same_artist",
+                "strategy_reason": "artist_reference_available",
+                "continuation_query": artist_name,
+                "media_type": "artist",
+            }
+        )
+    elif provider_media_id or track_title:
+        plan.update(
+            {
+                "continuation_strategy": "same_song",
+                "strategy_reason": "track_reference_available",
+                "continuation_query": provider_media_id or track_title,
+            }
+        )
+    elif album_name:
+        plan.update(
+            {
+                "continuation_strategy": "same_album",
+                "strategy_reason": "album_reference_available",
+                "continuation_query": album_name,
+                "media_type": "album",
+            }
+        )
+    elif artist_name:
+        plan.update(
+            {
+                "continuation_strategy": "same_artist",
+                "strategy_reason": "artist_reference_available",
+                "continuation_query": artist_name,
+                "media_type": "artist",
+            }
+        )
+    elif genre:
+        preferred_artist = preferred_query_inputs.get("preferred_artist")
+        preference_outcome = _resolve_preference_hierarchy(
+            PreferenceResolutionRequest(
+                preference_key="media_continuation_query",
+                identity_state=identity_state,
+                confidence_band=confidence_band,
+                command_value=None,
+                guardrail_value=None,
+                person_preference_value=preferred_artist,
+                room_default_value=genre,
+                household_default_value=household_default_query,
+                system_safe_value=system_safe_query,
+                personalization_policy_allowed=True,
+                personalization_policy_reason="policy_allows",
+                metadata={
+                    "source": _ROOM_MEDIA_CONTINUATION_POLICY_NAME,
+                    "continuation_strategy": "same_genre",
+                },
+            )
+        )
+        selected_query = preference_outcome.selected_value
+        selected_tier = preference_outcome.selected_tier.value
+        personalization_applied = selected_tier == PreferenceResolutionTier.KNOWN_PERSON_PREFERENCE.value
+        plan.update(
+            {
+                "continuation_strategy": "same_genre",
+                "strategy_reason": "genre_reference_available",
+                "continuation_query": selected_query,
+                "media_type": "artist" if personalization_applied and selected_query is not None else None,
+                "radio_mode": not personalization_applied,
+                "personalization_applied": personalization_applied,
+                "personalization_reason": preference_outcome.identity_decision.get("reason_code"),
+                "preference_resolution": preference_outcome.as_dict(),
+            }
+        )
+    else:
+        preference_outcome = _resolve_preference_hierarchy(
+            PreferenceResolutionRequest(
+                preference_key="media_continuation_query",
+                identity_state=identity_state,
+                confidence_band=confidence_band,
+                command_value=None,
+                guardrail_value=None,
+                person_preference_value=preferred_query_inputs.get("preferred_media_query") or preferred_query_inputs.get("preferred_artist"),
+                room_default_value=room_default_query,
+                household_default_value=household_default_query,
+                system_safe_value=system_safe_query,
+                personalization_policy_allowed=True,
+                personalization_policy_reason="policy_allows",
+                metadata={
+                    "source": _ROOM_MEDIA_CONTINUATION_POLICY_NAME,
+                    "continuation_strategy": "governed_fallback",
+                },
+            )
+        )
+        selected_query = preference_outcome.selected_value
+        if selected_query is None:
+            plan.update(
+                {
+                    "continuation_strategy": "governed_refusal",
+                    "strategy_reason": "no_usable_room_media_context",
+                    "preference_resolution": preference_outcome.as_dict(),
+                }
+            )
+        else:
+            plan.update(
+                {
+                    "continuation_strategy": "governed_fallback",
+                    "strategy_reason": "room_media_context_incomplete",
+                    "continuation_query": selected_query,
+                    "media_type": "artist" if preference_outcome.selected_tier == PreferenceResolutionTier.KNOWN_PERSON_PREFERENCE else None,
+                    "radio_mode": bool(preference_outcome.selected_tier == PreferenceResolutionTier.KNOWN_PERSON_PREFERENCE),
+                    "personalization_applied": preference_outcome.selected_tier == PreferenceResolutionTier.KNOWN_PERSON_PREFERENCE,
+                    "personalization_reason": preference_outcome.identity_decision.get("reason_code"),
+                    "preference_resolution": preference_outcome.as_dict(),
+                }
+            )
+
+    plan["music_assistant_request"] = None
+    if plan.get("continuation_query") is not None:
+        music_assistant_data: dict[str, Any] = {
+            "media_id": plan["continuation_query"],
+            "enqueue": "replace",
+        }
+        if plan.get("media_type"):
+            music_assistant_data["media_type"] = plan["media_type"]
+        if plan.get("radio_mode"):
+            music_assistant_data["radio_mode"] = True
+        plan["music_assistant_request"] = music_assistant_data
+
+    if plan.get("continuation_strategy") == "governed_refusal" and plan.get("strategy_reason") == "media_provider_disabled":
+        plan["music_assistant_request"] = None
+
+    return plan
+
+
+async def _async_capture_room_media_context(
+    hass: HomeAssistant,
+    *,
+    storage: ConciergeStorage,
+    state: Any,
+    area_id: str,
+    source_room_id: str,
+    provider_source: str,
+    media_type: str | None,
+    media_query: str | None,
+    music_assistant_request: dict[str, Any] | None,
+    room_media_context: dict[str, Any] | None,
+    manual_stop_cooldown_until: str | None = None,
+    manual_stop_cooldown_seconds: int | None = None,
+) -> dict[str, Any]:
+    """Persist the deterministic room-level last-media context used by continue/resume."""
+    source_context = dict(room_media_context or {})
+    last_media = dict(source_context.get("room_media_context") or {})
+    state_id = _room_media_state_id(area_id=source_room_id)
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    if music_assistant_request is not None:
+        request_media_type = str(music_assistant_request.get("media_type") or media_type or "").strip() or None
+        request_media_id = str(music_assistant_request.get("media_id") or media_query or "").strip() or None
+        request_radio_mode = bool(music_assistant_request.get("radio_mode", False))
+    else:
+        request_media_type = media_type
+        request_media_id = str(media_query or "").strip() or None
+        request_radio_mode = False
+
+    if request_media_type == "artist" and request_radio_mode:
+        last_song = None
+        last_genre = str(last_media.get("genre") or source_context.get("last_genre") or "").strip() or None
+    else:
+        last_song = str(last_media.get("last_song") or last_media.get("track_title") or media_query or "").strip() or None
+        last_genre = str(last_media.get("genre") or source_context.get("last_genre") or "").strip() or None
+
+    room_media_values: dict[str, Any] = {
+        "room_id": source_room_id,
+        "source_room_id": source_room_id,
+        "source_room_selection_reason": source_context.get("source_room_selection_reason") or "deterministic_room_priority_selected",
+        "provider_source": provider_source,
+        "provider_media_id": request_media_id,
+        "media_type": request_media_type,
+        "media_query": media_query or request_media_id,
+        "last_song": last_song,
+        "last_genre": last_genre,
+        "last_album": str(last_media.get("album_name") or "").strip() or None,
+        "last_artist": str(last_media.get("artist_name") or "").strip() or None,
+        "last_media": {
+            "provider_source": provider_source,
+            "provider_media_id": request_media_id,
+            "media_type": request_media_type,
+            "track_title": last_song,
+            "artist_name": str(last_media.get("artist_name") or "").strip() or None,
+            "album_name": str(last_media.get("album_name") or "").strip() or None,
+            "genre": last_genre,
+            "media_query": media_query or request_media_id,
+            "captured_at": now_iso,
+        },
+        "manual_stop": bool(last_media.get("manual_stop", False)),
+        "manual_stop_cooldown_until": manual_stop_cooldown_until or last_media.get("manual_stop_cooldown_until"),
+        "manual_stop_cooldown_seconds": manual_stop_cooldown_seconds if manual_stop_cooldown_seconds is not None else last_media.get("manual_stop_cooldown_seconds"),
+        "captured_at": now_iso,
+    }
+    room_media_metadata = {
+        "policy_name": _ROOM_MEDIA_CONTEXT_POLICY_NAME,
+        "source_room_selection_reason": source_context.get("source_room_selection_reason") or "deterministic_room_priority_selected",
+        "merged_room_participation": bool(source_context.get("source_room_candidates") and len(source_context.get("source_room_candidates", [])) > 1),
+        "source_room_candidates": list(source_context.get("source_room_candidates", [])),
+        "captured_at": now_iso,
+    }
+
+    usual_state = UsualState(
+        state_id=state_id,
+        scope=ContinuityScope.ROOM,
+        scope_ref=source_room_id,
+        basis=UsualStateBasis.LEARNED,
+        updated_at=now_iso,
+        values=room_media_values,
+        metadata=room_media_metadata,
+    )
+    await storage.async_upsert_usual_state(usual_state)
+    if state is not None and hasattr(state, "usual_states"):
+        state.usual_states[state_id] = usual_state
+    return usual_state.as_dict()
+
+
+def _resolve_media_provider_configuration(hass: HomeAssistant) -> dict[str, Any]:
+    """Resolve Concierge media provider configuration and availability."""
+    entries = hass.config_entries.async_entries(DOMAIN)
+    if not entries:
+        return {
+            "configured_provider": _PROVIDER_NONE,
+            "provider_selected": _PROVIDER_NONE,
+            "provider_reason": "concierge_not_configured",
+            "provider_available": False,
+            "provider_service_available": False,
+            "provider_integration_available": False,
+        }
+
+    entry = entries[0]
+    provider = str(
+        entry.options.get("media_provider", entry.data.get("media_provider", _PROVIDER_NONE))
+        or _PROVIDER_NONE
+    ).strip() or _PROVIDER_NONE
+    music_assistant_entries = hass.config_entries.async_entries(_PROVIDER_MUSIC_ASSISTANT)
+    provider_service_available = hass.services.has_service("music_assistant", "play_media")
+    provider_integration_available = bool(music_assistant_entries)
+
+    if provider != _PROVIDER_MUSIC_ASSISTANT:
+        return {
+            "configured_provider": provider,
+            "provider_selected": _PROVIDER_NONE,
+            "provider_reason": "media_provider_disabled",
+            "provider_available": False,
+            "provider_service_available": provider_service_available,
+            "provider_integration_available": provider_integration_available,
+        }
+
+    provider_available = bool(provider_service_available and provider_integration_available)
+    return {
+        "configured_provider": provider,
+        "provider_selected": _PROVIDER_MUSIC_ASSISTANT,
+        "provider_reason": (
+            "preferred_provider_configured_and_available"
+            if provider_available
+            else "preferred_provider_unavailable"
+        ),
+        "provider_available": provider_available,
+        "provider_service_available": provider_service_available,
+        "provider_integration_available": provider_integration_available,
+    }
+
+
+def _resolve_media_request_type_hint(runtime_context: dict[str, Any]) -> str | None:
+    """Resolve an explicit governed media request type hint when supplied."""
+    hint = str(runtime_context.get("media_request_type", "") or "").strip().lower()
+    if hint in _ROOM_MEDIA_REQUEST_KIND_HINTS:
+        return hint
+    return None
+
+
+def _resolve_media_preference_inputs(runtime_context: dict[str, Any]) -> dict[str, Any]:
+    """Consume bounded media preference inputs without creating a new persistence model."""
+    value = runtime_context.get("media_preference_inputs", {})
+    if not isinstance(value, dict):
+        return {}
+    return dict(value)
+
+
+def _resolve_media_preference_query(
+    *,
+    request_kind: str,
+    preference_inputs: dict[str, Any],
+) -> Any:
+    """Resolve one upstream-provided person-scoped media preference input when available."""
+    explicit_query = preference_inputs.get("preferred_media_query")
+    if explicit_query is not None:
+        return explicit_query
+
+    if request_kind == "genre":
+        return preference_inputs.get("preferred_genre")
+    if request_kind == "artist":
+        return preference_inputs.get("preferred_artist")
+    if request_kind == "album":
+        return preference_inputs.get("preferred_album")
+    if request_kind == "playlist":
+        return preference_inputs.get("preferred_playlist")
+    if request_kind == "general_music":
+        return preference_inputs.get("music_affinity")
+    return None
+
+
+def _resolve_media_identity_state(runtime_context: dict[str, Any]) -> tuple[PreferenceIdentityState, ContinuityConfidenceBand | None]:
+    """Resolve identity state inputs for media preference consumption."""
+    identity_context = runtime_context.get("identity_context", {})
+    if not isinstance(identity_context, dict):
+        return PreferenceIdentityState.UNAVAILABLE, ContinuityConfidenceBand.UNKNOWN
+
+    raw_state = str(identity_context.get("state", "") or "").strip().lower()
+    raw_band = str(identity_context.get("confidence_band", "") or "").strip().lower()
+
+    try:
+        identity_state = PreferenceIdentityState(raw_state)
+    except ValueError:
+        identity_state = PreferenceIdentityState.UNAVAILABLE
+
+    try:
+        confidence_band = ContinuityConfidenceBand(raw_band) if raw_band else ContinuityConfidenceBand.UNKNOWN
+    except ValueError:
+        confidence_band = ContinuityConfidenceBand.UNKNOWN
+
+    return identity_state, confidence_band
+
+
+def _resolve_media_playback_query(
+    *,
+    media_request: dict[str, Any],
+    runtime_context: dict[str, Any],
+) -> dict[str, Any]:
+    """Resolve the governed media query and identity-aware preference decision."""
+    request_kind = str(media_request.get("request_kind") or "general_music")
+    request_hint = _resolve_media_request_type_hint(runtime_context)
+    if request_hint is not None:
+        request_kind = request_hint
+
+    preference_inputs = _resolve_media_preference_inputs(runtime_context)
+    preferred_query = _resolve_media_preference_query(
+        request_kind=request_kind,
+        preference_inputs=preference_inputs,
+    )
+    identity_state, confidence_band = _resolve_media_identity_state(runtime_context)
+    room_default_query = runtime_context.get("room_default_media_query")
+    household_default_query = runtime_context.get("household_default_media_query")
+    system_safe_query = runtime_context.get("system_safe_media_query", media_request.get("media_query") or "music")
+
+    if request_kind in {"general_music", "playlist"}:
+        preference_outcome = _resolve_preference_hierarchy(
+            PreferenceResolutionRequest(
+                preference_key="media_playback_query",
+                identity_state=identity_state,
+                confidence_band=confidence_band,
+                command_value=None,
+                guardrail_value=None,
+                person_preference_value=preferred_query,
+                room_default_value=room_default_query,
+                household_default_value=household_default_query,
+                system_safe_value=system_safe_query,
+                personalization_policy_allowed=True,
+                personalization_policy_reason="policy_allows",
+                metadata={
+                    "request_kind": request_kind,
+                    "source": "ec_e_01_media_provider_resolution",
+                },
+            )
+        )
+        media_query = preference_outcome.selected_value
+    else:
+        preference_outcome = _resolve_preference_hierarchy(
+            PreferenceResolutionRequest(
+                preference_key="media_playback_query",
+                identity_state=identity_state,
+                confidence_band=confidence_band,
+                command_value=media_request.get("media_query"),
+                guardrail_value=None,
+                person_preference_value=preferred_query,
+                room_default_value=room_default_query,
+                household_default_value=household_default_query,
+                system_safe_value=system_safe_query,
+                personalization_policy_allowed=True,
+                personalization_policy_reason="policy_allows",
+                metadata={
+                    "request_kind": request_kind,
+                    "source": "ec_e_01_media_provider_resolution",
+                },
+            )
+        )
+        media_query = preference_outcome.selected_value
+
+    return {
+        "request_kind": request_kind,
+        "media_query": media_query,
+        "preference_outcome": preference_outcome.as_dict(),
+        "preference_inputs": preference_inputs,
+    }
+
+
+def _resolve_media_request_output_targets(
+    hass: HomeAssistant,
+    *,
+    state: Any,
+    area_id: str | None,
+    composite_id: str | None,
+) -> dict[str, Any]:
+    """Resolve configured playback targets for EC-E-01 without causing playback side effects."""
+    if composite_id:
+        composite = getattr(state, "composites", {}).get(composite_id)
+        if composite is None:
+            return {
+                "playback_scope": "merged_room",
+                "memory_scope": "room",
+                "room_authority_source": "room_configuration",
+                "merged_room_participation": True,
+                "participating_rooms": [],
+                "group_targeted_speakers": [],
+                "room_results": [],
+                "failure_reason": "composite_configuration_missing",
+                "decision_reason": "configured_room_authority_validation",
+            }
+        participating_rooms = list(dict.fromkeys(list(getattr(composite, "area_ids", []) or [])))
+        if not participating_rooms and getattr(composite, "primary_area", None):
+            participating_rooms = [str(composite.primary_area)]
+    elif area_id:
+        participating_rooms = [area_id]
+    else:
+        return {
+            "playback_scope": "room",
+            "memory_scope": "room",
+            "room_authority_source": "room_configuration",
+            "merged_room_participation": False,
+            "participating_rooms": [],
+            "group_targeted_speakers": [],
+            "room_results": [],
+            "failure_reason": "room_scope_missing",
+            "decision_reason": "configured_room_authority_validation",
+        }
+
+    room_results: list[dict[str, Any]] = []
+    targeted_speakers: list[str] = []
+    failure_reason: str | None = None
+
+    for room_area_id in participating_rooms:
+        room = getattr(state, "rooms", {}).get(room_area_id)
+        configured_speakers = _resolve_room_audio_speaker_membership(room)
+        if not configured_speakers:
+            room_results.append(
+                {
+                    "area_id": room_area_id,
+                    "configured_speakers": [],
+                    "validated_speakers": [],
+                    "validation_results": [],
+                    "failure_reason": "configured_speaker_mapping_missing",
+                    "decision_reason": "configured_room_authority_validation",
+                }
+            )
+            continue
+
+        valid_speakers, validation_results = _validate_configured_room_speakers(hass, configured_speakers)
+        if not valid_speakers:
+            validation_reasons = {
+                str(item.get("reason") or "").strip()
+                for item in validation_results
+                if str(item.get("reason") or "").strip()
+            }
+            if len(validation_reasons) > 1:
+                room_failure_reason = "no_eligible_configured_speakers"
+            elif "configured_speaker_unavailable" in validation_reasons:
+                room_failure_reason = "configured_speaker_unavailable"
+            elif "configured_speaker_missing" in validation_reasons:
+                room_failure_reason = "configured_speaker_missing"
+            else:
+                room_failure_reason = "configured_speaker_invalid"
+            room_results.append(
+                {
+                    "area_id": room_area_id,
+                    "configured_speakers": list(configured_speakers),
+                    "validated_speakers": [],
+                    "validation_results": validation_results,
+                    "failure_reason": room_failure_reason,
+                    "decision_reason": "configured_room_authority_validation",
+                }
+            )
+            continue
+
+        targeted_speakers.extend(valid_speakers)
+        room_results.append(
+            {
+                "area_id": room_area_id,
+                "configured_speakers": list(configured_speakers),
+                "validated_speakers": list(valid_speakers),
+                "validation_results": validation_results,
+                "failure_reason": None,
+                "decision_reason": "configured_room_speaker_authority",
+            }
+        )
+
+    unique_targeted = list(dict.fromkeys(targeted_speakers))
+    if not unique_targeted:
+        failure_reason = str(room_results[0].get("failure_reason") or "configured_speaker_mapping_missing") if room_results else "room_scope_missing"
+
+    return {
+        "playback_scope": "merged_room" if composite_id else "room",
+        "memory_scope": "room",
+        "room_authority_source": "room_configuration",
+        "merged_room_participation": bool(composite_id),
+        "participating_rooms": participating_rooms,
+        "group_targeted_speakers": unique_targeted,
+        "room_results": room_results,
+        "failure_reason": failure_reason,
+        "decision_reason": "configured_room_speaker_authority",
+    }
+
+
+def _usual_lighting_state_id(*, area_id: str, entity_id: str) -> str:
+    """Build a stable per-room per-entity learned lighting usual-state identifier."""
+    return f"usual_lighting::{area_id}::{entity_id}"
+
+
+def _room_audio_state_id(*, area_id: str, channel: str) -> str:
+    """Build a stable per-room per-channel room-audio usual-state identifier."""
+    normalized_channel = str(channel or "").strip().lower()
+    return f"room_audio::{area_id}::{normalized_channel}"
+
+
+def _coerce_brightness_pct(value: Any) -> int | None:
+    """Normalize brightness percent to an integer in [1, 100] when valid."""
+    try:
+        normalized = int(round(float(value)))
+    except (TypeError, ValueError):
+        return None
+    if normalized < 1 or normalized > 100:
+        return None
+    return normalized
+
+
+def _coerce_volume_pct(value: Any) -> int | None:
+    """Normalize room-audio volume percent to an integer in [1, 100] when valid."""
+    try:
+        normalized = int(round(float(value)))
+    except (TypeError, ValueError):
+        return None
+    if normalized < 1 or normalized > 100:
+        return None
+    return normalized
+
+
+def _volume_pct_from_media_state(state_obj: Any) -> int | None:
+    """Extract volume percent from one Home Assistant media_player state object."""
+    if state_obj is None:
+        return None
+    attributes = getattr(state_obj, "attributes", {}) or {}
+    if not isinstance(attributes, dict):
+        return None
+
+    if "volume_level" in attributes:
+        try:
+            level = float(attributes.get("volume_level"))
+        except (TypeError, ValueError):
+            return None
+        return _coerce_volume_pct(level * 100.0)
+
+    if "media_volume_level" in attributes:
+        try:
+            level = float(attributes.get("media_volume_level"))
+        except (TypeError, ValueError):
+            return None
+        return _coerce_volume_pct(level * 100.0)
+
+    return None
+
+
+def _brightness_pct_from_hass_state(state_obj: Any) -> int | None:
+    """Extract brightness percent from one Home Assistant light state object."""
+    if state_obj is None:
+        return None
+    state_value = str(getattr(state_obj, "state", "")).strip().lower()
+    if state_value != "on":
+        return None
+
+    attributes = getattr(state_obj, "attributes", {}) or {}
+    if not isinstance(attributes, dict):
+        return None
+
+    if "brightness_pct" in attributes:
+        return _coerce_brightness_pct(attributes.get("brightness_pct"))
+
+    brightness = attributes.get("brightness")
+    if brightness is None:
+        return None
+
+    try:
+        brightness_raw = float(brightness)
+    except (TypeError, ValueError):
+        return None
+
+    brightness_pct = int(round((brightness_raw / 255.0) * 100.0))
+    return _coerce_brightness_pct(brightness_pct)
+
+
+def _evaluate_entity_stability_for_usual_learning(
+    state_obj: Any,
+    *,
+    stability_seconds: int,
+) -> dict[str, Any]:
+    """Evaluate whether one entity level is stable for governed usual-learning capture."""
+    if state_obj is None:
+        return {
+            "stable": False,
+            "observed_seconds": 0,
+            "required_seconds": int(stability_seconds),
+            "reason": "state_missing",
+        }
+
+    changed_at = getattr(state_obj, "last_changed", None) or getattr(state_obj, "last_updated", None)
+    if not isinstance(changed_at, datetime):
+        return {
+            "stable": False,
+            "observed_seconds": 0,
+            "required_seconds": int(stability_seconds),
+            "reason": "timestamp_unavailable",
+        }
+
+    if changed_at.tzinfo is None:
+        changed_at = changed_at.replace(tzinfo=timezone.utc)
+
+    observed_seconds = max(
+        0,
+        int((datetime.now(timezone.utc) - changed_at).total_seconds()),
+    )
+    stable = observed_seconds >= int(stability_seconds)
+    return {
+        "stable": stable,
+        "observed_seconds": observed_seconds,
+        "required_seconds": int(stability_seconds),
+        "reason": "stable_threshold_satisfied" if stable else "stable_threshold_not_met",
+    }
+
+
+def _evaluate_entity_stability_for_room_audio_learning(
+    state_obj: Any,
+    *,
+    stability_seconds: int,
+) -> dict[str, Any]:
+    """Evaluate whether one speaker volume is stable for governed room-audio capture."""
+    return _evaluate_entity_stability_for_usual_learning(
+        state_obj,
+        stability_seconds=stability_seconds,
+    )
+
+
+def _lighting_learning_stability_seconds(state: Any) -> int:
+    """Resolve governed stability interval for learned usual lighting capture."""
+    feature = {}
+    if state is not None and hasattr(state, "global_features"):
+        feature = dict(state.global_features.get(_USUAL_LIGHTING_LEARNING_POLICY_FEATURE_KEY, {}))
+
+    options = dict(feature.get("options", {})) if isinstance(feature.get("options", {}), dict) else {}
+    raw_value = options.get("stability_seconds", _USUAL_LIGHTING_DEFAULT_STABILITY_SECONDS)
+    try:
+        parsed = int(raw_value)
+    except (TypeError, ValueError):
+        parsed = _USUAL_LIGHTING_DEFAULT_STABILITY_SECONDS
+    return max(1, min(parsed, 3600))
+
+
+def _room_audio_learning_stability_seconds(state: Any) -> int:
+    """Resolve governed stability interval for room-audio learning capture."""
+    feature = {}
+    if state is not None and hasattr(state, "global_features"):
+        feature = dict(state.global_features.get(_ROOM_AUDIO_LEARNING_POLICY_FEATURE_KEY, {}))
+
+    options = dict(feature.get("options", {})) if isinstance(feature.get("options", {}), dict) else {}
+    raw_value = options.get("stability_seconds", _ROOM_AUDIO_DEFAULT_STABILITY_SECONDS)
+    try:
+        parsed = int(raw_value)
+    except (TypeError, ValueError):
+        parsed = _ROOM_AUDIO_DEFAULT_STABILITY_SECONDS
+    return max(1, min(parsed, 3600))
+
+
+def _lighting_learning_policy_enabled(state: Any) -> bool:
+    """Resolve whether EC-C-01 usual-lighting learning is enabled by policy."""
+    feature = {}
+    if state is not None and hasattr(state, "global_features"):
+        feature = dict(state.global_features.get(_USUAL_LIGHTING_LEARNING_POLICY_FEATURE_KEY, {}))
+
+    if "enabled" in feature:
+        return bool(feature.get("enabled", True))
+
+    options = dict(feature.get("options", {})) if isinstance(feature.get("options", {}), dict) else {}
+    if "learning_enabled" in options:
+        return bool(options.get("learning_enabled", True))
+    return True
+
+
+def _room_audio_learning_policy_enabled(state: Any) -> bool:
+    """Resolve whether EC-D-01 room-audio learning is enabled by policy."""
+    feature = {}
+    if state is not None and hasattr(state, "global_features"):
+        feature = dict(state.global_features.get(_ROOM_AUDIO_LEARNING_POLICY_FEATURE_KEY, {}))
+
+    if "enabled" in feature:
+        return bool(feature.get("enabled", True))
+
+    options = dict(feature.get("options", {})) if isinstance(feature.get("options", {}), dict) else {}
+    if "learning_enabled" in options:
+        return bool(options.get("learning_enabled", True))
+    return True
+
+
+def _resolve_usual_lighting_membership(room: Any, command_kind: str) -> list[str]:
+    """Resolve configured room membership for EC-C-01 command handling."""
+    lamp_entities = _room_entity_ids(room, "lamp_entity_ids")
+    light_entities = _room_entity_ids(room, "light_entity_ids")
+
+    if command_kind == "lamps":
+        return lamp_entities
+    if command_kind == "lights":
+        return light_entities
+    return list(dict.fromkeys(lamp_entities + light_entities))
+
+
+def _resolve_room_audio_speaker_membership(room: Any) -> list[str]:
+    """Resolve configured room speaker membership with media-player precedence."""
+    media_player_entities = _room_entity_ids(room, "media_player_entity_ids")
+    speaker_entities = _room_entity_ids(room, "speaker_entity_ids")
+    return list(dict.fromkeys(media_player_entities + speaker_entities))
+
+
+def _validate_configured_room_speakers(
+    hass: HomeAssistant,
+    configured_speakers: list[str],
+) -> tuple[list[str], list[dict[str, Any]]]:
+    """Validate configured room speakers without redefining speaker authority."""
+    registry = er.async_get(hass)
+    valid_targets: list[str] = []
+    validations: list[dict[str, Any]] = []
+
+    for entity_id in configured_speakers:
+        normalized = str(entity_id or "").strip()
+        if not normalized:
+            validations.append(
+                {
+                    "entity_id": normalized,
+                    "valid": False,
+                    "status": "invalid_entity",
+                    "reason": "configured_speaker_invalid",
+                }
+            )
+            continue
+
+        if not normalized.startswith("media_player."):
+            validations.append(
+                {
+                    "entity_id": normalized,
+                    "valid": False,
+                    "status": "invalid_entity",
+                    "reason": "configured_speaker_invalid",
+                }
+            )
+            continue
+
+        state_obj = hass.states.get(normalized)
+        registry_entry = registry.async_get(normalized)
+        if state_obj is None and registry_entry is None:
+            validations.append(
+                {
+                    "entity_id": normalized,
+                    "valid": False,
+                    "status": "missing_entity",
+                    "reason": "configured_speaker_missing",
+                }
+            )
+            continue
+
+        if state_obj is None:
+            validations.append(
+                {
+                    "entity_id": normalized,
+                    "valid": False,
+                    "status": "missing_state",
+                    "reason": "configured_speaker_missing",
+                }
+            )
+            continue
+
+        state_value = str(getattr(state_obj, "state", "") or "").strip().lower()
+        if state_value in _ROOM_AUDIO_UNAVAILABLE_STATES:
+            validations.append(
+                {
+                    "entity_id": normalized,
+                    "valid": False,
+                    "status": "unavailable_entity",
+                    "reason": "configured_speaker_unavailable",
+                }
+            )
+            continue
+
+        valid_targets.append(normalized)
+        validations.append(
+            {
+                "entity_id": normalized,
+                "valid": True,
+                "status": "validated",
+                "reason": "configured_speaker_valid",
+            }
+        )
+
+    return valid_targets, validations
+
+
+def _resolve_room_audio_level(
+    *,
+    state: Any,
+    area_id: str,
+    channel: str,
+) -> tuple[int | None, str | None, dict[str, Any] | None]:
+    """Resolve one stored room-level audio value for one channel when available."""
+    state_id = _room_audio_state_id(area_id=area_id, channel=channel)
+    usual_state = None
+    if state is not None and hasattr(state, "usual_states"):
+        usual_state = state.usual_states.get(state_id)
+    if usual_state is None:
+        return None, "room_audio_value_missing", None
+
+    values = dict(getattr(usual_state, "values", {}) or {})
+    level = _coerce_volume_pct(values.get("volume_pct"))
+    if level is None:
+        return None, "room_audio_value_invalid", usual_state.as_dict()
+    return level, None, usual_state.as_dict()
+
+
+async def _async_capture_room_audio_channel(
+    hass: HomeAssistant,
+    *,
+    storage: ConciergeStorage,
+    state: Any,
+    area_id: str,
+    channel: str,
+    configured_speakers: list[str],
+    allow_overwrite: bool = True,
+) -> dict[str, Any]:
+    """Capture one room-scoped channel volume using governed stability and learning policy."""
+    normalized_channel = str(channel or "").strip().lower()
+    if normalized_channel not in _ROOM_AUDIO_CHANNELS:
+        return {
+            "learning_status": "denied",
+            "denial_reason": "unsupported_room_audio_channel",
+            "captured_volume_pct": None,
+            "stability_evidence": [],
+            "policy_decision": {},
+            "learning_write": None,
+            "previous_learned_preserved": False,
+        }
+
+    stability_seconds = _room_audio_learning_stability_seconds(state)
+    learning_policy_enabled = _room_audio_learning_policy_enabled(state)
+
+    stable_levels: list[int] = []
+    stability_evidence: list[dict[str, Any]] = []
+    for speaker_id in configured_speakers:
+        state_obj = hass.states.get(speaker_id)
+        level = _volume_pct_from_media_state(state_obj)
+        stability = _evaluate_entity_stability_for_room_audio_learning(
+            state_obj,
+            stability_seconds=stability_seconds,
+        )
+        if level is not None and bool(stability.get("stable", False)):
+            stable_levels.append(level)
+        stability_evidence.append(
+            {
+                "entity_id": speaker_id,
+                "volume_pct": level,
+                "stability": dict(stability),
+            }
+        )
+
+    captured_volume_pct: int | None = None
+    if stable_levels:
+        captured_volume_pct = _coerce_volume_pct(sum(stable_levels) / len(stable_levels))
+
+    policy_outcome = _evaluate_learning_policy(
+        LearningPolicyEvaluationRequest(
+            learning_key=f"room_audio_volume:{normalized_channel}:{area_id}",
+            ownership_scope=LearningOwnershipScope.ROOM,
+            identity_state=PreferenceIdentityState.UNAVAILABLE,
+            confidence_band="unknown",
+            learning_policy_enabled=learning_policy_enabled,
+            ownership_supported=True,
+            entity_eligible=captured_volume_pct is not None,
+            preference_eligible=True,
+            safety_restrictions_clear=captured_volume_pct is not None,
+            identity_sensitive_learning=False,
+            personalization_policy_allowed=True,
+            policy_reason="policy_allows",
+            metadata={
+                "learning_source": "room_audio_stability_capture",
+                "area_id": area_id,
+                "channel": normalized_channel,
+                "membership_source": _ROOM_AUDIO_MEMBERSHIP_SOURCE,
+                "configured_speaker_count": len(configured_speakers),
+            },
+        )
+    )
+
+    existing_level, _, _ = _resolve_room_audio_level(
+        state=state,
+        area_id=area_id,
+        channel=normalized_channel,
+    )
+    learning_status = "denied"
+    enqueue_info: dict[str, Any] | None = None
+
+    if existing_level is not None and not allow_overwrite:
+        learning_status = "denied_previous_preserved"
+    elif policy_outcome.learning_allowed and captured_volume_pct is not None:
+        learning_event_id = f"room_audio_{normalized_channel}_{uuid4().hex}"
+        state_id = _room_audio_state_id(area_id=area_id, channel=normalized_channel)
+        usual_state = UsualState(
+            state_id=state_id,
+            scope=ContinuityScope.ROOM,
+            scope_ref=area_id,
+            basis=UsualStateBasis.LEARNED,
+            updated_at=datetime.now(timezone.utc).isoformat(),
+            values={
+                "channel": normalized_channel,
+                "volume_pct": captured_volume_pct,
+                "area_id": area_id,
+                "configured_speakers": list(configured_speakers),
+            },
+            event_id=learning_event_id,
+            metadata={
+                "policy_name": _ROOM_AUDIO_POLICY_NAME,
+                "policy_decision": dict(policy_outcome.policy_decision),
+                "membership_source": _ROOM_AUDIO_MEMBERSHIP_SOURCE,
+                "stability_seconds": stability_seconds,
+                "stability_evidence": list(stability_evidence),
+            },
+        )
+        await storage.async_upsert_usual_state(usual_state)
+        state.usual_states[state_id] = usual_state
+        learning_status = "learned"
+
+        enqueue_info = _enqueue_learning_write(
+            hass,
+            LearningWriteRequest(
+                learning_event_id=learning_event_id,
+                learning_key=f"room_audio_volume:{normalized_channel}",
+                ownership_scope=LearningOwnershipScope.ROOM,
+                owner_ref=area_id,
+                learned_value={
+                    "channel": normalized_channel,
+                    "volume_pct": captured_volume_pct,
+                    "configured_speakers": list(configured_speakers),
+                },
+                reason_code="stable_room_audio_volume_capture",
+                policy_used=_ROOM_AUDIO_POLICY_NAME,
+                reversibility_metadata={
+                    "owner_scope": "room",
+                    "area_id": area_id,
+                    "channel": normalized_channel,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "rollback_supporting_metadata": True,
+                },
+                explainability={
+                    "membership_source": _ROOM_AUDIO_MEMBERSHIP_SOURCE,
+                    "policy_decision": dict(policy_outcome.policy_decision),
+                    "stability_evidence": list(stability_evidence),
+                },
+                metadata={
+                    "configured_speaker_count": len(configured_speakers),
+                },
+            ),
+        )
+    elif existing_level is not None:
+        learning_status = "denied_previous_preserved"
+
+    return {
+        "learning_status": learning_status,
+        "denial_reason": policy_outcome.denial_reason,
+        "captured_volume_pct": captured_volume_pct,
+        "stability_seconds": stability_seconds,
+        "stability_evidence": stability_evidence,
+        "policy_decision": dict(policy_outcome.policy_decision),
+        "learning_write": enqueue_info,
+        "previous_learned_preserved": existing_level is not None and learning_status != "learned",
+    }
+
+
+async def _async_execute_room_audio_playback_start(
+    hass: HomeAssistant,
+    *,
+    storage: ConciergeStorage,
+    state: Any,
+    area_id: str | None,
+    composite_id: str | None,
+    channel: str = "music",
+) -> dict[str, Any]:
+    """Execute EC-D-01 room-audio playback-start volume resolution from room authority."""
+    normalized_channel = str(channel or "").strip().lower()
+    if normalized_channel not in _ROOM_AUDIO_CHANNELS:
+        return {
+            "handled": True,
+            "executed": False,
+            "resolved_target": f"room_audio:{normalized_channel}_start",
+            "failure_reason": "unsupported_room_audio_channel",
+            "fallback_used": True,
+            "fallback_path": "degraded_safe_failure",
+            "fallback_source": _ROOM_AUDIO_FALLBACK_POLICY_SOURCE,
+            "memory_scope": "room",
+            "group_targeted_speakers": [],
+            "room_results": [],
+            "learning_decisions": [],
+            "merged_room_participation": bool(composite_id),
+            "participating_rooms": [],
+        }
+
+    if composite_id:
+        composite = getattr(state, "composites", {}).get(composite_id)
+        if composite is None:
+            return {
+                "handled": True,
+                "executed": False,
+                "resolved_target": f"room_audio:{normalized_channel}_start",
+                "failure_reason": "composite_configuration_missing",
+                "fallback_used": True,
+                "fallback_path": "degraded_safe_failure",
+                "fallback_source": _ROOM_AUDIO_FALLBACK_POLICY_SOURCE,
+                "memory_scope": "room",
+                "group_targeted_speakers": [],
+                "room_results": [],
+                "learning_decisions": [],
+                "merged_room_participation": True,
+                "participating_rooms": [],
+            }
+        participating_rooms = list(dict.fromkeys(list(getattr(composite, "area_ids", []) or [])))
+        if not participating_rooms and getattr(composite, "primary_area", None):
+            participating_rooms = [str(composite.primary_area)]
+    elif area_id:
+        participating_rooms = [area_id]
+    else:
+        return {
+            "handled": True,
+            "executed": False,
+            "resolved_target": f"room_audio:{normalized_channel}_start",
+            "failure_reason": "room_scope_missing",
+            "fallback_used": True,
+            "fallback_path": "degraded_safe_failure",
+            "fallback_source": _ROOM_AUDIO_FALLBACK_POLICY_SOURCE,
+            "memory_scope": "room",
+            "group_targeted_speakers": [],
+            "room_results": [],
+            "learning_decisions": [],
+            "merged_room_participation": False,
+            "participating_rooms": [],
+        }
+
+    room_results: list[dict[str, Any]] = []
+    learning_decisions: list[dict[str, Any]] = []
+    targeted_speakers: list[str] = []
+
+    for room_area_id in participating_rooms:
+        room = getattr(state, "rooms", {}).get(room_area_id)
+        configured_speakers = _resolve_room_audio_speaker_membership(room)
+        if not configured_speakers:
+            room_results.append(
+                {
+                    "area_id": room_area_id,
+                    "channel": normalized_channel,
+                    "configured_speakers": [],
+                    "validated_speakers": [],
+                    "validation_results": [],
+                    "resolved_volume_pct": None,
+                    "resolved_source": None,
+                    "fallback_reason": "configured_speaker_mapping_missing",
+                    "fallback_source": _ROOM_AUDIO_FALLBACK_POLICY_SOURCE,
+                    "decision_reason": "configured_room_authority_validation",
+                    "memory_scope": "room",
+                }
+            )
+            continue
+
+        valid_speakers, validation_results = _validate_configured_room_speakers(
+            hass,
+            configured_speakers,
+        )
+        if not valid_speakers:
+            validation_reasons = {
+                str(item.get("reason") or "").strip()
+                for item in validation_results
+                if str(item.get("reason") or "").strip()
+            }
+            if len(validation_reasons) > 1:
+                fallback_reason = "no_eligible_configured_speakers"
+            elif "configured_speaker_unavailable" in validation_reasons:
+                fallback_reason = "configured_speaker_unavailable"
+            elif "configured_speaker_missing" in validation_reasons:
+                fallback_reason = "configured_speaker_missing"
+            else:
+                fallback_reason = "configured_speaker_invalid"
+            room_results.append(
+                {
+                    "area_id": room_area_id,
+                    "channel": normalized_channel,
+                    "configured_speakers": list(configured_speakers),
+                    "validated_speakers": [],
+                    "validation_results": validation_results,
+                    "resolved_volume_pct": None,
+                    "resolved_source": None,
+                    "fallback_reason": fallback_reason,
+                    "fallback_source": _ROOM_AUDIO_FALLBACK_POLICY_SOURCE,
+                    "decision_reason": "configured_room_authority_validation",
+                    "memory_scope": "room",
+                }
+            )
+            continue
+
+        learning = await _async_capture_room_audio_channel(
+            hass,
+            storage=storage,
+            state=state,
+            area_id=room_area_id,
+            channel=normalized_channel,
+            configured_speakers=valid_speakers,
+            allow_overwrite=False,
+        )
+        learning_decisions.append(
+            {
+                "area_id": room_area_id,
+                "channel": normalized_channel,
+                **learning,
+            }
+        )
+
+        resolved_level, resolved_reason, _resolved_state = _resolve_room_audio_level(
+            state=state,
+            area_id=room_area_id,
+            channel=normalized_channel,
+        )
+
+        resolved_source = "room_audio_usual_state"
+        fallback_reason: str | None = None
+        if resolved_level is None:
+            fallback_reason = "room_audio_value_missing" if resolved_reason == "room_audio_value_missing" else "room_audio_value_invalid"
+            current_levels = [
+                _volume_pct_from_media_state(hass.states.get(speaker_id))
+                for speaker_id in valid_speakers
+            ]
+            current_levels = [item for item in current_levels if item is not None]
+            if current_levels:
+                resolved_level = _coerce_volume_pct(sum(current_levels) / len(current_levels))
+                resolved_source = "current_state_volume"
+            else:
+                resolved_level = _ROOM_AUDIO_DEFAULT_VOLUME_PCT
+                resolved_source = "safe_default_volume"
+
+        volume_level = float(resolved_level) / 100.0 if resolved_level is not None else 0.0
+        for speaker_id in valid_speakers:
+            await hass.services.async_call(
+                "media_player",
+                "volume_set",
+                {
+                    "entity_id": speaker_id,
+                    "volume_level": volume_level,
+                },
+                blocking=True,
+            )
+            targeted_speakers.append(speaker_id)
+
+        room_results.append(
+            {
+                "area_id": room_area_id,
+                "channel": normalized_channel,
+                "configured_speakers": list(configured_speakers),
+                "validated_speakers": list(valid_speakers),
+                "validation_results": validation_results,
+                "resolved_volume_pct": resolved_level,
+                "resolved_source": resolved_source,
+                "fallback_reason": fallback_reason,
+                "fallback_source": _ROOM_AUDIO_FALLBACK_POLICY_SOURCE if fallback_reason else None,
+                "decision_reason": "configured_room_speaker_authority",
+                "memory_scope": "room",
+            }
+        )
+
+    unique_targeted = list(dict.fromkeys(targeted_speakers))
+    fallback_used = any(item.get("fallback_reason") for item in room_results)
+    executed = len(unique_targeted) > 0
+    failure_reason: str | None = None
+    if not executed:
+        if room_results:
+            failure_reason = str(room_results[0].get("fallback_reason") or "configured_speaker_mapping_missing")
+        else:
+            failure_reason = "no_participating_rooms"
+
+    return {
+        "handled": True,
+        "executed": executed,
+        "resolved_target": f"room_audio:{normalized_channel}_start",
+        "channel": normalized_channel,
+        "playback_scope": "merged_room" if composite_id else "room",
+        "memory_scope": "room",
+        "merged_room_participation": bool(composite_id),
+        "participating_rooms": participating_rooms,
+        "group_targeted_speakers": unique_targeted,
+        "room_results": room_results,
+        "learning_decisions": learning_decisions,
+        "failure_reason": failure_reason,
+        "fallback_used": fallback_used,
+        "fallback_path": "room_audio_channel_fallback" if fallback_used else "none",
+        "fallback_source": _ROOM_AUDIO_FALLBACK_POLICY_SOURCE,
+        "decision_reason": "configured_room_speaker_authority",
+        "activity_external_refs": [
+            {
+                "ref_type": "room_audio_continuity",
+                "policy_name": _ROOM_AUDIO_POLICY_NAME,
+                "channel": normalized_channel,
+                "playback_scope": "merged_room" if composite_id else "room",
+                "memory_scope": "room",
+                "merged_room_participation": bool(composite_id),
+                "participating_rooms": participating_rooms,
+                "group_targeted_speakers": unique_targeted,
+                "room_results": room_results,
+                "learning_decisions": learning_decisions,
+                "fallback_used": fallback_used,
+                "fallback_path": "room_audio_channel_fallback" if fallback_used else "none",
+                "fallback_source": _ROOM_AUDIO_FALLBACK_POLICY_SOURCE,
+                "failure_reason": failure_reason,
+            }
+        ],
+    }
+
+
+def _resolve_room_audio_channel_level_with_fallback(
+    hass: HomeAssistant,
+    *,
+    state: Any,
+    area_id: str,
+    channel: str,
+    speakers: list[str],
+) -> tuple[int, str, str | None]:
+    """Resolve room-audio channel level with deterministic fallback behavior."""
+    resolved_level, resolved_reason, _resolved_state = _resolve_room_audio_level(
+        state=state,
+        area_id=area_id,
+        channel=channel,
+    )
+    if resolved_level is not None:
+        return resolved_level, "room_audio_usual_state", None
+
+    fallback_reason = (
+        "room_audio_value_missing" if resolved_reason == "room_audio_value_missing" else "room_audio_value_invalid"
+    )
+    current_levels = [_volume_pct_from_media_state(hass.states.get(speaker_id)) for speaker_id in speakers]
+    current_levels = [item for item in current_levels if item is not None]
+    if current_levels:
+        current_level = _coerce_volume_pct(sum(current_levels) / len(current_levels))
+        if current_level is not None:
+            return current_level, "current_state_volume", fallback_reason
+
+    return _ROOM_AUDIO_DEFAULT_VOLUME_PCT, "safe_default_volume", fallback_reason
+
+
+def _resolve_person_room_tts_context(
+    state: Any,
+    *,
+    linked_area_id: str | None,
+) -> dict[str, Any]:
+    """Resolve person room/composite context for room-TTS grouped behavior."""
+    area_id = str(linked_area_id or "").strip()
+    if not area_id:
+        return {
+            "resolved_composite_id": None,
+            "merged_room_participation": False,
+            "participating_rooms": [],
+        }
+
+    composites = list(getattr(state, "composites", {}).values())
+    matches = []
+    for composite in composites:
+        if not bool(getattr(composite, "enabled", True)):
+            continue
+        area_ids = list(getattr(composite, "area_ids", []) or [])
+        if area_id in area_ids:
+            matches.append(composite)
+
+    if not matches:
+        return {
+            "resolved_composite_id": None,
+            "merged_room_participation": False,
+            "participating_rooms": [area_id],
+        }
+
+    def _sort_key(item):
+        primary_match = 0 if str(getattr(item, "primary_area", "") or "") == area_id else 1
+        return (primary_match, str(getattr(item, "composite_id", "") or ""))
+
+    selected = sorted(matches, key=_sort_key)[0]
+    participating_rooms = list(dict.fromkeys(list(getattr(selected, "area_ids", []) or [])))
+    if not participating_rooms:
+        participating_rooms = [area_id]
+
+    return {
+        "resolved_composite_id": str(getattr(selected, "composite_id", "") or "") or None,
+        "merged_room_participation": len(participating_rooms) > 1,
+        "participating_rooms": participating_rooms,
+    }
+
+
+def _resolve_grouped_room_tts_speaker_map(
+    state: Any,
+    *,
+    participating_rooms: list[str],
+) -> dict[str, list[str]]:
+    """Resolve per-room configured speaker mappings for grouped TTS behavior."""
+    mapping: dict[str, list[str]] = {}
+    for area_id in participating_rooms:
+        room = getattr(state, "rooms", {}).get(area_id)
+        mapping[area_id] = _resolve_room_audio_speaker_membership(room)
+    return mapping
+
+
+async def _async_execute_bounded_sonos_speech_lifecycle(
+    hass: HomeAssistant,
+    *,
+    state: Any,
+    area_id: str,
+    target_speakers: list[str],
+    room_speaker_map: dict[str, list[str]],
+    tts_service_data: dict[str, Any],
+    resolved_composite_id: str | None = None,
+) -> dict[str, Any]:
+    """Run bounded duck/speak/restore for room TTS without media continuation behavior."""
+    participating_rooms = list(dict.fromkeys(list(room_speaker_map.keys())))
+    grouped_validation_results: list[dict[str, Any]] = []
+    valid_room_speakers: dict[str, list[str]] = {}
+    speaker_to_area: dict[str, str] = {}
+    for room_area_id in participating_rooms:
+        configured = list(room_speaker_map.get(room_area_id, []))
+        valid, validation = _validate_configured_room_speakers(hass, configured)
+        valid_room_speakers[room_area_id] = list(valid)
+        for speaker_id in valid:
+            speaker_to_area[speaker_id] = room_area_id
+        grouped_validation_results.append(
+            {
+                "area_id": room_area_id,
+                "configured_speakers": configured,
+                "validated_speakers": list(valid),
+                "validation_results": validation,
+            }
+        )
+
+    lifecycle_speakers = list(dict.fromkeys(item for values in valid_room_speakers.values() for item in values))
+    requested_target_speakers = list(
+        dict.fromkeys([item for item in target_speakers if isinstance(item, str) and item])
+    )
+
+    resolved_target_speakers: list[str] = []
+    target_resolution_reason = "configured_room_speaker_authority"
+    target_fallback_reason: str | None = None
+    if lifecycle_speakers:
+        resolved_target_speakers = [
+            item for item in requested_target_speakers if item in lifecycle_speakers
+        ]
+        if requested_target_speakers and not resolved_target_speakers:
+            # Preferred target unavailable: deterministically fall back to validated configured speakers.
+            resolved_target_speakers = list(lifecycle_speakers)
+            target_resolution_reason = "preferred_speaker_unavailable_fallback_to_validated_speakers"
+            target_fallback_reason = "preferred_speaker_unavailable"
+        elif not requested_target_speakers:
+            resolved_target_speakers = list(lifecycle_speakers)
+            target_resolution_reason = "configured_room_speaker_default"
+    else:
+        target_resolution_reason = "configured_room_authority_validation"
+        validation_reasons = {
+            str(item.get("reason") or "").strip()
+            for grouped in grouped_validation_results
+            for item in list(grouped.get("validation_results", []))
+            if str(item.get("reason") or "").strip()
+        }
+        configured_count = sum(
+            len(list(grouped.get("configured_speakers", [])))
+            for grouped in grouped_validation_results
+        )
+        if configured_count == 0:
+            target_fallback_reason = "configured_speaker_mapping_missing"
+        elif "configured_speaker_unavailable" in validation_reasons:
+            target_fallback_reason = "configured_speaker_unavailable"
+        elif "configured_speaker_missing" in validation_reasons:
+            target_fallback_reason = "configured_speaker_missing"
+        elif validation_reasons:
+            target_fallback_reason = "configured_speaker_invalid"
+        else:
+            target_fallback_reason = "no_eligible_configured_speakers"
+
+    room_channel_resolution: dict[str, dict[str, Any]] = {}
+    for room_area_id in participating_rooms or [area_id]:
+        room_targets = list(valid_room_speakers.get(room_area_id, []))
+        if not room_targets:
+            room_targets = [item for item, mapped_area in speaker_to_area.items() if mapped_area == room_area_id]
+        duck_level, duck_source, duck_fallback_reason = _resolve_room_audio_channel_level_with_fallback(
+            hass,
+            state=state,
+            area_id=room_area_id,
+            channel="duck",
+            speakers=room_targets,
+        )
+        tts_level, tts_source, tts_fallback_reason = _resolve_room_audio_channel_level_with_fallback(
+            hass,
+            state=state,
+            area_id=room_area_id,
+            channel="tts",
+            speakers=room_targets,
+        )
+        room_channel_resolution[room_area_id] = {
+            "duck": {
+                "volume_pct": duck_level,
+                "source": duck_source,
+                "fallback_reason": duck_fallback_reason,
+            },
+            "tts": {
+                "volume_pct": tts_level,
+                "source": tts_source,
+                "fallback_reason": tts_fallback_reason,
+            },
+        }
+
+    pre_duck_states: list[dict[str, Any]] = []
+    for speaker_id in lifecycle_speakers:
+        state_obj = hass.states.get(speaker_id)
+        state_value = str(getattr(state_obj, "state", "") or "").strip().lower()
+        room_area_id = speaker_to_area.get(speaker_id, area_id)
+        pre_duck_states.append(
+            {
+                "entity_id": speaker_id,
+                "area_id": room_area_id,
+                "pre_state": state_value or "state_unknown",
+                "pre_volume_pct": _volume_pct_from_media_state(state_obj),
+            }
+        )
+
+    duck_actions: list[dict[str, Any]] = []
+    for speaker_id in lifecycle_speakers:
+        room_area_id = speaker_to_area.get(speaker_id, area_id)
+        duck_level = int(room_channel_resolution.get(room_area_id, {}).get("duck", {}).get("volume_pct", _ROOM_AUDIO_DEFAULT_VOLUME_PCT))
+        try:
+            await hass.services.async_call(
+                "media_player",
+                "volume_set",
+                {
+                    "entity_id": speaker_id,
+                    "volume_level": float(duck_level) / 100.0,
+                },
+                blocking=True,
+            )
+            duck_actions.append(
+                {
+                    "entity_id": speaker_id,
+                    "area_id": room_area_id,
+                    "applied": True,
+                    "duck_volume_pct": duck_level,
+                    "reason": "duck_applied",
+                }
+            )
+        except Exception as err:
+            duck_actions.append(
+                {
+                    "entity_id": speaker_id,
+                    "area_id": room_area_id,
+                    "applied": False,
+                    "duck_volume_pct": duck_level,
+                    "reason": "duck_failed",
+                    "error": str(err),
+                }
+            )
+
+    speech_actions: list[dict[str, Any]] = []
+    for target_speaker in resolved_target_speakers:
+        room_area_id = speaker_to_area.get(target_speaker, area_id)
+        tts_level = int(room_channel_resolution.get(room_area_id, {}).get("tts", {}).get("volume_pct", _ROOM_AUDIO_DEFAULT_VOLUME_PCT))
+        tts_volume_applied = False
+        delivery_error: str | None = None
+        try:
+            await hass.services.async_call(
+                "media_player",
+                "volume_set",
+                {
+                    "entity_id": target_speaker,
+                    "volume_level": float(tts_level) / 100.0,
+                },
+                blocking=True,
+            )
+            tts_volume_applied = True
+        except Exception as err:
+            delivery_error = f"tts_volume_set_failed: {err}"
+
+        if delivery_error is None:
+            try:
+                payload = dict(tts_service_data)
+                payload["media_player_entity_id"] = target_speaker
+                await hass.services.async_call("tts", "speak", payload, blocking=True)
+            except Exception as err:
+                delivery_error = f"tts_speak_failed: {err}"
+
+        speech_actions.append(
+            {
+                "entity_id": target_speaker,
+                "area_id": room_area_id,
+                "volume_pct": tts_level,
+                "tts_volume_applied": tts_volume_applied,
+                "delivery_succeeded": delivery_error is None,
+                "delivery_error": delivery_error,
+            }
+        )
+
+    restore_actions: list[dict[str, Any]] = []
+    for item in pre_duck_states:
+        speaker_id = str(item.get("entity_id") or "").strip()
+        pre_volume_pct = _coerce_volume_pct(item.get("pre_volume_pct"))
+        if not speaker_id or pre_volume_pct is None:
+            restore_actions.append(
+                {
+                    "entity_id": speaker_id,
+                    "restored": False,
+                    "reason": "pre_volume_unavailable",
+                }
+            )
+            continue
+        try:
+            await hass.services.async_call(
+                "media_player",
+                "volume_set",
+                {
+                    "entity_id": speaker_id,
+                    "volume_level": float(pre_volume_pct) / 100.0,
+                },
+                blocking=True,
+            )
+            restore_actions.append(
+                {
+                    "entity_id": speaker_id,
+                    "restored": True,
+                    "restored_volume_pct": pre_volume_pct,
+                    "reason": "pre_duck_volume_restored",
+                }
+            )
+        except Exception as err:
+            restore_actions.append(
+                {
+                    "entity_id": speaker_id,
+                    "restored": False,
+                    "restored_volume_pct": pre_volume_pct,
+                    "reason": "restore_failed",
+                    "error": str(err),
+                }
+            )
+
+    failure_reason: str | None = None
+    if not speech_actions:
+        failure_reason = target_fallback_reason or "no_target_speakers_available"
+    elif any(not item.get("delivery_succeeded") for item in speech_actions):
+        failure_reason = "speech_delivery_failed"
+    elif any(not item.get("applied") for item in duck_actions):
+        failure_reason = "duck_partial_failure"
+    elif any(not item.get("restored") for item in restore_actions):
+        failure_reason = "restore_partial_failure"
+
+    duck_fallback_reason = any(
+        bool(room_channel_resolution.get(room_area_id, {}).get("duck", {}).get("fallback_reason"))
+        for room_area_id in room_channel_resolution
+    )
+    tts_fallback_reason = any(
+        bool(room_channel_resolution.get(room_area_id, {}).get("tts", {}).get("fallback_reason"))
+        for room_area_id in room_channel_resolution
+    )
+
+    primary_room = area_id if area_id in room_channel_resolution else (participating_rooms[0] if participating_rooms else area_id)
+
+    return {
+        "bounded": True,
+        "policy_name": _SONOS_SPEECH_CONTINUITY_POLICY_NAME,
+        "area_id": area_id,
+        "resolved_composite_id": resolved_composite_id,
+        "merged_room_participation": bool(resolved_composite_id) or len(participating_rooms) > 1,
+        "participating_rooms": participating_rooms,
+        "group_targeted_speakers": list(resolved_target_speakers),
+        "target_resolution": {
+            "requested_target_speakers": list(requested_target_speakers),
+            "resolved_target_speakers": list(resolved_target_speakers),
+            "decision_reason": target_resolution_reason,
+            "fallback_reason": target_fallback_reason,
+            "fallback_source": _SONOS_SPEECH_FALLBACK_POLICY_SOURCE if target_fallback_reason else None,
+        },
+        "configured_room_speaker_map": {key: list(value) for key, value in room_speaker_map.items()},
+        "validated_room_speaker_map": {key: list(value) for key, value in valid_room_speakers.items()},
+        "grouped_validation_results": grouped_validation_results,
+        "pre_duck_states": pre_duck_states,
+        "duck": {
+            "volume_pct": int(room_channel_resolution.get(primary_room, {}).get("duck", {}).get("volume_pct", _ROOM_AUDIO_DEFAULT_VOLUME_PCT)),
+            "source": str(room_channel_resolution.get(primary_room, {}).get("duck", {}).get("source", "safe_default_volume")),
+            "fallback_reason": room_channel_resolution.get(primary_room, {}).get("duck", {}).get("fallback_reason"),
+            "fallback_source": _SONOS_SPEECH_FALLBACK_POLICY_SOURCE,
+            "actions": duck_actions,
+            "room_channel_resolution": [
+                {
+                    "area_id": room_area_id,
+                    "volume_pct": int(item.get("duck", {}).get("volume_pct", _ROOM_AUDIO_DEFAULT_VOLUME_PCT)),
+                    "source": str(item.get("duck", {}).get("source", "safe_default_volume")),
+                    "fallback_reason": item.get("duck", {}).get("fallback_reason"),
+                }
+                for room_area_id, item in room_channel_resolution.items()
+            ],
+        },
+        "speech": {
+            "volume_pct": int(room_channel_resolution.get(primary_room, {}).get("tts", {}).get("volume_pct", _ROOM_AUDIO_DEFAULT_VOLUME_PCT)),
+            "source": str(room_channel_resolution.get(primary_room, {}).get("tts", {}).get("source", "safe_default_volume")),
+            "fallback_reason": room_channel_resolution.get(primary_room, {}).get("tts", {}).get("fallback_reason"),
+            "fallback_source": _SONOS_SPEECH_FALLBACK_POLICY_SOURCE,
+            "delivery_attempted": bool(speech_actions),
+            "tts_volume_applied": all(bool(item.get("tts_volume_applied")) for item in speech_actions),
+            "delivery_succeeded": bool(speech_actions) and all(bool(item.get("delivery_succeeded")) for item in speech_actions),
+            "delivery_error": (
+                next((item.get("delivery_error") for item in speech_actions if item.get("delivery_error")), None)
+                if speech_actions
+                else "no_target_speakers_available"
+            ),
+            "actions": speech_actions,
+            "room_channel_resolution": [
+                {
+                    "area_id": room_area_id,
+                    "volume_pct": int(item.get("tts", {}).get("volume_pct", _ROOM_AUDIO_DEFAULT_VOLUME_PCT)),
+                    "source": str(item.get("tts", {}).get("source", "safe_default_volume")),
+                    "fallback_reason": item.get("tts", {}).get("fallback_reason"),
+                }
+                for room_area_id, item in room_channel_resolution.items()
+            ],
+        },
+        "restore": {
+            "actions": restore_actions,
+            "media_continuation_performed": False,
+            "playback_resume_performed": False,
+            "manual_stop_respected": True,
+        },
+        "failure_reason": failure_reason,
+        "fallback_used": bool(duck_fallback_reason or tts_fallback_reason or target_fallback_reason or failure_reason),
+        "fallback_path": "bounded_duck_restore_fallback" if (duck_fallback_reason or tts_fallback_reason or target_fallback_reason or failure_reason) else "none",
+    }
+
+
+def _resolve_lighting_capability_mapping(room: Any, command_kind: str) -> dict[str, Any]:
+    """Resolve configured room capability mapping for room-aware lighting commands."""
+    if room is None:
+        return {
+            "ok": False,
+            "failure_reason": "room_configuration_missing",
+            "capability": "lighting",
+            "membership_field": None,
+            "configured_membership": [],
+            "room_source": "room_configuration",
+            "capability_source": _USUAL_LIGHTING_VALIDATION_SOURCE,
+        }
+
+    if command_kind == "lamps":
+        membership_field = "lamp_entity_ids"
+        capability = "lamps"
+    elif command_kind == "lights":
+        membership_field = "light_entity_ids"
+        capability = "lights"
+    elif command_kind in {"resume", "usual"}:
+        membership_field = "light_entity_ids|lamp_entity_ids"
+        capability = "lighting"
+    else:
+        return {
+            "ok": False,
+            "failure_reason": "lighting_command_not_supported",
+            "capability": "lighting",
+            "membership_field": None,
+            "configured_membership": [],
+            "room_source": "room_configuration",
+            "capability_source": _USUAL_LIGHTING_VALIDATION_SOURCE,
+        }
+
+    configured_membership = _resolve_usual_lighting_membership(room, command_kind)
+    lamp_membership = _room_entity_ids(room, "lamp_entity_ids")
+    light_membership = _room_entity_ids(room, "light_entity_ids")
+
+    if command_kind == "lamps" and not configured_membership and light_membership:
+        return {
+            "ok": False,
+            "failure_reason": "lighting_command_not_supported_by_configured_room_capability",
+            "capability": capability,
+            "membership_field": membership_field,
+            "configured_membership": [],
+            "room_source": "room_configuration",
+            "capability_source": _USUAL_LIGHTING_VALIDATION_SOURCE,
+        }
+
+    if command_kind == "lights" and not configured_membership and lamp_membership:
+        return {
+            "ok": False,
+            "failure_reason": "lighting_command_not_supported_by_configured_room_capability",
+            "capability": capability,
+            "membership_field": membership_field,
+            "configured_membership": [],
+            "room_source": "room_configuration",
+            "capability_source": _USUAL_LIGHTING_VALIDATION_SOURCE,
+        }
+
+    if not configured_membership:
+        return {
+            "ok": False,
+            "failure_reason": "configured_capability_mapping_missing",
+            "capability": capability,
+            "membership_field": membership_field,
+            "configured_membership": [],
+            "room_source": "room_configuration",
+            "capability_source": _USUAL_LIGHTING_VALIDATION_SOURCE,
+        }
+
+    return {
+        "ok": True,
+        "failure_reason": None,
+        "capability": capability,
+        "membership_field": membership_field,
+        "configured_membership": configured_membership,
+        "room_source": "room_configuration",
+        "capability_source": _USUAL_LIGHTING_VALIDATION_SOURCE,
+    }
+
+
+def _validate_configured_lighting_entities(
+    hass: HomeAssistant,
+    configured_membership: list[str],
+) -> tuple[list[str], list[dict[str, Any]]]:
+    """Validate configured lighting entities without redefining room membership authority."""
+    registry = er.async_get(hass)
+    valid_targets: list[str] = []
+    validations: list[dict[str, Any]] = []
+
+    for entity_id in configured_membership:
+        normalized = str(entity_id or "").strip()
+        if not normalized:
+            validations.append(
+                {
+                    "entity_id": normalized,
+                    "valid": False,
+                    "status": "invalid_entity",
+                    "reason": "configured_entity_invalid",
+                }
+            )
+            continue
+
+        if not normalized.startswith("light."):
+            validations.append(
+                {
+                    "entity_id": normalized,
+                    "valid": False,
+                    "status": "invalid_entity",
+                    "reason": "configured_entity_invalid",
+                }
+            )
+            continue
+
+        state_obj = hass.states.get(normalized)
+        registry_entry = registry.async_get(normalized)
+        if state_obj is None and registry_entry is None:
+            validations.append(
+                {
+                    "entity_id": normalized,
+                    "valid": False,
+                    "status": "missing_entity",
+                    "reason": "configured_entity_missing",
+                }
+            )
+            continue
+
+        if state_obj is None:
+            validations.append(
+                {
+                    "entity_id": normalized,
+                    "valid": False,
+                    "status": "missing_state",
+                    "reason": "configured_entity_missing",
+                }
+            )
+            continue
+
+        state_value = str(getattr(state_obj, "state", "") or "").strip().lower()
+        if state_value in _USUAL_LIGHTING_UNAVAILABLE_STATES:
+            validations.append(
+                {
+                    "entity_id": normalized,
+                    "valid": False,
+                    "status": "unavailable_entity",
+                    "reason": "configured_device_unavailable",
+                }
+            )
+            continue
+
+        attributes = getattr(state_obj, "attributes", {}) or {}
+        if isinstance(attributes, dict):
+            supported_color_modes = attributes.get("supported_color_modes")
+            if isinstance(supported_color_modes, (list, tuple, set)):
+                normalized_modes = {str(mode or "").strip().lower() for mode in supported_color_modes}
+                if normalized_modes and normalized_modes.issubset({"onoff"}):
+                    validations.append(
+                        {
+                            "entity_id": normalized,
+                            "valid": False,
+                            "status": "unsupported_entity",
+                            "reason": "unsupported_device_capability",
+                        }
+                    )
+                    continue
+
+            supported_features = attributes.get("supported_features")
+            if isinstance(supported_features, int) and (supported_features & 1) == 0:
+                validations.append(
+                    {
+                        "entity_id": normalized,
+                        "valid": False,
+                        "status": "unsupported_entity",
+                        "reason": "unsupported_device_capability",
+                    }
+                )
+                continue
+
+        valid_targets.append(normalized)
+        validations.append(
+            {
+                "entity_id": normalized,
+                "valid": True,
+                "status": "validated",
+                "reason": "configured_entity_valid",
+            }
+        )
+
+    return valid_targets, validations
+
+
+def _resolve_lighting_fallback_decision(
+    *,
+    failure_reason: str | None,
+    validation_results: list[dict[str, Any]],
+) -> tuple[str, str, str]:
+    """Resolve deterministic fallback decision labels for #401 degraded lighting paths."""
+    normalized = str(failure_reason or "").strip() or "no_eligible_lighting_targets"
+    if normalized == "lighting_command_not_supported_by_configured_room_capability":
+        return (
+            normalized,
+            "safe_command_rejection",
+            "configured_room_capability_authority",
+        )
+    if normalized == "lighting_command_not_supported":
+        return (
+            normalized,
+            "safe_command_rejection",
+            "lighting_command_support_policy",
+        )
+    if normalized == "unsupported_device_capability":
+        return (
+            normalized,
+            "safe_noop",
+            "device_capability_validation",
+        )
+    if normalized in {
+        "room_configuration_missing",
+        "configured_capability_mapping_missing",
+        "configured_entity_missing",
+        "configured_entity_invalid",
+        "configured_device_unavailable",
+        "no_eligible_lighting_targets",
+    }:
+        return (
+            normalized,
+            "safe_noop",
+            "configured_room_authority_validation",
+        )
+
+    if validation_results:
+        return (
+            normalized,
+            "safe_noop",
+            "configured_room_authority_validation",
+        )
+    return (
+        normalized,
+        "safe_noop",
+        "lighting_degraded_path_default",
+    )
 
 
 def _resolve_tts_engine_entity_id(hass: HomeAssistant) -> tuple[str, str]:
@@ -674,6 +3804,799 @@ def _resolve_room_tts_settings(
                             voice = first_voice
 
     return {"language": language, "voice": voice}
+
+
+def _resolve_preference_hierarchy(request: PreferenceResolutionRequest) -> PreferenceResolutionOutcome:
+    """Resolve a preference request using the governed EC-B-01 precedence hierarchy."""
+    normalized_request = request if isinstance(request, PreferenceResolutionRequest) else PreferenceResolutionRequest.from_dict(dict(request))
+    identity_state = normalized_request.identity_state
+    confidence_band = normalized_request.confidence_band
+    policy_allowed = bool(normalized_request.personalization_policy_allowed)
+    policy_reason = str(normalized_request.personalization_policy_reason or "").strip().lower() or "policy_allows"
+    confidence_band_value = (
+        str(confidence_band.value if hasattr(confidence_band, "value") else confidence_band or "")
+        .strip()
+        .lower()
+        if confidence_band is not None
+        else ""
+    )
+
+    personalization_allowed = (
+        identity_state is PreferenceIdentityState.KNOWN
+        and confidence_band_value != "low"
+        and policy_allowed
+    )
+    if identity_state in {
+        PreferenceIdentityState.GUEST,
+        PreferenceIdentityState.UNKNOWN,
+        PreferenceIdentityState.UNAVAILABLE,
+        PreferenceIdentityState.LOW_CONFIDENCE,
+    }:
+        personalization_allowed = False
+    if confidence_band_value == "low":
+        personalization_allowed = False
+    if not policy_allowed:
+        personalization_allowed = False
+
+    if identity_state is PreferenceIdentityState.GUEST:
+        identity_reason = "guest_identity_blocked"
+    elif identity_state is PreferenceIdentityState.UNKNOWN:
+        identity_reason = "unknown_identity_blocked"
+    elif identity_state is PreferenceIdentityState.UNAVAILABLE:
+        identity_reason = "unavailable_identity_blocked"
+    elif identity_state is PreferenceIdentityState.LOW_CONFIDENCE:
+        identity_reason = "low_confidence_identity_blocked"
+    elif not policy_allowed:
+        identity_reason = "identity_policy_disallowed"
+    elif not personalization_allowed:
+        identity_reason = "identity_policy_blocked"
+    else:
+        identity_reason = "known_person_allowed"
+
+    applied_policy = {
+        "policy_name": "experience_continuity_preference_resolution",
+        "precedence_order": [tier.value for tier in PreferenceResolutionTier],
+        "identity_gating_enabled": True,
+        "personalization_policy_required": True,
+        "personalization_policy_allowed": policy_allowed,
+        "personalization_policy_reason": policy_reason,
+        "person_room_exception_enabled": normalized_request.person_room_exception_enabled,
+        "person_preferences_portable_across_rooms": True,
+        "room_media_context_remains_room_scoped": True,
+        "command_and_guardrail_override_personalization": True,
+    }
+    identity_decision = {
+        "identity_state": identity_state.value,
+        "confidence_band": confidence_band.value if confidence_band is not None else None,
+        "personalization_allowed": personalization_allowed,
+        "policy_allowed": policy_allowed,
+        "policy_reason": policy_reason,
+        "safety_mode": "standard" if personalization_allowed else "fail_closed",
+        "reason_code": identity_reason,
+    }
+
+    tier_inputs: list[tuple[PreferenceResolutionTier, str, Any, bool, str]] = [
+        (PreferenceResolutionTier.COMMAND, "command", normalized_request.command_value, True, "command_override"),
+        (PreferenceResolutionTier.GUARDRAIL, "policy", normalized_request.guardrail_value, True, "guardrail_override"),
+        (
+            PreferenceResolutionTier.KNOWN_PERSON_PREFERENCE,
+            "person",
+            normalized_request.person_preference_value,
+            personalization_allowed,
+            identity_reason if not personalization_allowed else "known_person_preference_applied",
+        ),
+        (
+            PreferenceResolutionTier.EXPLICIT_PERSON_ROOM_EXCEPTION,
+            "person_room",
+            normalized_request.person_room_exception_value,
+            personalization_allowed and normalized_request.person_room_exception_enabled,
+            "person_room_exception_disabled"
+            if not normalized_request.person_room_exception_enabled
+            else (identity_reason if not personalization_allowed else "explicit_person_room_exception_applied"),
+        ),
+        (PreferenceResolutionTier.ROOM_DEFAULT, "room", normalized_request.room_default_value, True, "room_default_selected"),
+        (
+            PreferenceResolutionTier.HOUSEHOLD_DEFAULT,
+            "household",
+            normalized_request.household_default_value,
+            True,
+            "household_default_selected",
+        ),
+        (
+            PreferenceResolutionTier.SYSTEM_SAFE_DEFAULT,
+            "system",
+            normalized_request.system_safe_value,
+            True,
+            "system_safe_default_selected",
+        ),
+    ]
+
+    evaluation_path: list[dict[str, Any]] = []
+    selected_tier = PreferenceResolutionTier.SYSTEM_SAFE_DEFAULT
+    selected_scope = "system"
+    selected_value: Any = normalized_request.system_safe_value
+    fallback_reason: str | None = None
+    rejection_reasons: list[str] = []
+
+    for tier, scope, value, tier_allowed, reason_code in tier_inputs:
+        if evaluation_path and selected_tier is not PreferenceResolutionTier.SYSTEM_SAFE_DEFAULT and evaluation_path[-1].get("selected", False):
+            evaluation_path.append(
+                {
+                    "tier": tier.value,
+                    "scope": scope,
+                    "available": value is not None,
+                    "selected": False,
+                    "status": "skipped_by_precedence",
+                    "reason_code": "higher_precedence_selected",
+                    "candidate_value_present": value is not None,
+                }
+            )
+            continue
+
+        if tier in {
+            PreferenceResolutionTier.KNOWN_PERSON_PREFERENCE,
+            PreferenceResolutionTier.EXPLICIT_PERSON_ROOM_EXCEPTION,
+        } and not tier_allowed:
+            rejection_reasons.append(reason_code)
+            evaluation_path.append(
+                {
+                    "tier": tier.value,
+                    "scope": scope,
+                    "available": value is not None,
+                    "selected": False,
+                    "status": "rejected",
+                    "reason_code": reason_code,
+                    "candidate_value_present": value is not None,
+                }
+            )
+            continue
+
+        if value is None:
+            evaluation_path.append(
+                {
+                    "tier": tier.value,
+                    "scope": scope,
+                    "available": False,
+                    "selected": False,
+                    "status": "rejected",
+                    "reason_code": "candidate_missing",
+                    "candidate_value_present": False,
+                }
+            )
+            continue
+
+        selected_tier = tier
+        selected_scope = scope
+        selected_value = value
+        evaluation_path.append(
+            {
+                "tier": tier.value,
+                "scope": scope,
+                "available": True,
+                "selected": True,
+                "status": "selected",
+                "reason_code": reason_code,
+                "candidate_value_present": True,
+            }
+        )
+        break
+
+    if selected_tier in {PreferenceResolutionTier.ROOM_DEFAULT, PreferenceResolutionTier.HOUSEHOLD_DEFAULT, PreferenceResolutionTier.SYSTEM_SAFE_DEFAULT}:
+        fallback_reason = rejection_reasons[0] if rejection_reasons else next(
+            (entry["reason_code"] for entry in evaluation_path if entry.get("selected", False)),
+            None,
+        )
+
+    ownership_boundary = {
+        "person_preference_scope": "person",
+        "person_room_exception_scope": "person_room",
+        "room_default_scope": "room",
+        "household_default_scope": "household",
+        "system_safe_scope": "system",
+        "person_preference_portable_across_rooms": True,
+        "room_media_context_remains_room_scoped": True,
+        "room_history_not_reused_as_person_preference": True,
+    }
+
+    outcome_metadata = dict(normalized_request.metadata)
+    outcome_metadata["selected_source"] = selected_tier.value
+    outcome_metadata["fallback_target"] = selected_tier.value if fallback_reason is not None else None
+
+    return PreferenceResolutionOutcome(
+        preference_key=normalized_request.preference_key,
+        selected_tier=selected_tier,
+        selected_scope=selected_scope,
+        selected_value=selected_value,
+        evaluation_path=evaluation_path,
+        applied_policy=applied_policy,
+        identity_decision=identity_decision,
+        fallback_reason=fallback_reason,
+        ownership_boundary=ownership_boundary,
+        metadata=outcome_metadata,
+    )
+
+
+def _evaluate_learning_policy(
+    request: LearningPolicyEvaluationRequest,
+) -> LearningPolicyEvaluationOutcome:
+    """Evaluate governed learning eligibility using EC-B-03 fail-closed policy rules."""
+    normalized_request = (
+        request
+        if isinstance(request, LearningPolicyEvaluationRequest)
+        else LearningPolicyEvaluationRequest.from_dict(dict(request))
+    )
+    identity_state = normalized_request.identity_state
+    ownership_scope = normalized_request.ownership_scope
+    confidence_band = normalized_request.confidence_band
+    identity_sensitive_learning = bool(normalized_request.identity_sensitive_learning)
+    confidence_band_value = (
+        str(confidence_band.value if hasattr(confidence_band, "value") else confidence_band or "")
+        .strip()
+        .lower()
+        if confidence_band is not None
+        else ""
+    )
+    policy_reason = str(normalized_request.policy_reason or "").strip().lower() or _LEARNING_POLICY_REASON_ALLOW
+    storage_target = _LEARNING_SCOPE_STORAGE_TARGET.get(ownership_scope, "unsupported")
+
+    denial_reason: str | None = None
+    if not normalized_request.learning_policy_enabled:
+        denial_reason = "learning_policy_disabled"
+    elif identity_sensitive_learning and identity_state in _LEARNING_DENIAL_IDENTITY_REASONS:
+        denial_reason = _LEARNING_DENIAL_IDENTITY_REASONS[identity_state]
+    elif identity_sensitive_learning and confidence_band_value == "low":
+        denial_reason = "low_confidence_identity_blocked"
+    elif ownership_scope is LearningOwnershipScope.PERSON and not normalized_request.personalization_policy_allowed:
+        denial_reason = "identity_policy_disallowed"
+    elif not normalized_request.ownership_supported:
+        denial_reason = "unsupported_ownership_scope"
+    elif not normalized_request.entity_eligible:
+        denial_reason = "entity_ineligible"
+    elif not normalized_request.preference_eligible:
+        denial_reason = "preference_ineligible"
+    elif not normalized_request.safety_restrictions_clear:
+        denial_reason = "unsafe_learning_context"
+
+    learning_allowed = denial_reason is None
+    write_path = LearningWritePath.ASYNC if learning_allowed else LearningWritePath.NONE
+    evaluated_at = datetime.now(timezone.utc).isoformat()
+    reversibility_metadata = {
+        "learning_source": str(normalized_request.metadata.get("learning_source", "concierge_interaction") or "concierge_interaction"),
+        "owner_scope": ownership_scope.value,
+        "timestamp": evaluated_at,
+        "reason": denial_reason or _LEARNING_POLICY_REASON_ALLOW,
+        "policy_used": _LEARNING_POLICY_NAME,
+        "rollback_supporting_metadata": True,
+    }
+
+    policy_decision = {
+        "policy_name": _LEARNING_POLICY_NAME,
+        "learning_allowed": learning_allowed,
+        "denial_reason": denial_reason,
+        "identity_state": identity_state.value,
+        "confidence_band": confidence_band.value if confidence_band is not None else None,
+        "learning_policy_enabled": bool(normalized_request.learning_policy_enabled),
+        "ownership_supported": bool(normalized_request.ownership_supported),
+        "entity_eligible": bool(normalized_request.entity_eligible),
+        "preference_eligible": bool(normalized_request.preference_eligible),
+        "safety_restrictions_clear": bool(normalized_request.safety_restrictions_clear),
+        "identity_sensitive_learning": identity_sensitive_learning,
+        "personalization_policy_allowed": bool(normalized_request.personalization_policy_allowed),
+        "policy_reason": policy_reason,
+    }
+    explainability = {
+        "learning_allowed": learning_allowed,
+        "ownership_scope": ownership_scope.value,
+        "policy_result": "allowed" if learning_allowed else "denied",
+        "denial_reason": denial_reason,
+        "storage_target": storage_target,
+        "write_disposition": write_path.value,
+    }
+
+    metadata = dict(normalized_request.metadata)
+    metadata["storage_target"] = storage_target
+    metadata["write_path"] = write_path.value
+    metadata["policy_name"] = _LEARNING_POLICY_NAME
+
+    return LearningPolicyEvaluationOutcome(
+        learning_key=normalized_request.learning_key,
+        learning_allowed=learning_allowed,
+        denial_reason=denial_reason,
+        ownership_scope=ownership_scope,
+        write_path=write_path,
+        policy_decision=policy_decision,
+        reversibility_metadata=reversibility_metadata,
+        explainability=explainability,
+        metadata=metadata,
+    )
+
+
+async def _async_commit_learning_write(
+    hass: HomeAssistant,
+    write_request: LearningWriteRequest,
+) -> dict[str, Any]:
+    """Persist one governed learning write event as an auditable activity record."""
+    normalized_request = (
+        write_request
+        if isinstance(write_request, LearningWriteRequest)
+        else LearningWriteRequest.from_dict(dict(write_request))
+    )
+    storage = ConciergeStorage(hass)
+    activity_id = f"learn_{normalized_request.learning_event_id}"
+    started_at = datetime.now(timezone.utc).isoformat()
+    external_refs = [
+        {
+            "ref_type": "learning_write",
+            "learning_event_id": normalized_request.learning_event_id,
+            "learning_key": normalized_request.learning_key,
+            "ownership_scope": normalized_request.ownership_scope.value,
+            "owner_ref": normalized_request.owner_ref,
+            "policy_used": normalized_request.policy_used,
+        },
+        {
+            "ref_type": "learning_reversibility",
+            **dict(normalized_request.reversibility_metadata),
+        },
+        {
+            "ref_type": "learning_explainability",
+            **dict(normalized_request.explainability),
+        },
+    ]
+
+    await storage.async_record_activity_event(
+        ActivityEvent(
+            activity_id=activity_id,
+            correlation_id=normalized_request.learning_event_id,
+            started_at=started_at,
+            channel="async_learning_write",
+            actor_class="concierge",
+            intent_class="experience_continuity_learning_write",
+            request_summary=_sanitize_request_summary(
+                "concierge",
+                f"learning_key={normalized_request.learning_key};scope={normalized_request.ownership_scope.value};owner={normalized_request.owner_ref}",
+            ),
+            external_refs=external_refs,
+        )
+    )
+
+    try:
+        await storage.async_close_activity_event(
+            activity_id=activity_id,
+            ended_at=datetime.now(timezone.utc).isoformat(),
+            outcome="success",
+            outcome_reason="",
+            actions_taken=["learning_write_committed"],
+            policy_gates=["ec_b_03_learning_governance"],
+        )
+        return {
+            "success": True,
+            "activity_id": activity_id,
+            "learning_event_id": normalized_request.learning_event_id,
+            "write_path": LearningWritePath.ASYNC.value,
+        }
+    except Exception as err:
+        await storage.async_append_activity_external_refs(
+            activity_id=activity_id,
+            external_refs=[
+                {
+                    "ref_type": "learning_write_error",
+                    "error": _safe_outcome_reason(err),
+                }
+            ],
+        )
+        await storage.async_close_activity_event(
+            activity_id=activity_id,
+            ended_at=datetime.now(timezone.utc).isoformat(),
+            outcome="error",
+            outcome_reason=_safe_outcome_reason(err),
+            actions_taken=["learning_write_failed"],
+            policy_gates=["ec_b_03_learning_governance"],
+        )
+        raise
+
+
+def _enqueue_learning_write(
+    hass: HomeAssistant,
+    write_request: LearningWriteRequest,
+    *,
+    commit_runner: Callable[[HomeAssistant, LearningWriteRequest], Awaitable[dict[str, Any]]] | None = None,
+) -> dict[str, Any]:
+    """Queue one governed learning write without blocking interaction flow."""
+    normalized_request = (
+        write_request
+        if isinstance(write_request, LearningWriteRequest)
+        else LearningWriteRequest.from_dict(dict(write_request))
+    )
+    runner = commit_runner or _async_commit_learning_write
+    task = hass.async_create_task(runner(hass, normalized_request))
+
+    def _on_done(done_task) -> None:
+        try:
+            _ = done_task.result()
+        except Exception as err:  # pragma: no cover - log-side fallback
+            _LOGGER.warning(
+                "Governed learning write failed asynchronously: %s",
+                _safe_outcome_reason(err),
+            )
+
+    task.add_done_callback(_on_done)
+    return {
+        "learning_event_id": normalized_request.learning_event_id,
+        "write_path": LearningWritePath.ASYNC.value,
+        "write_enqueued": True,
+        "queue_ref": f"learning_queue:{normalized_request.learning_event_id}",
+    }
+
+
+def _resolve_usual_lighting_level(
+    *,
+    state: Any,
+    area_id: str,
+    entity_id: str,
+) -> tuple[int | None, str | None, dict[str, Any] | None]:
+    """Resolve one stored per-entity usual lighting level when available."""
+    state_id = _usual_lighting_state_id(area_id=area_id, entity_id=entity_id)
+    usual_state = None
+    if state is not None and hasattr(state, "usual_states"):
+        usual_state = state.usual_states.get(state_id)
+    if usual_state is None:
+        return None, "learned_value_missing", None
+
+    values = dict(getattr(usual_state, "values", {}) or {})
+    level = _coerce_brightness_pct(values.get("brightness_pct"))
+    if level is None:
+        return None, "learned_value_unavailable", usual_state.as_dict()
+    return level, None, usual_state.as_dict()
+
+
+async def _async_execute_learned_usual_lighting(
+    hass: HomeAssistant,
+    *,
+    storage: ConciergeStorage,
+    state,
+    room,
+    area_id: str,
+    command_kind: str,
+) -> dict[str, Any]:
+    """Execute EC-C-01 room-aware learned usual lighting using configured membership only."""
+    capability_mapping = _resolve_lighting_capability_mapping(room, command_kind)
+    configured_membership = list(capability_mapping.get("configured_membership", []))
+    validation_results: list[dict[str, Any]] = []
+    member_entity_ids: list[str] = []
+
+    if capability_mapping.get("ok", False):
+        member_entity_ids, validation_results = _validate_configured_lighting_entities(
+            hass,
+            configured_membership,
+        )
+    else:
+        validation_results = []
+
+    if not capability_mapping.get("ok", False) or not member_entity_ids:
+        failure_reason = str(capability_mapping.get("failure_reason") or "").strip() or "configured_device_invalid"
+        if capability_mapping.get("ok", False) and not member_entity_ids:
+            validation_reasons = {
+                str(item.get("reason") or "").strip()
+                for item in validation_results
+                if str(item.get("reason") or "").strip()
+            }
+            if len(validation_reasons) > 1:
+                failure_reason = "no_eligible_lighting_targets"
+            elif any(item.get("reason") == "unsupported_device_capability" for item in validation_results):
+                failure_reason = "unsupported_device_capability"
+            elif any(item.get("reason") == "configured_device_unavailable" for item in validation_results):
+                failure_reason = "configured_device_unavailable"
+            elif any(item.get("reason") == "configured_entity_missing" for item in validation_results):
+                failure_reason = "configured_entity_missing"
+            elif any(item.get("reason") == "configured_entity_invalid" for item in validation_results):
+                failure_reason = "configured_entity_invalid"
+            else:
+                failure_reason = "no_eligible_lighting_targets"
+
+        failure_condition, deterministic_default, decision_reason = _resolve_lighting_fallback_decision(
+            failure_reason=failure_reason,
+            validation_results=validation_results,
+        )
+
+        return {
+            "handled": True,
+            "executed": False,
+            "command_kind": command_kind,
+            "resolved_target": f"usual_lighting:{command_kind}",
+            "failure_reason": failure_reason,
+            "failure_condition": failure_condition,
+            "fallback_used": True,
+            "fallback_path": "degraded_safe_failure",
+            "fallback_source": _USUAL_LIGHTING_FALLBACK_POLICY_SOURCE,
+            "deterministic_default": deterministic_default,
+            "decision_reason": decision_reason,
+            "room_source": capability_mapping.get("room_source", "room_configuration"),
+            "capability_source": capability_mapping.get(
+                "capability_source",
+                _USUAL_LIGHTING_VALIDATION_SOURCE,
+            ),
+            "membership_source": _USUAL_LIGHTING_MEMBERSHIP_SOURCE,
+            "room_membership": configured_membership,
+            "targeted_entities": [],
+            "validation_results": validation_results,
+            "learning_decisions": [],
+            "entity_outcomes": [],
+            "activity_external_refs": [
+                {
+                    "ref_type": "learned_usual_lighting_command",
+                    "policy_name": _USUAL_LIGHTING_POLICY_NAME,
+                    "command_kind": command_kind,
+                    "resolved_area_id": area_id,
+                    "room_source": capability_mapping.get("room_source", "room_configuration"),
+                    "capability_source": capability_mapping.get(
+                        "capability_source",
+                        _USUAL_LIGHTING_VALIDATION_SOURCE,
+                    ),
+                    "membership_source": _USUAL_LIGHTING_MEMBERSHIP_SOURCE,
+                    "room_membership": configured_membership,
+                    "targeted_entities": [],
+                    "entity_validation": "failed",
+                    "validation_results": validation_results,
+                    "failure_reason": failure_reason,
+                    "failure_condition": failure_condition,
+                    "fallback_used": True,
+                    "fallback_path": "degraded_safe_failure",
+                    "fallback_source": _USUAL_LIGHTING_FALLBACK_POLICY_SOURCE,
+                    "deterministic_default": deterministic_default,
+                    "decision_reason": decision_reason,
+                }
+            ],
+        }
+
+    stability_seconds = _lighting_learning_stability_seconds(state)
+    learning_policy_enabled = _lighting_learning_policy_enabled(state)
+    learning_decisions: list[dict[str, Any]] = []
+    learning_by_entity: dict[str, dict[str, Any]] = {}
+
+    for entity_id in member_entity_ids:
+        entity_state = hass.states.get(entity_id)
+        brightness_pct = _brightness_pct_from_hass_state(entity_state)
+        stability = _evaluate_entity_stability_for_usual_learning(
+            entity_state,
+            stability_seconds=stability_seconds,
+        )
+        stability_ok = bool(stability.get("stable", False))
+
+        policy_outcome = _evaluate_learning_policy(
+            LearningPolicyEvaluationRequest(
+                learning_key=f"usual_lighting_brightness:{entity_id}",
+                ownership_scope=LearningOwnershipScope.ROOM,
+                identity_state=PreferenceIdentityState.UNAVAILABLE,
+                confidence_band="unknown",
+                learning_policy_enabled=learning_policy_enabled,
+                ownership_supported=True,
+                entity_eligible=brightness_pct is not None,
+                preference_eligible=True,
+                safety_restrictions_clear=stability_ok,
+                identity_sensitive_learning=False,
+                personalization_policy_allowed=True,
+                policy_reason="policy_allows",
+                metadata={
+                    "learning_source": "lighting_stability_capture",
+                    "area_id": area_id,
+                    "entity_id": entity_id,
+                    "membership_source": _USUAL_LIGHTING_MEMBERSHIP_SOURCE,
+                    "command_kind": command_kind,
+                },
+            )
+        )
+
+        state_id = _usual_lighting_state_id(area_id=area_id, entity_id=entity_id)
+        existing_level, _, _ = _resolve_usual_lighting_level(
+            state=state,
+            area_id=area_id,
+            entity_id=entity_id,
+        )
+
+        learning_status = "denied"
+        enqueue_info: dict[str, Any] | None = None
+        if policy_outcome.learning_allowed and brightness_pct is not None and stability_ok:
+            learning_event_id = f"usual_light_{uuid4().hex}"
+            usual_state = UsualState(
+                state_id=state_id,
+                scope=ContinuityScope.ENTITY,
+                scope_ref=entity_id,
+                basis=UsualStateBasis.LEARNED,
+                updated_at=datetime.now(timezone.utc).isoformat(),
+                values={
+                    "brightness_pct": brightness_pct,
+                    "area_id": area_id,
+                },
+                event_id=learning_event_id,
+                metadata={
+                    "policy_name": _USUAL_LIGHTING_POLICY_NAME,
+                    "policy_decision": dict(policy_outcome.policy_decision),
+                    "membership_source": _USUAL_LIGHTING_MEMBERSHIP_SOURCE,
+                    "stability": dict(stability),
+                },
+            )
+            await storage.async_upsert_usual_state(usual_state)
+            state.usual_states[state_id] = usual_state
+            learning_status = "learned"
+
+            enqueue_info = _enqueue_learning_write(
+                hass,
+                LearningWriteRequest(
+                    learning_event_id=learning_event_id,
+                    learning_key=f"usual_lighting_brightness:{entity_id}",
+                    ownership_scope=LearningOwnershipScope.ROOM,
+                    owner_ref=area_id,
+                    learned_value={
+                        "entity_id": entity_id,
+                        "brightness_pct": brightness_pct,
+                    },
+                    reason_code="stable_light_level_capture",
+                    policy_used=_USUAL_LIGHTING_POLICY_NAME,
+                    reversibility_metadata={
+                        "owner_scope": "room",
+                        "area_id": area_id,
+                        "entity_id": entity_id,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "rollback_supporting_metadata": True,
+                    },
+                    explainability={
+                        "membership_source": _USUAL_LIGHTING_MEMBERSHIP_SOURCE,
+                        "stability": dict(stability),
+                        "policy_decision": dict(policy_outcome.policy_decision),
+                    },
+                    metadata={
+                        "command_kind": command_kind,
+                    },
+                ),
+            )
+        elif existing_level is not None:
+            learning_status = "denied_previous_preserved"
+
+        decision = {
+            "entity_id": entity_id,
+            "learning_status": learning_status,
+            "denial_reason": policy_outcome.denial_reason,
+            "policy_decision": dict(policy_outcome.policy_decision),
+            "stability": dict(stability),
+            "captured_brightness_pct": brightness_pct,
+            "previous_learned_preserved": existing_level is not None and learning_status != "learned",
+            "membership_source": _USUAL_LIGHTING_MEMBERSHIP_SOURCE,
+            "learning_write": enqueue_info,
+        }
+        learning_decisions.append(decision)
+        learning_by_entity[entity_id] = decision
+
+    entity_outcomes: list[dict[str, Any]] = []
+    for entity_id in member_entity_ids:
+        learned_level, learned_reason, learned_state = _resolve_usual_lighting_level(
+            state=state,
+            area_id=area_id,
+            entity_id=entity_id,
+        )
+        learning_decision = learning_by_entity.get(entity_id, {})
+
+        applied_level = learned_level
+        fallback_used = False
+        fallback_reason = None
+        fallback_source = None
+
+        if applied_level is None:
+            fallback_used = True
+            denial_reason = str(learning_decision.get("denial_reason") or "").strip()
+            if learned_reason == "learned_value_unavailable":
+                fallback_reason = "learned_value_unavailable"
+            elif learned_reason == "learned_value_missing":
+                if denial_reason in {
+                    "learning_policy_disabled",
+                    "identity_policy_disallowed",
+                    "unsupported_ownership_scope",
+                }:
+                    fallback_reason = "learned_value_denied"
+                else:
+                    fallback_reason = "learned_value_missing"
+            elif denial_reason:
+                fallback_reason = "learned_value_denied"
+            else:
+                fallback_reason = learned_reason or "learned_value_missing"
+            current_level = _brightness_pct_from_hass_state(hass.states.get(entity_id))
+            if current_level is not None:
+                applied_level = current_level
+                fallback_source = "current_state_brightness"
+            else:
+                applied_level = _USUAL_LIGHTING_DEFAULT_BRIGHTNESS_PCT
+                fallback_source = "safe_default_brightness"
+
+        deterministic_default = fallback_source if fallback_used else "none"
+        decision_reason = fallback_reason if fallback_used else "learned_value_applied"
+
+        await hass.services.async_call(
+            "light",
+            "turn_on",
+            {
+                "entity_id": entity_id,
+                "brightness_pct": applied_level,
+            },
+            blocking=True,
+        )
+
+        entity_outcomes.append(
+            {
+                "entity_id": entity_id,
+                "applied_brightness_pct": applied_level,
+                "used_learned_level": not fallback_used,
+                "learned_level": learned_level,
+                "learned_source": "usual_state" if learned_level is not None else None,
+                "fallback_used": fallback_used,
+                "fallback_path": "entity_fallback_default" if fallback_used else "none",
+                "fallback_reason": fallback_reason,
+                "fallback_source": fallback_source,
+                "deterministic_default": deterministic_default,
+                "decision_reason": decision_reason,
+                "learned_state": learned_state,
+                "learning_decision": learning_decision,
+                "membership_source": _USUAL_LIGHTING_MEMBERSHIP_SOURCE,
+            }
+        )
+
+    fallback_used = any(bool(item.get("fallback_used", False)) for item in entity_outcomes)
+    fallback_path = "entity_fallback_default" if fallback_used else "none"
+    deterministic_default = "per_entity_fallback" if fallback_used else "none"
+    decision_reason = "learned_value_fallback_applied" if fallback_used else "learned_values_applied"
+
+    return {
+        "handled": True,
+        "executed": True,
+        "command_kind": command_kind,
+        "resolved_target": f"usual_lighting:{command_kind}",
+        "failure_reason": None,
+        "failure_condition": None,
+        "fallback_used": fallback_used,
+        "fallback_path": fallback_path,
+        "fallback_source": _USUAL_LIGHTING_FALLBACK_POLICY_SOURCE,
+        "deterministic_default": deterministic_default,
+        "decision_reason": decision_reason,
+        "room_source": capability_mapping.get("room_source", "room_configuration"),
+        "capability_source": capability_mapping.get(
+            "capability_source",
+            _USUAL_LIGHTING_VALIDATION_SOURCE,
+        ),
+        "membership_source": _USUAL_LIGHTING_MEMBERSHIP_SOURCE,
+        "room_membership": configured_membership,
+        "targeted_entities": list(member_entity_ids),
+        "validation_results": validation_results,
+        "learning_decisions": learning_decisions,
+        "entity_outcomes": entity_outcomes,
+        "activity_external_refs": [
+            {
+                "ref_type": "learned_usual_lighting_command",
+                "policy_name": _USUAL_LIGHTING_POLICY_NAME,
+                "command_kind": command_kind,
+                "resolved_area_id": area_id,
+                "room_source": capability_mapping.get("room_source", "room_configuration"),
+                "capability_source": capability_mapping.get(
+                    "capability_source",
+                    _USUAL_LIGHTING_VALIDATION_SOURCE,
+                ),
+                "membership_source": _USUAL_LIGHTING_MEMBERSHIP_SOURCE,
+                "room_membership": configured_membership,
+                "targeted_entities": list(member_entity_ids),
+                "entity_validation": "success",
+                "validation_results": validation_results,
+                "entity_outcomes": entity_outcomes,
+                "fallback_used": fallback_used,
+                "fallback_path": fallback_path,
+                "fallback_source": _USUAL_LIGHTING_FALLBACK_POLICY_SOURCE,
+                "deterministic_default": deterministic_default,
+                "decision_reason": decision_reason,
+            },
+            {
+                "ref_type": "learned_usual_lighting_learning",
+                "policy_name": _USUAL_LIGHTING_POLICY_NAME,
+                "stability_seconds": stability_seconds,
+                "learning_decisions": learning_decisions,
+            },
+        ],
+    }
 
 
 def _build_messaging_provenance(
@@ -929,6 +4852,9 @@ def _build_recipient_consent_privacy_visibility_boundary(
         decision_allowed = False
         decision_reason = "visibility_boundary_channel_restricted"
 
+    refusal_reason = None if decision_allowed else decision_reason
+    refusal_category = _classify_refusal_category(refusal_reason)
+
     boundary = {
         "recipient_consent_privacy_visibility_boundary_version": 1,
         "applicable": True,
@@ -961,6 +4887,8 @@ def _build_recipient_consent_privacy_visibility_boundary(
         "eligibility_decision": {
             "delivery_permitted": decision_allowed,
             "decision_reason": decision_reason,
+            "refusal_reason": refusal_reason,
+            "refusal_category": refusal_category,
             "recipient_eligible": recipient_eligible,
             "require_delivery_consent": require_delivery_consent,
             "delivery_consent_granted": consent_granted,
@@ -978,6 +4906,7 @@ def _build_recipient_consent_privacy_visibility_boundary(
         "explainability": {
             "eligibility_explainable": True,
             "denial_explainable": not decision_allowed,
+            "person_policy_evaluated": True,
             "recipient_authority_claimed": False,
             "consent_authority_claimed": False,
             "privacy_authority_claimed": False,
@@ -995,6 +4924,8 @@ def _build_recipient_consent_privacy_visibility_boundary(
         "boundary_path": boundary["boundary_path"],
         "delivery_permitted": decision_allowed,
         "decision_reason": decision_reason,
+        "refusal_reason": refusal_reason,
+        "refusal_category": refusal_category,
         "recipient_eligible": recipient_eligible,
         "require_delivery_consent": require_delivery_consent,
         "delivery_consent_granted": consent_granted,
@@ -2262,6 +6193,310 @@ def _select_signal_entries(state) -> list[dict[str, Any]]:
             }
         )
     return selected
+
+
+def _coerce_float(value: Any) -> float | None:
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _coerce_int(value: Any) -> int | None:
+    try:
+        if value is None:
+            return None
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _read_warning_headline_from_alerts(alerts: Any) -> str | None:
+    if not isinstance(alerts, list):
+        return None
+    for item in alerts:
+        if not isinstance(item, dict):
+            continue
+        headline = str(item.get("Headline", "") or "").strip()
+        if headline:
+            return headline
+    return None
+
+
+def _read_warning_headline_from_state(hass: HomeAssistant, warning_source: str) -> str | None:
+    warning_state = hass.states.get(warning_source)
+    if warning_state is None:
+        return None
+
+    alerts_headline = _read_warning_headline_from_alerts(warning_state.attributes.get("Alerts"))
+    if alerts_headline:
+        return alerts_headline
+
+    text_candidates = [
+        warning_state.attributes.get("headline"),
+        warning_state.attributes.get("Headline"),
+        warning_state.attributes.get("message"),
+        warning_state.state,
+    ]
+    for candidate in text_candidates:
+        text = str(candidate or "").strip()
+        if not text or text.lower() in {"unknown", "unavailable", "none", "0"}:
+            continue
+        return text
+
+    return None
+
+
+def _normalize_weather_condition(value: Any) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    return text.replace("_", " ")
+
+
+def _extract_forecast_field(forecast: dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        if key in forecast:
+            return forecast[key]
+    return None
+
+
+def _extract_forecast_temperature(value: Any) -> int | None:
+    if isinstance(value, dict):
+        for key in ("value", "Value"):
+            if key in value:
+                coerced = _coerce_int(value.get(key))
+                if coerced is not None:
+                    return coerced
+    return _coerce_int(value)
+
+
+def _extract_forecast_daily_row(forecast_payload: dict[str, Any], weather_source: str) -> dict[str, Any] | None:
+    source_payload = forecast_payload.get(weather_source)
+    if not isinstance(source_payload, dict):
+        return None
+
+    rows = source_payload.get("forecast")
+    if isinstance(rows, list) and rows:
+        first = rows[0]
+        if isinstance(first, dict):
+            return first
+    return None
+
+
+def _parse_structured_forecast_row(forecast_row: dict[str, Any]) -> dict[str, Any]:
+    condition = _normalize_weather_condition(
+        _extract_forecast_field(forecast_row, "condition", "Condition", "summary", "Summary")
+    )
+    high_value = _extract_forecast_field(forecast_row, "temperature", "high", "temp_high", "high_temp")
+    low_value = _extract_forecast_field(forecast_row, "templow", "low", "temp_low", "low_temp")
+    humidity_value = _extract_forecast_field(forecast_row, "humidity", "Humidity")
+    precipitation_value = _extract_forecast_field(
+        forecast_row,
+        "precipitation_probability",
+        "precipitationProbability",
+        "precipitation",
+        "rain_probability",
+    )
+    wind_value = _extract_forecast_field(forecast_row, "wind_speed", "wind", "windSpeed")
+
+    high = _extract_forecast_temperature(high_value)
+    low = _extract_forecast_temperature(low_value)
+    humidity = _coerce_int(humidity_value)
+    precipitation_probability = _coerce_int(precipitation_value)
+    wind_speed = _coerce_float(wind_value)
+
+    wind_text = None
+    if isinstance(wind_value, str):
+        wind_text = wind_value.strip() or None
+    if wind_text is None and wind_speed is not None:
+        if wind_speed >= 15:
+            wind_text = "winds will be brisk"
+        elif wind_speed >= 8:
+            wind_text = "winds will be moderate"
+        else:
+            wind_text = "winds will be light"
+
+    parsed_fields_used = [
+        field
+        for field, present in (
+            ("condition", condition is not None),
+            ("high", high is not None),
+            ("low", low is not None),
+            ("humidity", humidity is not None),
+            ("precipitation_probability", precipitation_probability is not None),
+            ("wind", wind_text is not None),
+        )
+        if present
+    ]
+
+    return {
+        "condition": condition,
+        "high": high,
+        "low": low,
+        "humidity": humidity,
+        "precipitation_probability": precipitation_probability,
+        "wind_text": wind_text,
+        "raw": dict(forecast_row),
+        "parsed_fields_used": parsed_fields_used,
+    }
+
+
+def _build_weather_summary_speech(parsed_forecast: dict[str, Any], warning_headline: str | None) -> str:
+    condition = parsed_forecast.get("condition")
+    high = parsed_forecast.get("high")
+    low = parsed_forecast.get("low")
+    humidity = parsed_forecast.get("humidity")
+    precipitation_probability = parsed_forecast.get("precipitation_probability")
+    wind_text = parsed_forecast.get("wind_text")
+
+    parts: list[str] = []
+    if condition and high is not None and low is not None:
+        parts.append(f"Today will be {condition} with a high near {high} and a low around {low}.")
+    elif condition:
+        parts.append(f"Today will be {condition}.")
+    elif high is not None and low is not None:
+        parts.append(f"Today has a high near {high} and a low around {low}.")
+
+    if humidity is not None:
+        parts.append(f"Humidity will be around {humidity} percent.")
+
+    if precipitation_probability is not None:
+        if precipitation_probability >= 60:
+            parts.append("Rain is likely today.")
+        elif precipitation_probability >= 30:
+            parts.append(f"There is a {precipitation_probability} percent chance of precipitation.")
+
+    if wind_text:
+        if wind_text.endswith("."):
+            parts.append(wind_text)
+        else:
+            parts.append(f"{wind_text.capitalize()}.")
+
+    if warning_headline:
+        parts.append(f"There is also a {warning_headline}.")
+
+    return " ".join(parts).strip()
+
+
+async def _async_fetch_structured_weather_forecast(
+    hass: HomeAssistant,
+    *,
+    weather_source: str,
+) -> tuple[bool, dict[str, Any] | None, str | None]:
+    try:
+        response = await hass.services.async_call(
+            "weather",
+            "get_forecasts",
+            {"type": "daily"},
+            target={"entity_id": weather_source},
+            blocking=True,
+            return_response=True,
+        )
+    except Exception as err:
+        return False, None, f"forecast_service_error:{str(err).strip() or 'unknown'}"
+
+    if not isinstance(response, dict):
+        return False, None, "forecast_response_unavailable"
+
+    return True, response, None
+
+
+async def _build_room_weather_response(
+    hass: HomeAssistant,
+    *,
+    state,
+    assembled_context: dict[str, Any],
+    room_authority_traceability: dict[str, Any],
+) -> dict[str, Any]:
+    context_area_id = assembled_context.get("context_area_id")
+    room = state.rooms.get(context_area_id) if context_area_id else None
+
+    configured_weather_sources = list(getattr(room, "weather_source_entity_ids", []) or []) if room is not None else []
+    configured_news_sources = list(getattr(room, "news_source_entity_ids", []) or []) if room is not None else []
+    warning_source = "sensor.nws_alerts_alerts"
+
+    weather_source = configured_weather_sources[0] if configured_weather_sources else None
+    weather_source_available = weather_source is not None
+
+    warning_headline = _read_warning_headline_from_state(hass, warning_source)
+    warning_available = bool(warning_headline)
+
+    forecast_service_available = bool(
+        weather_source and hass.services.has_service("weather", "get_forecasts")
+    )
+    forecast_data_available = False
+    parsed_forecast: dict[str, Any] | None = None
+    forecast_provider = weather_source
+    fallback_reason: str | None = None
+
+    raw_provider_text_used = False
+    if weather_source and forecast_service_available:
+        ok, payload, error_reason = await _async_fetch_structured_weather_forecast(
+            hass,
+            weather_source=weather_source,
+        )
+        if ok and payload is not None:
+            forecast_row = _extract_forecast_daily_row(payload, weather_source)
+            if forecast_row is not None:
+                parsed_forecast = _parse_structured_forecast_row(forecast_row)
+                forecast_data_available = bool(parsed_forecast.get("parsed_fields_used"))
+            else:
+                fallback_reason = "forecast_row_missing"
+        else:
+            fallback_reason = error_reason or "forecast_unavailable"
+    elif weather_source and not forecast_service_available:
+        fallback_reason = "forecast_service_unavailable"
+    else:
+        fallback_reason = "configured_weather_source_missing"
+
+    weather_response_strategy = "forecast_warning_combined"
+    generated_speech = ""
+
+    if forecast_data_available and parsed_forecast is not None:
+        generated_speech = _build_weather_summary_speech(parsed_forecast, warning_headline)
+        weather_response_strategy = "forecast_structured_with_warning" if warning_available else "forecast_structured_only"
+    elif warning_available:
+        generated_speech = f"I cannot reach the configured forecast right now. There is also a {warning_headline}."
+        weather_response_strategy = "warning_only_fallback"
+        if fallback_reason is None:
+            fallback_reason = "forecast_unavailable_warning_available"
+    else:
+        if weather_source_available:
+            generated_speech = "I cannot reach the configured forecast right now, but I will keep trying from your room weather source."
+            weather_response_strategy = "graceful_forecast_fallback"
+            if fallback_reason is None:
+                fallback_reason = "forecast_unavailable"
+        else:
+            generated_speech = "I do not have a configured weather source for this room yet."
+            weather_response_strategy = "configured_source_missing_fallback"
+            if fallback_reason is None:
+                fallback_reason = "configured_weather_source_missing"
+
+    # Keep warning delivery calm and bounded.
+    if warning_headline and "warning" in warning_headline.lower():
+        warning_headline = re.sub(r"\s+", " ", warning_headline).strip()
+
+    return {
+        "weather_source": weather_source,
+        "configured_weather_sources": configured_weather_sources,
+        "configured_news_sources": configured_news_sources,
+        "forecast_provider": forecast_provider,
+        "forecast_data_available": forecast_data_available,
+        "warning_source": warning_source,
+        "warning_available": warning_available,
+        "warning_headline": warning_headline,
+        "weather_response_strategy": weather_response_strategy,
+        "fallback_reason": fallback_reason,
+        "parsed_forecast": parsed_forecast,
+        "generated_speech": generated_speech,
+        "raw_provider_text_used": raw_provider_text_used,
+        "forecast_service_available": forecast_service_available,
+        "weather_source_available": weather_source_available,
+        "room_authority_source": room_authority_traceability.get("room_authority_source", "room_configuration"),
+    }
 
 
 def _context_requires_voice_identity_runtime_invocation(raw_context: Any) -> bool:
@@ -4074,6 +8309,74 @@ def _assemble_foundation_context(
         "summary": " | ".join(summary_parts),
         "context_source_count": len(contexts),
         "signal_count": len(signals),
+    }
+
+
+def _build_room_authority_traceability(
+    state,
+    *,
+    requested_area_id: str | None,
+    assembled_context: dict[str, Any],
+    room_vocabulary_resolution: dict[str, Any] | None = None,
+    device_entity_vocabulary_resolution: dict[str, Any] | None = None,
+    asset_vocabulary_resolution: dict[str, Any] | None = None,
+    runtime_person_context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return room configuration authority traceability for bounded runtime answers."""
+    context_area_id = assembled_context.get("context_area_id") or requested_area_id
+    room = state.rooms.get(context_area_id) if context_area_id else None
+    composite_id = assembled_context.get("resolved_composite_id")
+    composite = state.composites.get(composite_id) if composite_id else None
+
+    room_configuration_loaded = room is not None
+    merged_room_configuration_loaded = composite is not None
+
+    room_configuration_source = "room_configuration" if room_configuration_loaded else "room_configuration_unavailable"
+    room_vocabulary_source = "room_configuration" if room_configuration_loaded or room_vocabulary_resolution is not None else "room_configuration_unavailable"
+    information_source_origin = "room_configuration" if room_configuration_loaded else "room_configuration_unavailable"
+    environment_source_origin = "room_configuration" if room_configuration_loaded else "room_configuration_unavailable"
+    asset_authority_source = "room_configuration" if room_configuration_loaded and bool(getattr(room, "asset_groups", [])) else "room_configuration_unavailable"
+    merged_room_authority_source = "room_configuration" if merged_room_configuration_loaded else None
+    person_authority_source = "person_configuration"
+
+    return {
+        "room_configuration_loaded": room_configuration_loaded,
+        "room_authority_source": room_configuration_source,
+        "room_vocabulary_source": room_vocabulary_source,
+        "vocabulary_source": room_vocabulary_source,
+        "information_source_origin": information_source_origin,
+        "environment_source_origin": environment_source_origin,
+        "asset_authority_source": asset_authority_source,
+        "merged_room_authority_source": merged_room_authority_source,
+        "person_authority_source": person_authority_source,
+        "room_configuration_area_id": room.area_id if room is not None else context_area_id,
+        "room_configuration_name": room.area_id if room is not None else context_area_id,
+        "room_configuration_primary_area": composite.primary_area if composite is not None else None,
+        "room_configuration_composite_id": composite.composite_id if composite is not None else None,
+        "room_configuration_media_player_entity_ids": list(room.media_player_entity_ids) if room is not None else [],
+        "room_configuration_voice_device_entity_ids": list(room.voice_device_entity_ids) if room is not None else [],
+        "room_configuration_speaker_entity_ids": list(room.speaker_entity_ids) if room is not None else [],
+        "room_configuration_environment_information_outputs": list(room.environment_information_outputs) if room is not None else [],
+        "room_configuration_weather_source_entity_ids": list(room.weather_source_entity_ids) if room is not None else [],
+        "room_configuration_news_source_entity_ids": list(room.news_source_entity_ids) if room is not None else [],
+        "room_configuration_device_group_count": len(room.device_groups) if room is not None else 0,
+        "room_configuration_asset_group_count": len(room.asset_groups) if room is not None else 0,
+        "room_configuration_capability_source": "room_configuration",
+        "room_runtime_context_source": "room_configuration",
+        "runtime_person_context_source": (
+            str(runtime_person_context.get("person_context_state", "person_configuration_unavailable"))
+            if runtime_person_context is not None
+            else "person_configuration_unavailable"
+        ),
+        "room_discovery_reliance": "configuration_authored",
+        "runtime_discovery_reliance": "validation_only",
+        "device_entity_vocabulary_source": (
+            "room_configuration" if device_entity_vocabulary_resolution is not None else "device_vocabulary_unavailable"
+        ),
+        "asset_vocabulary_source": (
+            "asset_intelligence" if asset_vocabulary_resolution is not None else "asset_vocabulary_unavailable"
+        ),
+        "merged_room_authority_loaded": merged_room_configuration_loaded,
     }
 
     
@@ -6446,7 +10749,7 @@ def _build_person_aware_productivity_routing(
 
     inactive_reason = reason_code or active_person_state or "active_person_unavailable"
     if not active_person_available or not resolved_person_id:
-        return {
+        return _attach_refusal_explainability({
             "applicable": True,
             "boundary_path": "governed_person_aware_productivity_routing",
             "consumption_only": True,
@@ -6491,10 +10794,18 @@ def _build_person_aware_productivity_routing(
                 "infers_hidden_intent": False,
                 "derives_identity_authority": False,
             },
-        }
+        },
+            refusal_reason_key="reason_code",
+            capability_requested="person_aware_productivity_routing",
+            capability_available=False,
+            capability_configured=False,
+            room_authority_source="person_configuration",
+            merged_room_authority_source=None,
+            person_policy_evaluated=True,
+        )
 
     if runtime_person_context_state == "person_context_unresolved":
-        return {
+        return _attach_refusal_explainability({
             "applicable": True,
             "boundary_path": "governed_person_aware_productivity_routing",
             "consumption_only": True,
@@ -6519,10 +10830,18 @@ def _build_person_aware_productivity_routing(
                 "infers_hidden_intent": False,
                 "derives_identity_authority": False,
             },
-        }
+        },
+            refusal_reason_key="reason_code",
+            capability_requested="person_aware_productivity_routing",
+            capability_available=False,
+            capability_configured=False,
+            room_authority_source="person_configuration",
+            merged_room_authority_source=None,
+            person_policy_evaluated=True,
+        )
 
     if runtime_person_context_state == "person_context_partial":
-        return {
+        return _attach_refusal_explainability({
             "applicable": True,
             "boundary_path": "governed_person_aware_productivity_routing",
             "consumption_only": True,
@@ -6547,7 +10866,15 @@ def _build_person_aware_productivity_routing(
                 "infers_hidden_intent": False,
                 "derives_identity_authority": False,
             },
-        }
+        },
+            refusal_reason_key="reason_code",
+            capability_requested="person_aware_productivity_routing",
+            capability_available=False,
+            capability_configured=True,
+            room_authority_source="person_configuration",
+            merged_room_authority_source=None,
+            person_policy_evaluated=True,
+        )
 
     productivity_context = dict(runtime_person_context.get("productivity", {}))
 
@@ -6635,7 +10962,7 @@ def _build_person_aware_productivity_routing(
     }
     enabled_any = any(bool(item.get("enabled", False)) for item in domain_routing.values())
 
-    return {
+    return _attach_refusal_explainability({
         "applicable": True,
         "boundary_path": "governed_person_aware_productivity_routing",
         "consumption_only": True,
@@ -6651,7 +10978,15 @@ def _build_person_aware_productivity_routing(
             "infers_hidden_intent": False,
             "derives_identity_authority": False,
         },
-    }
+    },
+        refusal_reason_key="reason_code",
+        capability_requested="person_aware_productivity_routing",
+        capability_available=enabled_any,
+        capability_configured=True,
+        room_authority_source="person_configuration",
+        merged_room_authority_source=None,
+        person_policy_evaluated=True,
+    )
 
 
 def _build_execute_envelope(
@@ -6703,6 +11038,15 @@ def _build_execute_envelope(
         plan_kind = "entity_turn_on"
         target_type = "entity"
 
+    room_authority_traceability = _build_room_authority_traceability(
+        state,
+        requested_area_id=requested_area_id,
+        assembled_context=assembled_context,
+        room_vocabulary_resolution=room_vocabulary_resolution,
+        device_entity_vocabulary_resolution=device_entity_vocabulary_resolution,
+        asset_vocabulary_resolution=asset_vocabulary_resolution,
+    )
+
     capability_discovery = _build_capability_discovery(
         capabilities=capabilities,
         route_scope=route_scope,
@@ -6711,6 +11055,7 @@ def _build_execute_envelope(
         room_vocabulary_resolution=room_vocabulary_resolution,
         device_entity_vocabulary_resolution=device_entity_vocabulary_resolution,
         asset_vocabulary_resolution=asset_vocabulary_resolution,
+        room_authority_traceability=room_authority_traceability,
     )
     experience_governance_boundary = _build_experience_governance_boundary(
         route_scope=route_scope,
@@ -6908,6 +11253,7 @@ def _build_execute_envelope(
             asset_vocabulary_resolution=asset_vocabulary_resolution,
         ),
         "capability_discovery": capability_discovery,
+        "room_authority_traceability": room_authority_traceability,
         "continuity_governance_boundary": continuity_governance_boundary,
         "person_room_affinity_boundary": person_room_affinity_boundary,
         "privacy_household_memory_boundary": privacy_household_memory_boundary,
@@ -7363,6 +11709,7 @@ def _build_capability_discovery(
     room_vocabulary_resolution: dict[str, Any] | None,
     device_entity_vocabulary_resolution: dict[str, Any] | None,
     asset_vocabulary_resolution: dict[str, Any] | None,
+    room_authority_traceability: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return #317-governed capability discovery assembly metadata."""
     discovered = _discoverable_capability_entries(capabilities)
@@ -7397,6 +11744,7 @@ def _build_capability_discovery(
             "capability_authority_origin": "htbw_governed_contracts_and_models",
             "vocabulary_authority_origin": "vocabulary_registry_external",
             "asset_intelligence_authority_origin": "asset_intelligence",
+            **(dict(room_authority_traceability or {})),
         },
         "discovered_capabilities": discovered,
         "discoverable_capability_ids": discoverable_ids,
@@ -9054,6 +13402,7 @@ def _build_execution_envelope_ref(execution_envelope: dict[str, Any]) -> dict[st
     person_aware_email = dict(person_aware_domain_routing.get("email", {}))
     person_aware_task = dict(person_aware_domain_routing.get("task", {}))
     person_aware_shopping = dict(person_aware_domain_routing.get("shopping", {}))
+    room_authority_traceability = dict(execution_envelope.get("room_authority_traceability", {}))
     selected_outcome_raw = restoration_outcome.get("selected_outcome", {})
     selected_outcome = selected_outcome_raw if isinstance(selected_outcome_raw, dict) else {}
     continuity_constraints = dict(continuity.get("orchestration_constraints", {}))
@@ -9076,6 +13425,13 @@ def _build_execution_envelope_ref(execution_envelope: dict[str, Any]) -> dict[st
         "requested_entity_id": planning.get("requested_entity_id"),
         "execution_domain": execution.get("domain"),
         "execution_service": execution.get("service"),
+        "room_configuration_loaded": bool(room_authority_traceability.get("room_configuration_loaded", False)),
+        "room_authority_source": room_authority_traceability.get("room_authority_source"),
+        "room_vocabulary_source": room_authority_traceability.get("room_vocabulary_source"),
+        "information_source_origin": room_authority_traceability.get("information_source_origin"),
+        "environment_source_origin": room_authority_traceability.get("environment_source_origin"),
+        "merged_room_authority_source": room_authority_traceability.get("merged_room_authority_source"),
+        "person_authority_source": room_authority_traceability.get("person_authority_source"),
         "capability_authority_origin": authoritative_inputs.get("capability_authority_origin"),
         "vocabulary_room_consumed": bool(vocabulary_handoff.get("room_vocabulary_consumed", False)),
         "vocabulary_device_consumed": bool(vocabulary_handoff.get("device_entity_vocabulary_consumed", False)),
@@ -10234,6 +14590,12 @@ async def _async_handle_execute(hass: HomeAssistant, call: ServiceCall) -> dict[
         requested_target=call.data["target"],
         default_resolved_target=alias_resolved_target,
     )
+    usual_lighting_command_kind = _classify_usual_lighting_command(alias_resolved_target)
+    room_audio_command_kind = _classify_room_audio_playback_start_command(alias_resolved_target)
+    room_media_continuation_request = _classify_room_media_continuation_request(alias_resolved_target)
+    room_media_follow_me_request = _classify_room_media_follow_me_request(alias_resolved_target)
+    room_media_request = _classify_room_media_playback_request(alias_resolved_target)
+    monitoring_follow_up_request = _classify_monitoring_follow_up_request(alias_resolved_target)
 
     async def _runner() -> dict[str, Any]:
         _enforce_minor_intent_policy(
@@ -10250,6 +14612,26 @@ async def _async_handle_execute(hass: HomeAssistant, call: ServiceCall) -> dict[
             domain = "script"
             service = "turn_on"
             data = {"entity_id": resolved_target}
+        elif usual_lighting_command_kind is not None and composite_id is None and area_id is not None:
+            room_membership = _resolve_usual_lighting_membership(state.rooms.get(area_id), usual_lighting_command_kind)
+            domain = "light"
+            service = "turn_on"
+            data = {
+                "entity_id": room_membership,
+                "brightness_pct": _USUAL_LIGHTING_DEFAULT_BRIGHTNESS_PCT,
+            }
+        elif room_media_request is None and room_media_follow_me_request is None and room_audio_command_kind == "music_start" and (area_id is not None or composite_id is not None):
+            domain = "media_player"
+            service = "volume_set"
+            data = {}
+        elif (room_media_request is not None or room_media_follow_me_request is not None) and (area_id is not None or composite_id is not None):
+            domain = "music_assistant"
+            service = "play_media"
+            data = {}
+        elif monitoring_follow_up_request is not None and (area_id is not None or composite_id is not None):
+            domain = "homeassistant"
+            service = "turn_on"
+            data = {}
         else:
             domain = "homeassistant"
             service = "turn_on"
@@ -10290,11 +14672,480 @@ async def _async_handle_execute(hass: HomeAssistant, call: ServiceCall) -> dict[
             execution_envelope=execution_envelope,
         )
 
-        await hass.services.async_call(domain, service, data, blocking=True)
+        lighting_result: dict[str, Any] | None = None
+        room_audio_result: dict[str, Any] | None = None
+        room_media_result: dict[str, Any] | None = None
+        monitoring_result: dict[str, Any] | None = None
+        if usual_lighting_command_kind is not None and composite_id is None and area_id is not None:
+            room = state.rooms.get(area_id)
+            lighting_result = await _async_execute_learned_usual_lighting(
+                hass,
+                storage=storage,
+                state=state,
+                room=room,
+                area_id=area_id,
+                command_kind=usual_lighting_command_kind,
+            )
+        elif room_media_request is None and room_audio_command_kind == "music_start" and (area_id is not None or composite_id is not None):
+            room_audio_result = await _async_execute_room_audio_playback_start(
+                hass,
+                storage=storage,
+                state=state,
+                area_id=area_id,
+                composite_id=composite_id,
+                channel="music",
+            )
+
+        if (room_media_continuation_request is not None or room_media_follow_me_request is not None) and (area_id is not None or composite_id is not None):
+            media_provider = _resolve_media_provider_configuration(hass)
+            output_targets = _resolve_media_request_output_targets(
+                hass,
+                state=state,
+                area_id=area_id,
+                composite_id=composite_id,
+            )
+            room_media_context = _resolve_room_media_context(
+                state,
+                area_id=area_id,
+                composite_id=composite_id,
+            )
+            follow_me_decision = _resolve_follow_me_media_decision(
+                runtime_context=runtime_context,
+                request_explicit=room_media_follow_me_request is not None,
+                area_id=area_id,
+                composite_id=composite_id,
+                room_media_context=room_media_context,
+            )
+
+            if bool(follow_me_decision.get("follow_me_allowed", False)):
+                handoff_source_room = str(follow_me_decision.get("source_room") or "").strip() or None
+                if handoff_source_room is not None:
+                    room_media_context = _resolve_room_media_context(
+                        state,
+                        area_id=handoff_source_room,
+                        composite_id=None,
+                    )
+
+            continuation_plan = _resolve_room_media_continuation_plan(
+                room_media_context=room_media_context,
+                runtime_context=runtime_context,
+            )
+
+            room_media_result = {
+                "handled": True,
+                "executed": False,
+                "resolved_target": "room_media:continue_resume_request",
+                "provider_selected": media_provider.get("provider_selected"),
+                "provider_reason": media_provider.get("provider_reason"),
+                "provider_available": bool(media_provider.get("provider_available", False)),
+                "configured_provider": media_provider.get("configured_provider"),
+                "provider_service_available": bool(media_provider.get("provider_service_available", False)),
+                "provider_integration_available": bool(media_provider.get("provider_integration_available", False)),
+                "room_authority_source": output_targets.get("room_authority_source", "room_configuration"),
+                "person_authority_source": "person_configuration_runtime_context",
+                "asset_authority_source": "asset_intelligence_unused_in_this_resolution",
+                "experience_continuity_authority_source": "experience_continuity_room_media_context",
+                "media_provider_authority_source": "music_assistant_provider_resolution",
+                "playback_scope": output_targets.get("playback_scope", "room"),
+                "memory_scope": output_targets.get("memory_scope", "room"),
+                "merged_room_participation": bool(output_targets.get("merged_room_participation", False)),
+                "participating_rooms": output_targets.get("participating_rooms", []),
+                "group_targeted_speakers": output_targets.get("group_targeted_speakers", []),
+                "room_results": output_targets.get("room_results", []),
+                "source_room_id": room_media_context.get("source_room_id"),
+                "source_room_selection_reason": room_media_context.get("source_room_selection_reason"),
+                "room_media_context": room_media_context.get("room_media_context"),
+                "follow_me_enabled": bool(follow_me_decision.get("follow_me_enabled", False)),
+                "follow_me_candidate": bool(follow_me_decision.get("follow_me_candidate", False)),
+                "follow_me_allowed": bool(follow_me_decision.get("follow_me_allowed", False)),
+                "follow_me_decision": follow_me_decision.get("follow_me_decision"),
+                "follow_me_reason": follow_me_decision.get("follow_me_reason"),
+                "identity_authority_source": follow_me_decision.get("identity_authority_source"),
+                "room_transition_source": follow_me_decision.get("room_transition_source"),
+                "cooldown_blocked": bool(follow_me_decision.get("cooldown_blocked", False)),
+                "manual_stop_blocked": bool(follow_me_decision.get("manual_stop_blocked", False)),
+                "destination_room": follow_me_decision.get("destination_room"),
+                "source_room": follow_me_decision.get("source_room"),
+                "continuation_strategy": continuation_plan.get("continuation_strategy"),
+                "continuation_strategy_reason": continuation_plan.get("strategy_reason"),
+                "continuation_query": continuation_plan.get("continuation_query"),
+                "music_assistant_request": continuation_plan.get("music_assistant_request"),
+                "preference_resolution": continuation_plan.get("preference_resolution"),
+                "personalization_applied": bool(continuation_plan.get("personalization_applied", False)),
+                "personalization_reason": continuation_plan.get("personalization_reason"),
+                "cooldown_decision": continuation_plan.get("cooldown_decision", {}),
+                "failure_reason": None,
+                "fallback_used": False,
+                "fallback_path": "none",
+                "fallback_source": None,
+                "decision_reason": continuation_plan.get("strategy_reason", "room_media_continuation"),
+                "follow_me_excluded": not bool(follow_me_decision.get("follow_me_candidate", False)),
+                "persistent_merged_room_media_memory_created": False,
+            }
+
+            if (
+                bool(follow_me_decision.get("follow_me_candidate", False))
+                and not bool(follow_me_decision.get("follow_me_allowed", False))
+            ):
+                room_media_result["failure_reason"] = follow_me_decision.get("follow_me_reason")
+                room_media_result["fallback_used"] = True
+                room_media_result["fallback_path"] = "governed_follow_me_refusal"
+                room_media_result["fallback_source"] = "experience_continuity_follow_me_policy"
+                room_media_result["decision_reason"] = follow_me_decision.get("follow_me_reason")
+            elif output_targets.get("failure_reason") is not None:
+                room_media_result["failure_reason"] = output_targets.get("failure_reason")
+                room_media_result["fallback_used"] = True
+                room_media_result["fallback_path"] = "configured_room_authority_failure"
+                room_media_result["fallback_source"] = _ROOM_AUDIO_FALLBACK_POLICY_SOURCE
+                room_media_result["decision_reason"] = "configured_room_authority_validation"
+            elif media_provider.get("configured_provider") != _PROVIDER_MUSIC_ASSISTANT:
+                room_media_result["failure_reason"] = "media_provider_disabled"
+                room_media_result["fallback_used"] = True
+                room_media_result["fallback_path"] = "governed_provider_refusal"
+                room_media_result["fallback_source"] = "experience_continuity_media_provider_precedence_policy"
+                room_media_result["decision_reason"] = "music_assistant_not_enabled"
+            elif not bool(media_provider.get("provider_available", False)):
+                room_media_result["failure_reason"] = "music_assistant_unavailable"
+                room_media_result["fallback_used"] = True
+                room_media_result["fallback_path"] = "governed_provider_refusal"
+                room_media_result["fallback_source"] = "experience_continuity_media_provider_precedence_policy"
+                room_media_result["decision_reason"] = "preferred_provider_unavailable"
+            elif continuation_plan.get("continuation_strategy") == "governed_refusal":
+                room_media_result["failure_reason"] = continuation_plan.get("strategy_reason")
+                room_media_result["fallback_used"] = True
+                room_media_result["fallback_path"] = "governed_refusal"
+                room_media_result["fallback_source"] = _ROOM_MEDIA_MANUAL_STOP_POLICY_SOURCE if continuation_plan.get("strategy_reason") == "manual_stop_cooldown_active" else _ROOM_MEDIA_CONTINUATION_POLICY_NAME
+                room_media_result["decision_reason"] = continuation_plan.get("strategy_reason")
+            else:
+                if room_audio_result is None:
+                    room_audio_result = await _async_execute_room_audio_playback_start(
+                        hass,
+                        storage=storage,
+                        state=state,
+                        area_id=area_id,
+                        composite_id=composite_id,
+                        channel="music",
+                    )
+                if room_audio_result is not None and not bool(room_audio_result.get("executed", False)):
+                    room_media_result["failure_reason"] = room_audio_result.get("failure_reason")
+                    room_media_result["fallback_used"] = True
+                    room_media_result["fallback_path"] = "configured_room_authority_failure"
+                    room_media_result["fallback_source"] = _ROOM_AUDIO_FALLBACK_POLICY_SOURCE
+                    room_media_result["decision_reason"] = "configured_room_authority_validation"
+                else:
+                    music_assistant_data = dict(continuation_plan.get("music_assistant_request") or {})
+                    if not music_assistant_data:
+                        room_media_result["failure_reason"] = "no_usable_room_media_context"
+                        room_media_result["fallback_used"] = True
+                        room_media_result["fallback_path"] = "governed_refusal"
+                        room_media_result["fallback_source"] = _ROOM_MEDIA_CONTINUATION_POLICY_NAME
+                        room_media_result["decision_reason"] = "room_media_context_missing"
+                    else:
+                        await hass.services.async_call(
+                            "music_assistant",
+                            "play_media",
+                            music_assistant_data,
+                            blocking=True,
+                            target={"entity_id": room_media_result["group_targeted_speakers"]},
+                        )
+                        source_room_id = str(room_media_result.get("source_room_id") or area_id or "").strip()
+                        captured_state = None
+                        if source_room_id:
+                            captured_state = await _async_capture_room_media_context(
+                                hass,
+                                storage=storage,
+                                state=state,
+                                area_id=area_id or source_room_id,
+                                source_room_id=source_room_id,
+                                provider_source="music_assistant",
+                                media_type=continuation_plan.get("media_type"),
+                                media_query=str(continuation_plan.get("continuation_query") or "").strip() or None,
+                                music_assistant_request=music_assistant_data,
+                                room_media_context=room_media_context,
+                            )
+                        room_media_result["executed"] = True
+                        room_media_result["music_assistant_request"] = {
+                            "target": {"entity_id": room_media_result["group_targeted_speakers"]},
+                            "data": music_assistant_data,
+                        }
+                        room_media_result["captured_room_media_context"] = captured_state
+                        room_media_result["activity_external_refs"] = [
+                            {
+                                "ref_type": "room_media_continuation_resolution",
+                                "provider_selected": room_media_result["provider_selected"],
+                                "provider_reason": room_media_result["provider_reason"],
+                                "provider_available": room_media_result["provider_available"],
+                                "room_authority_source": output_targets.get("room_authority_source", "room_configuration"),
+                                "source_room_id": room_media_result.get("source_room_id"),
+                                "source_room_selection_reason": room_media_result.get("source_room_selection_reason"),
+                                "continuation_strategy": room_media_result.get("continuation_strategy"),
+                                "continuation_query": room_media_result.get("continuation_query"),
+                                "merged_room_participation": room_media_result["merged_room_participation"],
+                                "group_targeted_speakers": room_media_result["group_targeted_speakers"],
+                                "follow_me_excluded": not bool(room_media_result.get("follow_me_candidate", False)),
+                                "follow_me_enabled": bool(room_media_result.get("follow_me_enabled", False)),
+                                "follow_me_candidate": bool(room_media_result.get("follow_me_candidate", False)),
+                                "follow_me_allowed": bool(room_media_result.get("follow_me_allowed", False)),
+                                "follow_me_decision": room_media_result.get("follow_me_decision"),
+                                "follow_me_reason": room_media_result.get("follow_me_reason"),
+                                "identity_authority_source": room_media_result.get("identity_authority_source"),
+                                "room_transition_source": room_media_result.get("room_transition_source"),
+                                "cooldown_blocked": bool(room_media_result.get("cooldown_blocked", False)),
+                                "manual_stop_blocked": bool(room_media_result.get("manual_stop_blocked", False)),
+                                "destination_room": room_media_result.get("destination_room"),
+                                "source_room": room_media_result.get("source_room"),
+                                "personalization_applied": room_media_result.get("personalization_applied", False),
+                                "cooldown_decision": room_media_result.get("cooldown_decision", {}),
+                            },
+                            {
+                                "ref_type": "room_media_context_capture",
+                                "state_id": _room_media_state_id(area_id=room_media_result.get("source_room_id") or area_id or ""),
+                                "captured": captured_state is not None,
+                                "source_room_id": room_media_result.get("source_room_id"),
+                                "policy_name": _ROOM_MEDIA_CONTEXT_POLICY_NAME,
+                            },
+                        ]
+
+            room_media_result = _attach_refusal_explainability(
+                room_media_result,
+                refusal_reason_key="failure_reason",
+                capability_requested=(
+                    "room_media_follow_me"
+                    if room_media_follow_me_request is not None
+                    else "room_media_continuation"
+                ),
+                capability_available=bool(room_media_result.get("executed", False)),
+                capability_configured=bool(room_media_result.get("group_targeted_speakers"))
+                and room_media_result.get("configured_provider") == _PROVIDER_MUSIC_ASSISTANT,
+                room_authority_source=str(
+                    room_media_result.get("room_authority_source") or "room_configuration"
+                ),
+                merged_room_authority_source=(
+                    "room_configuration"
+                    if room_media_result.get("merged_room_participation")
+                    else None
+                ),
+                person_policy_evaluated=True,
+            )
+
+        if room_media_request is not None and (area_id is not None or composite_id is not None):
+            media_provider = _resolve_media_provider_configuration(hass)
+            output_targets = _resolve_media_request_output_targets(
+                hass,
+                state=state,
+                area_id=area_id,
+                composite_id=composite_id,
+            )
+            media_query = _resolve_media_playback_query(
+                media_request=room_media_request,
+                runtime_context=runtime_context,
+            )
+
+            room_media_result = {
+                "handled": True,
+                "executed": False,
+                "resolved_target": "room_media:playback_request",
+                "provider_selected": media_provider.get("provider_selected"),
+                "provider_reason": media_provider.get("provider_reason"),
+                "provider_available": bool(media_provider.get("provider_available", False)),
+                "configured_provider": media_provider.get("configured_provider"),
+                "provider_service_available": bool(media_provider.get("provider_service_available", False)),
+                "provider_integration_available": bool(media_provider.get("provider_integration_available", False)),
+                "room_authority_source": output_targets.get("room_authority_source", "room_configuration"),
+                "person_authority_source": "person_configuration_runtime_context",
+                "asset_authority_source": "asset_intelligence_unused_in_this_resolution",
+                "experience_continuity_authority_source": "experience_continuity_preference_resolution",
+                "media_provider_authority_source": "music_assistant_provider_resolution",
+                "playback_scope": output_targets.get("playback_scope", "room"),
+                "memory_scope": output_targets.get("memory_scope", "room"),
+                "merged_room_participation": bool(output_targets.get("merged_room_participation", False)),
+                "participating_rooms": output_targets.get("participating_rooms", []),
+                "group_targeted_speakers": output_targets.get("group_targeted_speakers", []),
+                "room_results": output_targets.get("room_results", []),
+                "request_kind": media_query.get("request_kind"),
+                "media_query": media_query.get("media_query"),
+                "preference_resolution": media_query.get("preference_outcome"),
+                "preference_inputs_used": media_query.get("preference_inputs", {}),
+                "failure_reason": None,
+                "fallback_used": False,
+                "fallback_path": "none",
+                "fallback_source": None,
+                "decision_reason": "music_assistant_preferred_provider",
+                "follow_me_excluded": True,
+                "persistent_merged_room_media_memory_created": False,
+            }
+
+            if output_targets.get("failure_reason") is not None:
+                room_media_result["failure_reason"] = output_targets.get("failure_reason")
+                room_media_result["fallback_used"] = True
+                room_media_result["fallback_path"] = "configured_room_authority_failure"
+                room_media_result["fallback_source"] = _ROOM_AUDIO_FALLBACK_POLICY_SOURCE
+                room_media_result["decision_reason"] = "configured_room_authority_validation"
+            elif media_provider.get("configured_provider") != _PROVIDER_MUSIC_ASSISTANT:
+                room_media_result["failure_reason"] = "media_provider_disabled"
+                room_media_result["fallback_used"] = True
+                room_media_result["fallback_path"] = "governed_provider_refusal"
+                room_media_result["fallback_source"] = "experience_continuity_media_provider_precedence_policy"
+                room_media_result["decision_reason"] = "music_assistant_not_enabled"
+            elif not bool(media_provider.get("provider_available", False)):
+                room_media_result["failure_reason"] = "music_assistant_unavailable"
+                room_media_result["fallback_used"] = True
+                room_media_result["fallback_path"] = "governed_provider_refusal"
+                room_media_result["fallback_source"] = "experience_continuity_media_provider_precedence_policy"
+                room_media_result["decision_reason"] = "preferred_provider_unavailable"
+            else:
+                if room_audio_result is None:
+                    room_audio_result = await _async_execute_room_audio_playback_start(
+                        hass,
+                        storage=storage,
+                        state=state,
+                        area_id=area_id,
+                        composite_id=composite_id,
+                        channel="music",
+                    )
+                if room_audio_result is not None and not bool(room_audio_result.get("executed", False)):
+                    room_media_result["failure_reason"] = room_audio_result.get("failure_reason")
+                    room_media_result["fallback_used"] = True
+                    room_media_result["fallback_path"] = "configured_room_authority_failure"
+                    room_media_result["fallback_source"] = _ROOM_AUDIO_FALLBACK_POLICY_SOURCE
+                    room_media_result["decision_reason"] = "configured_room_authority_validation"
+                else:
+                    music_assistant_data: dict[str, Any] = {
+                        "media_id": room_media_result["media_query"],
+                        "enqueue": "replace",
+                    }
+                    request_kind = str(room_media_result["request_kind"] or "")
+                    if request_kind == "genre":
+                        music_assistant_data["radio_mode"] = True
+                    elif request_kind == "artist":
+                        music_assistant_data["media_type"] = "artist"
+                    elif request_kind == "album":
+                        music_assistant_data["media_type"] = "album"
+                    elif request_kind == "playlist":
+                        music_assistant_data["media_type"] = "playlist"
+
+                    await hass.services.async_call(
+                        "music_assistant",
+                        "play_media",
+                        music_assistant_data,
+                        blocking=True,
+                        target={"entity_id": room_media_result["group_targeted_speakers"]},
+                    )
+                    source_room_id = str(area_id or room_media_result.get("participating_rooms", [""])[0] or "").strip() or None
+                    if room_media_result.get("merged_room_participation") and room_media_result.get("participating_rooms"):
+                        source_room_id = str(
+                            (room_media_result.get("source_room_id") or room_media_result["participating_rooms"][0])
+                        ).strip() or source_room_id
+                    captured_state = None
+                    if source_room_id:
+                        captured_state = await _async_capture_room_media_context(
+                            hass,
+                            storage=storage,
+                            state=state,
+                            area_id=area_id or source_room_id,
+                            source_room_id=source_room_id,
+                            provider_source="music_assistant",
+                            media_type=room_media_result.get("request_kind"),
+                            media_query=str(room_media_result.get("media_query") or "").strip() or None,
+                            music_assistant_request=music_assistant_data,
+                            room_media_context=_resolve_room_media_context(
+                                state,
+                                area_id=area_id,
+                                composite_id=composite_id,
+                            ),
+                        )
+                    room_media_result["executed"] = True
+                    room_media_result["music_assistant_request"] = {
+                        "target": {"entity_id": room_media_result["group_targeted_speakers"]},
+                        "data": music_assistant_data,
+                    }
+                    room_media_result["captured_room_media_context"] = captured_state
+                    room_media_result["activity_external_refs"] = [
+                        {
+                            "ref_type": "media_provider_resolution",
+                            "provider_selected": room_media_result["provider_selected"],
+                            "provider_reason": room_media_result["provider_reason"],
+                            "provider_available": room_media_result["provider_available"],
+                            "room_authority_source": output_targets.get("room_authority_source", "room_configuration"),
+                            "request_kind": room_media_result["request_kind"],
+                            "merged_room_participation": room_media_result["merged_room_participation"],
+                            "group_targeted_speakers": room_media_result["group_targeted_speakers"],
+                            "follow_me_excluded": True,
+                        }
+                        ,
+                        {
+                            "ref_type": "room_media_context_capture",
+                            "state_id": _room_media_state_id(area_id=source_room_id),
+                            "captured": captured_state is not None,
+                            "source_room_id": source_room_id,
+                            "policy_name": _ROOM_MEDIA_CONTEXT_POLICY_NAME,
+                        }
+                    ]
+
+            room_media_result = _attach_refusal_explainability(
+                room_media_result,
+                refusal_reason_key="failure_reason",
+                capability_requested="room_media_playback",
+                capability_available=bool(room_media_result.get("executed", False)),
+                capability_configured=bool(room_media_result.get("group_targeted_speakers"))
+                and room_media_result.get("configured_provider") == _PROVIDER_MUSIC_ASSISTANT,
+                room_authority_source=str(
+                    room_media_result.get("room_authority_source") or "room_configuration"
+                ),
+                merged_room_authority_source=(
+                    "room_configuration"
+                    if room_media_result.get("merged_room_participation")
+                    else None
+                ),
+                person_policy_evaluated=True,
+            )
+
+        if monitoring_follow_up_request is not None and (area_id is not None or composite_id is not None):
+            monitoring_capability = str(
+                monitoring_follow_up_request.get("monitoring_capability") or ""
+            ).strip()
+            monitoring_result = _build_monitoring_follow_up_resolution(
+                hass,
+                state=state,
+                area_id=area_id,
+                composite_id=composite_id,
+                monitoring_capability=monitoring_capability,
+                room_authority_traceability=dict(execution_envelope.get("room_authority_traceability", {})),
+            )
+            monitoring_result["activity_external_refs"] = [
+                {
+                    "ref_type": "monitoring_follow_up_resolution",
+                    "monitoring_capability": monitoring_result.get("monitoring_capability"),
+                    "configured_capability_mapping": monitoring_result.get("configured_capability_mapping", {}),
+                    "resolved_monitoring_device": monitoring_result.get("resolved_monitoring_device"),
+                    "resolution_strategy": monitoring_result.get("resolution_strategy"),
+                    "resolution_priority": monitoring_result.get("resolution_priority", []),
+                    "refusal_reason": monitoring_result.get("refusal_reason"),
+                    "refusal_category": monitoring_result.get("refusal_category"),
+                    "room_authority_source": monitoring_result.get("room_authority_source"),
+                    "merged_room_authority_source": monitoring_result.get("merged_room_authority_source"),
+                    "capability_requested": monitoring_result.get("capability_requested"),
+                    "capability_available": monitoring_result.get("capability_available"),
+                    "capability_configured": monitoring_result.get("capability_configured"),
+                    "person_policy_evaluated": monitoring_result.get("person_policy_evaluated"),
+                    "runtime_discovery_reliance": monitoring_result.get("runtime_discovery_reliance"),
+                }
+            ]
+
+        if lighting_result is None and room_audio_result is None and room_media_result is None and monitoring_result is None:
+            await hass.services.async_call(domain, service, data, blocking=True)
 
         payload = {
             "target": call.data["target"],
-            "resolved_target": resolved_target,
+            "resolved_target": (
+                lighting_result.get("resolved_target", resolved_target)
+                if lighting_result
+                else (
+                    room_audio_result.get("resolved_target", resolved_target)
+                    if room_audio_result
+                    else resolved_target
+                )
+            ),
             "area_id": area_id,
             "composite_id": composite_id,
             "context": runtime_context,
@@ -10302,8 +15153,16 @@ async def _async_handle_execute(hass: HomeAssistant, call: ServiceCall) -> dict[
         }
         hass.bus.async_fire(EVENT_EXECUTION, payload)
         response: dict[str, Any] = {
-            "executed": True,
-            "resolved_target": resolved_target,
+            "executed": bool(lighting_result.get("executed", True)) if lighting_result else True,
+            "resolved_target": (
+                lighting_result.get("resolved_target", resolved_target)
+                if lighting_result
+                else (
+                    room_audio_result.get("resolved_target", resolved_target)
+                    if room_audio_result
+                    else resolved_target
+                )
+            ),
             "execution_envelope": execution_envelope,
             "activity_external_refs": [
                 _build_context_assembly_ref(assembled_context),
@@ -10320,6 +15179,178 @@ async def _async_handle_execute(hass: HomeAssistant, call: ServiceCall) -> dict[
                 },
             ],
         }
+        if lighting_result is not None:
+            response["learned_usual_lighting"] = {
+                "command_kind": lighting_result.get("command_kind"),
+                "room_source": lighting_result.get("room_source"),
+                "capability_source": lighting_result.get("capability_source"),
+                "membership_source": lighting_result.get("membership_source"),
+                "room_membership": lighting_result.get("room_membership", []),
+                "targeted_entities": lighting_result.get("targeted_entities", []),
+                "validation_results": lighting_result.get("validation_results", []),
+                "failure_reason": lighting_result.get("failure_reason"),
+                "failure_condition": lighting_result.get("failure_condition"),
+                "fallback_used": bool(lighting_result.get("fallback_used", False)),
+                "fallback_path": lighting_result.get("fallback_path", "none"),
+                "fallback_source": lighting_result.get("fallback_source"),
+                "deterministic_default": lighting_result.get("deterministic_default", "none"),
+                "decision_reason": lighting_result.get("decision_reason"),
+                "learning_decisions": lighting_result.get("learning_decisions", []),
+                "entity_outcomes": lighting_result.get("entity_outcomes", []),
+            }
+            response["activity_external_refs"].extend(
+                list(lighting_result.get("activity_external_refs", []))
+            )
+        if room_audio_result is not None:
+            response["executed"] = bool(room_audio_result.get("executed", False))
+            response["room_audio_continuity"] = {
+                "channel": room_audio_result.get("channel"),
+                "playback_scope": room_audio_result.get("playback_scope"),
+                "memory_scope": room_audio_result.get("memory_scope", "room"),
+                "merged_room_participation": bool(room_audio_result.get("merged_room_participation", False)),
+                "participating_rooms": room_audio_result.get("participating_rooms", []),
+                "group_targeted_speakers": room_audio_result.get("group_targeted_speakers", []),
+                "room_results": room_audio_result.get("room_results", []),
+                "learning_decisions": room_audio_result.get("learning_decisions", []),
+                "failure_reason": room_audio_result.get("failure_reason"),
+                "fallback_used": bool(room_audio_result.get("fallback_used", False)),
+                "fallback_path": room_audio_result.get("fallback_path", "none"),
+                "fallback_source": room_audio_result.get("fallback_source"),
+                "decision_reason": room_audio_result.get("decision_reason"),
+            }
+            response["activity_external_refs"].extend(
+                list(room_audio_result.get("activity_external_refs", []))
+            )
+        if room_media_result is not None:
+            response["executed"] = bool(room_media_result.get("executed", False))
+            response["resolved_target"] = room_media_result.get("resolved_target", response["resolved_target"])
+            response["media_provider_resolution"] = {
+                "provider_selected": room_media_result.get("provider_selected"),
+                "provider_reason": room_media_result.get("provider_reason"),
+                "provider_available": room_media_result.get("provider_available"),
+                "configured_provider": room_media_result.get("configured_provider"),
+                "provider_service_available": room_media_result.get("provider_service_available"),
+                "provider_integration_available": room_media_result.get("provider_integration_available"),
+                "room_authority_source": room_media_result.get("room_authority_source", "room_configuration"),
+                "person_authority_source": room_media_result.get("person_authority_source"),
+                "asset_authority_source": room_media_result.get("asset_authority_source"),
+                "experience_continuity_authority_source": room_media_result.get("experience_continuity_authority_source"),
+                "media_provider_authority_source": room_media_result.get("media_provider_authority_source"),
+                "request_kind": room_media_result.get("request_kind"),
+                "media_query": room_media_result.get("media_query"),
+                "playback_scope": room_media_result.get("playback_scope"),
+                "memory_scope": room_media_result.get("memory_scope"),
+                "merged_room_participation": room_media_result.get("merged_room_participation"),
+                "participating_rooms": room_media_result.get("participating_rooms", []),
+                "group_targeted_speakers": room_media_result.get("group_targeted_speakers", []),
+                "room_results": room_media_result.get("room_results", []),
+                "failure_reason": room_media_result.get("failure_reason"),
+                "refusal_reason": room_media_result.get("refusal_reason"),
+                "refusal_category": room_media_result.get("refusal_category"),
+                "fallback_used": bool(room_media_result.get("fallback_used", False)),
+                "fallback_path": room_media_result.get("fallback_path", "none"),
+                "fallback_source": room_media_result.get("fallback_source"),
+                "decision_reason": room_media_result.get("decision_reason"),
+                "capability_requested": room_media_result.get("capability_requested"),
+                "capability_available": room_media_result.get("capability_available"),
+                "capability_configured": room_media_result.get("capability_configured"),
+                "person_policy_evaluated": room_media_result.get("person_policy_evaluated"),
+                "merged_room_authority_source": room_media_result.get("merged_room_authority_source"),
+                "follow_me_excluded": bool(room_media_result.get("follow_me_excluded", True)),
+                "follow_me_enabled": bool(room_media_result.get("follow_me_enabled", False)),
+                "follow_me_candidate": bool(room_media_result.get("follow_me_candidate", False)),
+                "follow_me_allowed": bool(room_media_result.get("follow_me_allowed", False)),
+                "follow_me_decision": room_media_result.get("follow_me_decision"),
+                "follow_me_reason": room_media_result.get("follow_me_reason"),
+                "identity_authority_source": room_media_result.get("identity_authority_source"),
+                "room_transition_source": room_media_result.get("room_transition_source"),
+                "cooldown_blocked": bool(room_media_result.get("cooldown_blocked", False)),
+                "manual_stop_blocked": bool(room_media_result.get("manual_stop_blocked", False)),
+                "destination_room": room_media_result.get("destination_room"),
+                "source_room": room_media_result.get("source_room"),
+                "persistent_merged_room_media_memory_created": False,
+            }
+            if room_media_result.get("continuation_strategy") is not None:
+                response["room_media_continuity"] = {
+                    "continuation_strategy": room_media_result.get("continuation_strategy"),
+                    "continuation_strategy_reason": room_media_result.get("continuation_strategy_reason"),
+                    "source_room_id": room_media_result.get("source_room_id"),
+                    "source_room_selection_reason": room_media_result.get("source_room_selection_reason"),
+                    "room_media_context": room_media_result.get("room_media_context"),
+                    "continuation_query": room_media_result.get("continuation_query"),
+                    "music_assistant_request": room_media_result.get("music_assistant_request"),
+                    "personalization_applied": bool(room_media_result.get("personalization_applied", False)),
+                    "personalization_reason": room_media_result.get("personalization_reason"),
+                    "cooldown_decision": room_media_result.get("cooldown_decision", {}),
+                    "fallback_used": bool(room_media_result.get("fallback_used", False)),
+                    "fallback_path": room_media_result.get("fallback_path", "none"),
+                    "fallback_source": room_media_result.get("fallback_source"),
+                    "decision_reason": room_media_result.get("decision_reason"),
+                    "refusal_reason": room_media_result.get("refusal_reason"),
+                    "refusal_category": room_media_result.get("refusal_category"),
+                    "capability_requested": room_media_result.get("capability_requested"),
+                    "capability_available": room_media_result.get("capability_available"),
+                    "capability_configured": room_media_result.get("capability_configured"),
+                    "person_policy_evaluated": room_media_result.get("person_policy_evaluated"),
+                    "follow_me_excluded": bool(room_media_result.get("follow_me_excluded", True)),
+                    "follow_me_enabled": bool(room_media_result.get("follow_me_enabled", False)),
+                    "follow_me_candidate": bool(room_media_result.get("follow_me_candidate", False)),
+                    "follow_me_allowed": bool(room_media_result.get("follow_me_allowed", False)),
+                    "follow_me_decision": room_media_result.get("follow_me_decision"),
+                    "follow_me_reason": room_media_result.get("follow_me_reason"),
+                    "identity_authority_source": room_media_result.get("identity_authority_source"),
+                    "room_transition_source": room_media_result.get("room_transition_source"),
+                    "cooldown_blocked": bool(room_media_result.get("cooldown_blocked", False)),
+                    "manual_stop_blocked": bool(room_media_result.get("manual_stop_blocked", False)),
+                    "destination_room": room_media_result.get("destination_room"),
+                    "source_room": room_media_result.get("source_room"),
+                }
+                response["media_provider_resolution"]["continuation_strategy"] = room_media_result.get("continuation_strategy")
+                response["media_provider_resolution"]["continuation_strategy_reason"] = room_media_result.get("continuation_strategy_reason")
+                response["media_provider_resolution"]["source_room_id"] = room_media_result.get("source_room_id")
+                response["media_provider_resolution"]["source_room_selection_reason"] = room_media_result.get("source_room_selection_reason")
+                response["media_provider_resolution"]["continuation_query"] = room_media_result.get("continuation_query")
+                response["media_provider_resolution"]["cooldown_decision"] = room_media_result.get("cooldown_decision", {})
+                response["media_provider_resolution"]["personalization_applied"] = bool(room_media_result.get("personalization_applied", False))
+                response["media_provider_resolution"]["personalization_reason"] = room_media_result.get("personalization_reason")
+                if room_media_result.get("captured_room_media_context") is not None:
+                    response["media_provider_resolution"]["captured_room_media_context"] = room_media_result.get("captured_room_media_context")
+            response["identity_aware_media_resolution"] = {
+                "preference_resolution": room_media_result.get("preference_resolution"),
+                "preference_inputs_used": room_media_result.get("preference_inputs_used", {}),
+            }
+            if room_media_result.get("music_assistant_request") is not None:
+                response["media_provider_resolution"]["music_assistant_request"] = room_media_result.get("music_assistant_request")
+            response["activity_external_refs"].extend(
+                list(room_media_result.get("activity_external_refs", []))
+            )
+        if monitoring_result is not None:
+            response["executed"] = False
+            response["resolved_target"] = (
+                f"monitoring_follow_up:{monitoring_result.get('monitoring_capability')}"
+            )
+            response["monitoring_follow_up"] = {
+                "monitoring_capability": monitoring_result.get("monitoring_capability"),
+                "configured_capability_mapping": monitoring_result.get("configured_capability_mapping", {}),
+                "resolved_monitoring_device": monitoring_result.get("resolved_monitoring_device"),
+                "resolved_measurement": monitoring_result.get("resolved_measurement"),
+                "resolution_strategy": monitoring_result.get("resolution_strategy"),
+                "resolution_priority": monitoring_result.get("resolution_priority", []),
+                "validation_results": monitoring_result.get("validation_results", []),
+                "refusal_reason": monitoring_result.get("refusal_reason"),
+                "refusal_category": monitoring_result.get("refusal_category"),
+                "room_authority_source": monitoring_result.get("room_authority_source"),
+                "merged_room_authority_source": monitoring_result.get("merged_room_authority_source"),
+                "capability_requested": monitoring_result.get("capability_requested"),
+                "capability_available": monitoring_result.get("capability_available"),
+                "capability_configured": monitoring_result.get("capability_configured"),
+                "person_policy_evaluated": monitoring_result.get("person_policy_evaluated"),
+                "runtime_discovery_reliance": monitoring_result.get("runtime_discovery_reliance"),
+                "generated_speech": monitoring_result.get("generated_speech"),
+            }
+            response["activity_external_refs"].extend(
+                list(monitoring_result.get("activity_external_refs", []))
+            )
         if room_vocabulary_resolution is not None:
             response["room_vocabulary_resolution"] = dict(room_vocabulary_resolution)
             response["activity_external_refs"].append(
@@ -10377,6 +15408,26 @@ async def _async_handle_execute(hass: HomeAssistant, call: ServiceCall) -> dict[
                     "consumption_only": True,
                 }
             )
+
+        outcome_metadata = _build_execute_outcome_metadata(
+            response,
+            runtime_context=runtime_context,
+        )
+        response.update(outcome_metadata)
+        response["activity_external_refs"].append(
+            {
+                "ref_type": "execution_outcome_classification",
+                "execution_outcome_category": outcome_metadata["execution_outcome_category"],
+                "silence_as_success": outcome_metadata["silence_as_success"],
+                "response_required": outcome_metadata["response_required"],
+                "response_generated": outcome_metadata["response_generated"],
+                "refusal_reason": outcome_metadata["refusal_reason"],
+                "refusal_category": outcome_metadata["refusal_category"],
+                "room_authority_source": outcome_metadata["room_authority_source"],
+                "person_policy_evaluated": outcome_metadata["person_policy_evaluated"],
+                "merged_room_authority_source": outcome_metadata["merged_room_authority_source"],
+            }
+        )
         return response
 
     return await _async_with_activity(
@@ -10438,10 +15489,32 @@ async def _async_handle_execute_direct(hass: HomeAssistant, call: ServiceCall) -
         return {
             "executed": True,
             "execution_envelope": execution_envelope,
+            "execution_outcome_category": "EXECUTE_SUCCESS",
+            "silence_as_success": False,
+            "response_required": False,
+            "response_generated": False,
+            "response_message": None,
+            "refusal_reason": None,
+            "refusal_category": None,
+            "room_authority_source": "direct_execution",
+            "person_policy_evaluated": False,
+            "merged_room_authority_source": None,
             "activity_external_refs": [
                 _build_routing_decision_ref(execution_envelope),
                 _build_execution_envelope_ref(execution_envelope),
                 _build_preservation_alignment_ref(execution_envelope),
+                {
+                    "ref_type": "execution_outcome_classification",
+                    "execution_outcome_category": "EXECUTE_SUCCESS",
+                    "silence_as_success": False,
+                    "response_required": False,
+                    "response_generated": False,
+                    "refusal_reason": None,
+                    "refusal_category": None,
+                    "room_authority_source": "direct_execution",
+                    "person_policy_evaluated": False,
+                    "merged_room_authority_source": None,
+                },
             ],
         }
 
@@ -11633,6 +16706,23 @@ async def _async_handle_get_summary(hass: HomeAssistant, call: ServiceCall) -> d
         include_context=bool(call.data.get("include_context", True)),
         include_signals=bool(call.data.get("include_signals", True)),
     )
+    room_authority_traceability = _build_room_authority_traceability(
+        state,
+        requested_area_id=call.data.get("area_id"),
+        assembled_context=assembled_context,
+    )
+    weather_response_quality = await _build_room_weather_response(
+        hass,
+        state=state,
+        assembled_context=assembled_context,
+        room_authority_traceability=room_authority_traceability,
+    )
+    monitoring_follow_up = _build_monitoring_follow_up_summary(
+        hass,
+        state=state,
+        assembled_context=assembled_context,
+        room_authority_traceability=room_authority_traceability,
+    )
     fallback_status = _context_fallback_status(
         state,
         requested_area_id=call.data.get("area_id"),
@@ -11650,6 +16740,7 @@ async def _async_handle_get_summary(hass: HomeAssistant, call: ServiceCall) -> d
         room_vocabulary_resolution=None,
         device_entity_vocabulary_resolution=None,
         asset_vocabulary_resolution=None,
+        room_authority_traceability=room_authority_traceability,
     )
     experience_governance_boundary = _build_experience_governance_boundary(
         route_scope=(
@@ -11897,7 +16988,7 @@ async def _async_handle_get_summary(hass: HomeAssistant, call: ServiceCall) -> d
         household_coordination_boundary=household_coordination_boundary,
         provenance_ownership_consumption_boundary=provenance_ownership_consumption_boundary,
     )
-    return {
+    summary_response = {
         "summary": assembled_context["summary"],
         "area_id": call.data.get("area_id"),
         "context_area_id": assembled_context["context_area_id"],
@@ -11906,6 +16997,9 @@ async def _async_handle_get_summary(hass: HomeAssistant, call: ServiceCall) -> d
         "include_context": call.data.get("include_context", True),
         "context_source_count": assembled_context["context_source_count"],
         "signal_count": assembled_context["signal_count"],
+        "room_authority_traceability": room_authority_traceability,
+        "weather_response_quality": weather_response_quality,
+        "monitoring_follow_up": monitoring_follow_up,
         "fallback_context_applied": fallback_status["fallback_context_applied"],
         "fallback_reason": fallback_status["fallback_reason"],
         "global_context_continuity_available": fallback_status["global_context_continuity_available"],
@@ -11939,6 +17033,30 @@ async def _async_handle_get_summary(hass: HomeAssistant, call: ServiceCall) -> d
         "experience_restoration_outcome": experience_restoration_outcome,
         "e3a_preservation_alignment": e3a_preservation_alignment,
     }
+
+    weather_speech = str(weather_response_quality.get("generated_speech") or "").strip()
+    monitoring_generated = any(
+        bool(str(item.get("generated_speech") or "").strip())
+        for item in dict(monitoring_follow_up.get("capabilities", {})).values()
+        if isinstance(item, dict)
+    )
+    response_generated = bool(weather_speech or monitoring_generated or str(assembled_context.get("summary") or "").strip())
+
+    summary_response.update(
+        {
+            "execution_outcome_category": "ANSWER_SUCCESS",
+            "silence_as_success": False,
+            "response_required": True,
+            "response_generated": response_generated,
+            "response_message": weather_speech or str(assembled_context.get("summary") or "").strip() or None,
+            "refusal_reason": None,
+            "refusal_category": None,
+            "room_authority_source": room_authority_traceability.get("room_authority_source", "room_configuration"),
+            "person_policy_evaluated": bool(person_aware_productivity_routing.get("person_policy_evaluated", False)),
+            "merged_room_authority_source": room_authority_traceability.get("merged_room_authority_source"),
+        }
+    )
+    return summary_response
 
 
 async def _async_handle_preview_tts_voice(
@@ -12389,6 +17507,14 @@ async def _async_handle_push_person_message(
     routing_path = "person_mobile_target_fallback"
     requested_target_supplied = bool(requested_target)
     explicit_entity_target = False
+    tts_room_area_id: str | None = None
+    configured_room_speakers: list[str] = []
+    grouped_room_speaker_map: dict[str, list[str]] = {}
+    room_tts_target_speakers: list[str] = []
+    merged_room_participation = False
+    participating_rooms: list[str] = []
+    resolved_composite_id: str | None = None
+    room_tts_mode = False
 
     if requested_target in _MESSAGE_WEB_UI_TARGETS:
         delivery_mode = "web_ui"
@@ -12456,6 +17582,7 @@ async def _async_handle_push_person_message(
             service_data["message"] = call.data["message"]
     elif requested_target.startswith("media_player."):
         delivery_mode = "room_tts"
+        room_tts_mode = True
         target_id = requested_target
         routing_path = "explicit_speaker_entity_target"
         explicit_entity_target = True
@@ -12466,6 +17593,27 @@ async def _async_handle_push_person_message(
             )
             if speaker_targets and target_id not in speaker_targets:
                 target_id = speaker_targets[0]
+            configured_room_speakers = _resolve_room_audio_speaker_membership(room)
+            tts_room_area_id = profile.linked_area_id
+            room_context = _resolve_person_room_tts_context(
+                state,
+                linked_area_id=profile.linked_area_id,
+            )
+            merged_room_participation = bool(room_context.get("merged_room_participation", False))
+            resolved_composite_id = room_context.get("resolved_composite_id")
+            participating_rooms = list(room_context.get("participating_rooms", []))
+            grouped_room_speaker_map = _resolve_grouped_room_tts_speaker_map(
+                state,
+                participating_rooms=participating_rooms,
+            )
+            if merged_room_participation:
+                room_tts_target_speakers = list(
+                    dict.fromkeys(
+                        item for values in grouped_room_speaker_map.values() for item in values
+                    )
+                )
+            else:
+                room_tts_target_speakers = [target_id]
         provider, engine_entity_id = _resolve_tts_engine_entity_id(hass)
         tts_settings = _resolve_room_tts_settings(hass, provider=provider, room=room)
         message_data: dict[str, Any] = {"cache": False}
@@ -12484,6 +17632,7 @@ async def _async_handle_push_person_message(
         }
     elif requested_target in _MESSAGE_TTS_TARGETS:
         delivery_mode = "room_tts"
+        room_tts_mode = True
         if room is None:
             raise vol.Invalid("person is not linked to a room with speaker targets")
         speaker_targets = _room_entity_ids(room, "media_player_entity_ids") or _room_entity_ids(
@@ -12492,6 +17641,19 @@ async def _async_handle_push_person_message(
         )
         if not speaker_targets:
             raise vol.Invalid("room has no configured speaker targets")
+        configured_room_speakers = _resolve_room_audio_speaker_membership(room)
+        tts_room_area_id = profile.linked_area_id
+        room_context = _resolve_person_room_tts_context(
+            state,
+            linked_area_id=profile.linked_area_id,
+        )
+        merged_room_participation = bool(room_context.get("merged_room_participation", False))
+        resolved_composite_id = room_context.get("resolved_composite_id")
+        participating_rooms = list(room_context.get("participating_rooms", []))
+        grouped_room_speaker_map = _resolve_grouped_room_tts_speaker_map(
+            state,
+            participating_rooms=participating_rooms,
+        )
         routing_path = "resolved_room_speaker_target"
         provider, engine_entity_id = _resolve_tts_engine_entity_id(hass)
         tts_settings = _resolve_room_tts_settings(hass, provider=provider, room=room)
@@ -12501,6 +17663,14 @@ async def _async_handle_push_person_message(
         if tts_settings["language"]:
             message_data["language"] = tts_settings["language"]
         target_id = speaker_targets[0]
+        if merged_room_participation:
+            room_tts_target_speakers = list(
+                dict.fromkeys(
+                    item for values in grouped_room_speaker_map.values() for item in values
+                )
+            )
+        else:
+            room_tts_target_speakers = [target_id]
         service_domain = "tts"
         service_name = "speak"
         service_ref = "tts.speak"
@@ -12707,13 +17877,54 @@ async def _async_handle_push_person_message(
     }
 
     async def _runner() -> dict[str, Any]:
+        speech_media_separation_lifecycle: dict[str, Any] | None = None
+        speech_media_separation_ref: dict[str, Any] | None = None
         if not delivery_permitted:
             raise vol.Invalid(
                 "message delivery denied by recipient-consent-privacy-visibility boundary: "
                 + delivery_decision_reason
             )
 
-        await hass.services.async_call(service_domain, service_name, service_data, blocking=True)
+        if room_tts_mode and tts_room_area_id and service_domain == "tts" and service_name == "speak":
+            speech_media_separation_lifecycle = await _async_execute_bounded_sonos_speech_lifecycle(
+                hass,
+                state=state,
+                area_id=tts_room_area_id,
+                target_speakers=(room_tts_target_speakers or [target_id]),
+                room_speaker_map=(
+                    grouped_room_speaker_map
+                    if grouped_room_speaker_map
+                    else {tts_room_area_id: list(configured_room_speakers)}
+                ),
+                tts_service_data=service_data,
+                resolved_composite_id=resolved_composite_id,
+            )
+            speech_media_separation_ref = {
+                "ref_type": "speech_media_separation_lifecycle",
+                "policy_name": _SONOS_SPEECH_CONTINUITY_POLICY_NAME,
+                "area_id": tts_room_area_id,
+                "target_speaker": target_id,
+                "group_targeted_speakers": (room_tts_target_speakers or [target_id]),
+                "merged_room_participation": merged_room_participation,
+                "resolved_composite_id": resolved_composite_id,
+                "participating_rooms": participating_rooms,
+                "failure_reason": speech_media_separation_lifecycle.get("failure_reason"),
+                "fallback_used": bool(speech_media_separation_lifecycle.get("fallback_used", False)),
+                "fallback_path": speech_media_separation_lifecycle.get("fallback_path", "none"),
+                "media_continuation_performed": False,
+                "playback_resume_performed": False,
+            }
+            delivery_ok = bool(
+                speech_media_separation_lifecycle.get("speech", {}).get("delivery_succeeded", False)
+            )
+            if not delivery_ok:
+                error_text = str(
+                    speech_media_separation_lifecycle.get("speech", {}).get("delivery_error")
+                    or "tts_speak_failed"
+                )
+                raise vol.Invalid(error_text)
+        else:
+            await hass.services.async_call(service_domain, service_name, service_data, blocking=True)
 
         delivery_execution_success_ref = {
             "ref_type": "delivery_execution",
@@ -12739,6 +17950,7 @@ async def _async_handle_push_person_message(
             "household_memory_identity_privacy_retention_separation_boundary": household_memory_identity_privacy_retention_separation_boundary,
             "household_memory_messaging_continuity_affinity_occupancy_restoration_separation_boundary": household_memory_messaging_continuity_affinity_occupancy_restoration_separation_boundary,
             "household_memory_provenance_diagnostics_explainability_boundary": household_memory_provenance_diagnostics_explainability_boundary,
+            "speech_media_separation_lifecycle": speech_media_separation_lifecycle,
             "activity_external_refs": [
                 messaging_boundary_ref,
                 messaging_provenance_ref,
@@ -12750,6 +17962,11 @@ async def _async_handle_push_person_message(
                 household_memory_identity_privacy_retention_separation_boundary_ref,
                 household_memory_messaging_continuity_affinity_occupancy_restoration_separation_boundary_ref,
                 household_memory_provenance_diagnostics_explainability_boundary_ref,
+                *(
+                    [speech_media_separation_ref]
+                    if speech_media_separation_ref is not None
+                    else []
+                ),
                 delivery_execution_success_ref,
             ],
         }

@@ -31,7 +31,14 @@ from .services import _build_release_6_provenance_ownership_consumption_boundary
 from .services import _build_runtime_person_context
 from .services import _build_task_shopping_consumption_boundary
 from .voice_identity_bridge import async_get_voice_identity_enrollment_status
+from .models import ContinuityEventClass
+from .models import ContinuityScope
+from .models import build_continuity_classification_trace
 from .storage import ConciergeStorage
+
+_CONTINUITY_CLASSIFIER_VERSION = "ec_a_02_v1"
+_CONTINUITY_DIAGNOSTICS_VERSION = "ec_a_04_v1"
+_CONTINUITY_DIAGNOSTICS_BOUNDARY = "governed_continuity_diagnostics_boundary"
 
 
 def _provider_from_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> MountedPathEnrollmentStorageProvider | None:
@@ -3463,6 +3470,381 @@ def _preservation_baseline(hass: HomeAssistant, state) -> dict[str, Any]:
     }
 
 
+def _continuity_classification_traceability_visibility(state) -> dict[str, Any]:
+    """Return deterministic continuity scope/event classification trace visibility."""
+    execution_envelope_ref_count = 0
+    for activity in state.activities.values():
+        for ref in list(getattr(activity, "external_refs", [])):
+            if str(ref.get("ref_type", "") or "") == "execution_envelope":
+                execution_envelope_ref_count += 1
+
+    sample_inputs = [
+        {
+            "entity_id": "light.kitchen",
+            "event_type": "voice_interaction",
+            "occurred_at": "2026-07-22T00:00:00+00:00",
+            "trace_source": "diagnostics_sample",
+        },
+        {
+            "area_id": "kitchen",
+            "event_type": "room_monitoring_query",
+            "occurred_at": "2026-07-22T00:00:01+00:00",
+            "trace_source": "diagnostics_sample",
+        },
+        {
+            "person_id": "person.tom",
+            "event_type": "identity_confidence_change",
+            "occurred_at": "2026-07-22T00:00:02+00:00",
+            "trace_source": "diagnostics_sample",
+        },
+        {
+            "guest_mode": True,
+            "event_type": "guest_mode_change",
+            "occurred_at": "2026-07-22T00:00:03+00:00",
+            "trace_source": "diagnostics_sample",
+        },
+        {
+            "mode_id": "night",
+            "event_type": "manual_stop",
+            "occurred_at": "2026-07-22T00:00:04+00:00",
+            "trace_source": "diagnostics_sample",
+        },
+    ]
+
+    sample_traces = [build_continuity_classification_trace(sample).as_dict() for sample in sample_inputs]
+    return {
+        "classifier_version": "ec_a_02_v1",
+        "deterministic": True,
+        "supported_scopes": [scope.value for scope in ContinuityScope],
+        "supported_event_classes": [event_class.value for event_class in ContinuityEventClass],
+        "execution_envelope_ref_count": execution_envelope_ref_count,
+        "sample_trace_count": len(sample_traces),
+        "sample_traces": sample_traces,
+    }
+
+
+def _continuity_decision_trace_samples() -> list[dict[str, Any]]:
+    """Return bounded decision-trace samples for diagnostics and validation coverage."""
+    sample_inputs = [
+        {
+            "decision_id": "decision_entity_scope_success",
+            "scenario": "entity_scope_success",
+            "input": {
+                "entity_id": "light.kitchen",
+                "event_type": "voice_interaction",
+                "occurred_at": "2026-07-22T00:00:10+00:00",
+                "trace_source": "diagnostics_sample",
+                "continuity_confidence": {
+                    "score": 0.96,
+                    "band": "high",
+                    "reason_codes": ["entity_scope", "voice_interaction"],
+                    "available": True,
+                    "metadata": {"confidence_policy": "direct_classification"},
+                },
+            },
+            "fallback": {
+                "fallback_applied": False,
+                "fallback_trigger": "none",
+                "fallback_reason": None,
+                "fallback_category": "none",
+                "governance_boundary": _CONTINUITY_DIAGNOSTICS_BOUNDARY,
+            },
+        },
+        {
+            "decision_id": "decision_room_scope_success",
+            "scenario": "room_scope_success",
+            "input": {
+                "area_id": "kitchen",
+                "event_type": "room_monitoring_query",
+                "occurred_at": "2026-07-22T00:00:11+00:00",
+                "trace_source": "diagnostics_sample",
+                "continuity_confidence": {
+                    "score": 0.91,
+                    "band": "high",
+                    "reason_codes": ["room_scope", "monitoring_question"],
+                    "available": True,
+                    "metadata": {"confidence_policy": "room_precedence"},
+                },
+            },
+            "fallback": {
+                "fallback_applied": False,
+                "fallback_trigger": "none",
+                "fallback_reason": None,
+                "fallback_category": "none",
+                "governance_boundary": _CONTINUITY_DIAGNOSTICS_BOUNDARY,
+            },
+        },
+        {
+            "decision_id": "decision_person_scope_success",
+            "scenario": "person_scope_success",
+            "input": {
+                "person_id": "person.tom",
+                "event_type": "identity_confidence_change",
+                "occurred_at": "2026-07-22T00:00:12+00:00",
+                "trace_source": "diagnostics_sample",
+                "continuity_confidence": {
+                    "score": 0.88,
+                    "band": "high",
+                    "reason_codes": ["person_scope", "identity_confidence"],
+                    "available": True,
+                    "metadata": {"confidence_policy": "person_precedence"},
+                },
+            },
+            "fallback": {
+                "fallback_applied": False,
+                "fallback_trigger": "none",
+                "fallback_reason": None,
+                "fallback_category": "none",
+                "governance_boundary": _CONTINUITY_DIAGNOSTICS_BOUNDARY,
+            },
+        },
+        {
+            "decision_id": "decision_household_scope_success",
+            "scenario": "household_scope_success",
+            "input": {
+                "guest_mode": True,
+                "event_type": "guest_mode_change",
+                "occurred_at": "2026-07-22T00:00:13+00:00",
+                "trace_source": "diagnostics_sample",
+                "continuity_confidence": {
+                    "score": 0.74,
+                    "band": "medium",
+                    "reason_codes": ["household_scope", "guest_mode"],
+                    "available": True,
+                    "metadata": {"confidence_policy": "guest_safe_default"},
+                },
+            },
+            "fallback": {
+                "fallback_applied": True,
+                "fallback_trigger": "guest_mode_guardrail",
+                "fallback_reason": "guest_mode_requires_household_safe_default",
+                "fallback_category": "household_guardrail",
+                "governance_boundary": _CONTINUITY_DIAGNOSTICS_BOUNDARY,
+            },
+        },
+        {
+            "decision_id": "decision_mode_scope_success",
+            "scenario": "mode_scope_success",
+            "input": {
+                "mode_id": "night",
+                "event_type": "manual_stop",
+                "occurred_at": "2026-07-22T00:00:14+00:00",
+                "trace_source": "diagnostics_sample",
+                "continuity_confidence": {
+                    "score": 0.84,
+                    "band": "high",
+                    "reason_codes": ["mode_scope", "manual_stop"],
+                    "available": True,
+                    "metadata": {"confidence_policy": "mode_precedence"},
+                },
+            },
+            "fallback": {
+                "fallback_applied": False,
+                "fallback_trigger": "none",
+                "fallback_reason": None,
+                "fallback_category": "none",
+                "governance_boundary": _CONTINUITY_DIAGNOSTICS_BOUNDARY,
+            },
+        },
+        {
+            "decision_id": "decision_unknown_event_fallback",
+            "scenario": "unknown_event_fallback",
+            "input": {
+                "area_id": "kitchen",
+                "event_type": "unclassified_signal",
+                "occurred_at": "2026-07-22T00:00:15+00:00",
+                "trace_source": "diagnostics_sample",
+                "continuity_confidence": {
+                    "score": 0.21,
+                    "band": "low",
+                    "reason_codes": ["unknown_event_class", "fallback_required"],
+                    "available": False,
+                    "metadata": {"fallback_trigger": "unknown_event_class"},
+                },
+            },
+            "fallback": {
+                "fallback_applied": True,
+                "fallback_trigger": "unknown_event_class",
+                "fallback_reason": "unknown_event_class_requires_safe_projection",
+                "fallback_category": "unknown_event",
+                "governance_boundary": _CONTINUITY_DIAGNOSTICS_BOUNDARY,
+            },
+        },
+        {
+            "decision_id": "decision_low_confidence_fallback",
+            "scenario": "low_confidence_fallback",
+            "input": {
+                "person_id": "person.tom",
+                "event_type": "voice_interaction",
+                "occurred_at": "2026-07-22T00:00:16+00:00",
+                "trace_source": "diagnostics_sample",
+                "continuity_confidence": {
+                    "score": 0.18,
+                    "band": "low",
+                    "reason_codes": ["person_confidence_below_threshold", "room_default_selected"],
+                    "available": True,
+                    "metadata": {"fallback_trigger": "low_confidence"},
+                },
+            },
+            "fallback": {
+                "fallback_applied": True,
+                "fallback_trigger": "low_confidence",
+                "fallback_reason": "person_confidence_below_threshold",
+                "fallback_category": "low_confidence",
+                "governance_boundary": _CONTINUITY_DIAGNOSTICS_BOUNDARY,
+            },
+        },
+        {
+            "decision_id": "decision_explicit_scope_success",
+            "scenario": "explicit_scope_success",
+            "input": {
+                "scope": "room",
+                "scope_ref": "great_room",
+                "event_class": "command_follow_up",
+                "event_type": "follow_up_command",
+                "occurred_at": "2026-07-22T00:00:17+00:00",
+                "trace_source": "diagnostics_sample",
+                "continuity_confidence": {
+                    "score": 0.97,
+                    "band": "high",
+                    "reason_codes": ["explicit_scope_field", "explicit_event_class"],
+                    "available": True,
+                    "metadata": {"confidence_policy": "explicit_override"},
+                },
+            },
+            "fallback": {
+                "fallback_applied": False,
+                "fallback_trigger": "none",
+                "fallback_reason": None,
+                "fallback_category": "none",
+                "governance_boundary": _CONTINUITY_DIAGNOSTICS_BOUNDARY,
+            },
+        },
+    ]
+
+    decision_traces: list[dict[str, Any]] = []
+    for sample in sample_inputs:
+        trace = build_continuity_classification_trace(sample["input"])
+        confidence_trace = trace.continuity_confidence.as_dict() if trace.continuity_confidence is not None else None
+        decision_traces.append(
+            {
+                "decision_id": sample["decision_id"],
+                "scenario": sample["scenario"],
+                "trace_source": trace.trace_source,
+                "trace_created_at": trace.trace_created_at,
+                "scope_classification_trace": trace.scope_classification.as_dict(),
+                "event_classification_trace": trace.event_classification.as_dict(),
+                "confidence_trace": confidence_trace,
+                "fallback_trace": sample["fallback"],
+                "decision_summary_trace": {
+                    "decision_identifier": sample["decision_id"],
+                    "timestamp": trace.trace_created_at,
+                    "source_evidence": {
+                        "scope_evidence": list(trace.scope_classification.evidence),
+                        "event_evidence": list(trace.event_classification.evidence),
+                        "confidence_evidence": list(confidence_trace.get("reason_codes", [])) if confidence_trace else [],
+                    },
+                    "final_classification_outcome": {
+                        "scope": trace.scope_classification.scope.value,
+                        "scope_ref": trace.scope_classification.scope_ref,
+                        "event_class": trace.event_classification.event_class.value,
+                        "confidence_band": confidence_trace["band"] if confidence_trace is not None else "unknown",
+                        "fallback_applied": sample["fallback"]["fallback_applied"],
+                        "fallback_category": sample["fallback"]["fallback_category"],
+                    },
+                    "explainability_references": [
+                        "continuity_classification_traceability_visibility",
+                        "continuity_decision_traceability_visibility",
+                        "EC-REQ-092",
+                    ],
+                },
+            }
+        )
+
+    return decision_traces
+
+
+def _continuity_decision_traceability_visibility(state) -> dict[str, Any]:
+    """Return deterministic continuity decision trace visibility for supportability review."""
+    execution_envelope_ref_count = 0
+    for activity in state.activities.values():
+        for ref in list(getattr(activity, "external_refs", [])):
+            if str(ref.get("ref_type", "") or "") == "execution_envelope":
+                execution_envelope_ref_count += 1
+
+    sample_decision_traces = _continuity_decision_trace_samples()
+    confidence_samples = [trace["confidence_trace"] for trace in sample_decision_traces if trace["confidence_trace"] is not None]
+    fallback_samples = [trace["fallback_trace"] for trace in sample_decision_traces if trace["fallback_trace"]["fallback_applied"]]
+
+    return {
+        "diagnostics_version": _CONTINUITY_DIAGNOSTICS_VERSION,
+        "classifier_version": _CONTINUITY_CLASSIFIER_VERSION,
+        "deterministic": True,
+        "supported_scopes": [scope.value for scope in ContinuityScope],
+        "supported_event_classes": [event_class.value for event_class in ContinuityEventClass],
+        "execution_envelope_ref_count": execution_envelope_ref_count,
+        "trace_visibility": {
+            "scope_trace_fields": ["scope_classification_trace", "scope_classification.evidence", "scope_classification.reason_code"],
+            "event_trace_fields": ["event_classification_trace", "event_classification.evidence", "event_classification.reason_code"],
+            "confidence_trace_fields": ["confidence_trace", "continuity_confidence.band", "continuity_confidence.reason_codes"],
+            "fallback_trace_fields": ["fallback_trace", "fallback_trigger", "fallback_reason", "fallback_category"],
+            "decision_summary_trace_fields": [
+                "decision_identifier",
+                "timestamp",
+                "source_evidence",
+                "final_classification_outcome",
+                "explainability_references",
+            ],
+        },
+        "confidence_visibility": {
+            "supported_bands": ["unknown", "low", "medium", "high"],
+            "fallback_confidence_reason_codes": [
+                "unknown_event_class",
+                "person_confidence_below_threshold",
+                "fallback_required",
+            ],
+            "sample_confidence_traces": confidence_samples[:3],
+            "confidence_trace_count": len(confidence_samples),
+            "fallback_confidence_rationale": "Confidence visibility is bounded to scores, bands, and reason codes only.",
+        },
+        "fallback_visibility": {
+            "supported_categories": ["none", "household_guardrail", "unknown_event", "low_confidence"],
+            "supported_triggers": ["none", "guest_mode_guardrail", "unknown_event_class", "low_confidence"],
+            "sample_fallback_traces": fallback_samples,
+            "sample_fallback_trace_count": len(fallback_samples),
+            "fallback_reasoning_policy": "Fallback visibility is bounded to trigger, reason, category, and boundary labels.",
+        },
+        "redaction_visibility": {
+            "protected_content_categories": [
+                "secrets",
+                "credentials",
+                "tenant_tokens",
+                "personally_sensitive_content",
+                "voice_identity_biometric_artifacts",
+                "asset_intelligence_sensitive_details",
+            ],
+            "omitted_payload_fields": [
+                "request_summary",
+                "raw_event_payload",
+                "raw_source_payload",
+                "full_debug_payload",
+                "voice_identity_biometric_artifacts",
+                "asset_sensitive_details",
+            ],
+            "redacted_value_rules": [
+                "identifiers and reason codes only",
+                "no raw content payloads",
+                "no biometric artifacts",
+                "no tenant-specific secrets",
+            ],
+            "raw_debug_payloads_exposed": False,
+            "personally_sensitive_content_exposed": False,
+        },
+        "sample_decision_trace_count": len(sample_decision_traces),
+        "sample_decision_traces": sample_decision_traces,
+    }
+
+
 async def async_get_config_entry_diagnostics(
     hass: HomeAssistant,
     config_entry: ConfigEntry,
@@ -3602,6 +3984,8 @@ async def async_get_config_entry_diagnostics(
         "household_memory_messaging_continuity_affinity_occupancy_restoration_separation_visibility": _household_memory_messaging_continuity_affinity_occupancy_restoration_separation_visibility(state),
         "household_memory_provenance_diagnostics_explainability_visibility": _household_memory_provenance_diagnostics_explainability_visibility(state),
         "continuity_affinity_diagnostics_explainability_visibility": _continuity_affinity_diagnostics_explainability_visibility(state),
+        "continuity_classification_traceability_visibility": _continuity_classification_traceability_visibility(state),
+        "continuity_decision_traceability_visibility": _continuity_decision_traceability_visibility(state),
         "occupancy_presence_diagnostics_explainability_visibility": _occupancy_presence_diagnostics_explainability_visibility(state),
         "restoration_diagnostics_explainability_visibility": _restoration_diagnostics_explainability_visibility(state),
         "preservation_baseline": _preservation_baseline(hass, state),

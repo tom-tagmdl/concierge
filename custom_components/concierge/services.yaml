@@ -193,6 +193,13 @@ update_room_config:
         entity:
           domain: light
           multiple: true
+    lamp_entity_ids:
+      name: Lamp Entity IDs
+      required: false
+      selector:
+        entity:
+          domain: light
+          multiple: true
     shade_entity_ids:
       name: Shade Entity IDs
       required: false

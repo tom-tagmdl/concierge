@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+
 import pytest
 
 from homeassistant.core import Event, SupportsResponse
@@ -17,8 +20,26 @@ from custom_components.concierge.archive_runtime import (
 )
 from custom_components.concierge.const import CONF_VOICE_IDENTITY_LINKED
 from custom_components.concierge.const import DOMAIN, EVENT_EXECUTION
-from custom_components.concierge.models import ActivityEvent, PersonProfile
+from custom_components.concierge.models import (
+    ActivityEvent,
+    ContinuityConfidenceBand,
+    ExperienceSnapshot,
+    LearningOwnershipScope,
+    LearningPolicyEvaluationRequest,
+    LearningWriteRequest,
+    PersonProfile,
+    PreferenceIdentityState,
+    PreferenceResolutionRequest,
+    UsualState,
+    UsualStateBasis,
+)
 from custom_components.concierge.storage import ConciergeStorage
+
+
+@pytest.fixture
+def enable_custom_integrations() -> None:
+    """Satisfy the shared test conftest autouse dependency for targeted standalone runs."""
+    return None
 
 
 def _register_voice_identity_runtime_services(
@@ -82,6 +103,203 @@ def _register_voice_identity_runtime_services(
         _handle_get_identity_context,
         supports_response=SupportsResponse.ONLY,
     )
+
+
+def _enable_music_assistant_provider(hass: HomeAssistant, monkeypatch) -> None:
+    """Enable Music Assistant as the configured Concierge media provider for tests."""
+    entry = hass.config_entries.async_entries(DOMAIN)[0]
+    entry.options["media_provider"] = "music_assistant"
+
+    original_async_entries = hass.config_entries.async_entries
+
+    def _patched_async_entries(domain=None):
+        if domain == "music_assistant":
+            return [SimpleNamespace(domain="music_assistant")]
+        return original_async_entries(domain)
+
+    monkeypatch.setattr(hass.config_entries, "async_entries", _patched_async_entries)
+
+
+def _register_music_assistant_play_media(hass: HomeAssistant, calls: list[dict[str, object]]) -> None:
+    """Register a deterministic Music Assistant play_media test handler."""
+    if hass.services.has_service("music_assistant", "play_media"):
+        hass.services.async_remove("music_assistant", "play_media")
+
+    async def _play_media(call) -> None:
+        calls.append(dict(call.data))
+
+    hass.services.async_register("music_assistant", "play_media", _play_media)
+
+
+async def _seed_room_media_context(
+    storage: ConciergeStorage,
+    *,
+    area_id: str,
+    provider_source: str = "music_assistant",
+    source_room_id: str | None = None,
+    provider_media_id: str | None = None,
+    media_type: str | None = None,
+    track_title: str | None = None,
+    artist_name: str | None = None,
+    album_name: str | None = None,
+    genre: str | None = None,
+    media_query: str | None = None,
+    manual_stop: bool = False,
+    manual_stop_cooldown_until: str | None = None,
+    manual_stop_cooldown_seconds: int | None = None,
+) -> None:
+    """Seed a room-scoped last-media record for continuation tests."""
+    state = await storage.async_load_state()
+    selected_room_id = source_room_id or area_id
+    now_iso = datetime.now(timezone.utc).isoformat()
+    state.usual_states[services_module._room_media_state_id(area_id=selected_room_id)] = UsualState(
+        state_id=services_module._room_media_state_id(area_id=selected_room_id),
+        scope="room",
+        scope_ref=selected_room_id,
+        basis=UsualStateBasis.LEARNED,
+        updated_at=now_iso,
+        values={
+            "room_id": selected_room_id,
+            "source_room_id": selected_room_id,
+            "source_room_selection_reason": "test_seeded_context",
+            "provider_source": provider_source,
+            "provider_media_id": provider_media_id,
+            "media_type": media_type,
+            "media_query": media_query or provider_media_id or track_title or genre,
+            "last_song": track_title,
+            "last_genre": genre,
+            "last_album": album_name,
+            "last_artist": artist_name,
+            "last_media": {
+                "provider_source": provider_source,
+                "provider_media_id": provider_media_id,
+                "media_type": media_type,
+                "track_title": track_title,
+                "artist_name": artist_name,
+                "album_name": album_name,
+                "genre": genre,
+                "media_query": media_query or provider_media_id or track_title or genre,
+                "captured_at": now_iso,
+            },
+            "manual_stop": manual_stop,
+            "manual_stop_cooldown_until": manual_stop_cooldown_until,
+            "manual_stop_cooldown_seconds": manual_stop_cooldown_seconds,
+            "captured_at": now_iso,
+        },
+        metadata={
+            "policy_name": "experience_continuity_room_media_context_ec_e_03",
+            "source_room_selection_reason": "test_seeded_context",
+            "captured_at": now_iso,
+        },
+    )
+    await storage.async_save_state(state)
+
+
+async def test_room_media_context_capture_persists_and_overwrites_room_scoped_state(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """Room media capture should persist and overwrite room-scoped continuity state without crossing room boundaries."""
+    area = ar.async_get(hass).async_create(name="Kitchen")
+    await hass.services.async_call(
+        DOMAIN,
+        "update_room_config",
+        {
+            "area_id": area.id,
+            "media_player_entity_ids": ["media_player.kitchen_main"],
+        },
+        blocking=True,
+    )
+
+    storage = ConciergeStorage(hass)
+    initial_state = await storage.async_load_state()
+    captured_state = await services_module._async_capture_room_media_context(
+        hass,
+        storage=storage,
+        state=initial_state,
+        area_id=area.id,
+        source_room_id=area.id,
+        provider_source="music_assistant",
+        media_type="track",
+        media_query="Song A",
+        music_assistant_request={
+            "media_type": "track",
+            "media_id": "track-001",
+            "radio_mode": False,
+        },
+        room_media_context={
+            "source_room_selection_reason": "test_seeded_context",
+            "source_room_candidates": [area.id],
+            "room_media_context": {
+                "provider_source": "music_assistant",
+                "provider_media_id": "track-001",
+                "media_type": "track",
+                "track_title": "Song A",
+                "artist_name": "Artist A",
+                "album_name": "Album A",
+                "genre": "Jazz",
+                "media_query": "Song A",
+            },
+        },
+    )
+
+    state_id = services_module._room_media_state_id(area_id=area.id)
+    assert captured_state["state_id"] == state_id
+    assert captured_state["scope"] == "room"
+    assert captured_state["values"]["last_song"] == "Song A"
+    assert captured_state["values"]["last_genre"] == "Jazz"
+    assert captured_state["values"]["provider_media_id"] == "track-001"
+
+    refreshed = await storage.async_load_state()
+    assert state_id in refreshed.usual_states
+    stored = refreshed.usual_states[state_id]
+    first_updated_at = stored.updated_at
+    assert stored.values["room_id"] == area.id
+    assert stored.values["source_room_id"] == area.id
+    assert stored.values["provider_source"] == "music_assistant"
+    assert stored.values["provider_media_id"] == "track-001"
+    assert stored.values["media_type"] == "track"
+    assert stored.values["media_query"] == "Song A"
+    assert stored.values["last_song"] == "Song A"
+    assert stored.values["last_genre"] == "Jazz"
+
+    overwrite_state = await storage.async_load_state()
+    await services_module._async_capture_room_media_context(
+        hass,
+        storage=storage,
+        state=overwrite_state,
+        area_id=area.id,
+        source_room_id=area.id,
+        provider_source="music_assistant",
+        media_type="track",
+        media_query="Song B",
+        music_assistant_request={
+            "media_type": "track",
+            "media_id": "track-002",
+            "radio_mode": False,
+        },
+        room_media_context={
+            "source_room_selection_reason": "test_seeded_context",
+            "source_room_candidates": [area.id],
+            "room_media_context": {
+                "provider_source": "music_assistant",
+                "provider_media_id": "track-002",
+                "media_type": "track",
+                "track_title": "Song B",
+                "artist_name": "Artist B",
+                "album_name": "Album B",
+                "genre": "Classical",
+                "media_query": "Song B",
+            },
+        },
+    )
+
+    refreshed_again = await storage.async_load_state()
+    overwritten = refreshed_again.usual_states[state_id]
+    assert overwritten.updated_at != first_updated_at
+    assert overwritten.values["provider_media_id"] == "track-002"
+    assert overwritten.values["last_song"] == "Song B"
+    assert overwritten.values["last_genre"] == "Classical"
 
 
 async def test_capability_resolution_uses_entry_scoped_voice_identity_discovery(
@@ -690,6 +908,54 @@ async def test_summary_handles_missing_calendar_binding_with_safe_fallback(
     assert household_status_boundary["open_loop_coordination_visibility"]["coordination_authority_external"] is True
 
 
+async def test_summary_surfaces_room_configuration_authority_traceability(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """Room summaries should report configuration-authored authority, not discovery-first defaults."""
+    area = ar.async_get(hass).async_create(name="Living Room")
+    storage = ConciergeStorage(hass)
+    await storage.async_update_room_config(
+        area_id=area.id,
+        voice_device_entity_ids=["assist_satellite.living_room"],
+        speaker_entity_ids=["media_player.living_room_speaker"],
+        weather_source_entity_ids=["weather.living_room"],
+        news_source_entity_ids=["sensor.living_room_news"],
+        environment_information_outputs=["weather", "news"],
+        device_groups=[{"group_name": "Lighting", "entity_ids": ["light.lamp"]}],
+        asset_groups=[{"group_name": "Artwork", "device_ids": ["asset.painting"]}],
+        ai_knowledge_enabled=True,
+    )
+
+    summary = await hass.services.async_call(
+        DOMAIN,
+        "get_summary",
+        {"area_id": area.id, "include_context": True, "include_signals": False},
+        blocking=True,
+        return_response=True,
+    )
+
+    room_authority = summary["room_authority_traceability"]
+    assert room_authority["room_configuration_loaded"] is True
+    assert room_authority["room_authority_source"] == "room_configuration"
+    assert room_authority["room_vocabulary_source"] == "room_configuration"
+    assert room_authority["vocabulary_source"] == "room_configuration"
+    assert room_authority["information_source_origin"] == "room_configuration"
+    assert room_authority["environment_source_origin"] == "room_configuration"
+    assert room_authority["asset_authority_source"] == "room_configuration"
+    assert room_authority["person_authority_source"] == "person_configuration"
+    assert room_authority["room_configuration_area_id"] == area.id
+    assert room_authority["room_configuration_voice_device_entity_ids"] == ["assist_satellite.living_room"]
+    assert room_authority["room_configuration_speaker_entity_ids"] == ["media_player.living_room_speaker"]
+    assert room_authority["room_configuration_environment_information_outputs"] == ["weather", "news"]
+    assert room_authority["room_configuration_device_group_count"] == 1
+    assert room_authority["room_configuration_asset_group_count"] == 1
+
+    capability_discovery = summary["capability_discovery"]
+    assert capability_discovery["authority_traceability"]["room_configuration_loaded"] is True
+    assert capability_discovery["authority_traceability"]["room_authority_source"] == "room_configuration"
+
+
 async def test_summary_includes_capture_and_knowledge_consumption(
     hass: HomeAssistant,
     setup_integration,
@@ -843,10 +1109,426 @@ async def test_summary_includes_capture_and_knowledge_consumption(
         provenance_diagnostics_boundary["non_authority_assertions"]["claims_provenance_authority"]
         is False
     )
+
+
+def _register_weather_forecast_service(
+    hass: HomeAssistant,
+    *,
+    forecast_payload: dict[str, object] | None = None,
+    raise_error: bool = False,
+) -> None:
+    """Register deterministic weather.get_forecasts service payload for weather summary tests."""
+    if hass.services.has_service("weather", "get_forecasts"):
+        hass.services.async_remove("weather", "get_forecasts")
+
+    async def _handle_get_forecasts(call):
+        _ = call
+        if raise_error:
+            raise RuntimeError("forecast unavailable")
+        return forecast_payload or {}
+
+    hass.services.async_register(
+        "weather",
+        "get_forecasts",
+        _handle_get_forecasts,
+        supports_response=SupportsResponse.ONLY,
+    )
+
+
+async def test_summary_weather_quality_uses_structured_forecast_and_warning(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """Weather summary should use parsed structured fields and include warning headline when available."""
+    area = ar.async_get(hass).async_create(name="Living Room")
+    storage = ConciergeStorage(hass)
+    await storage.async_update_room_config(
+        area_id=area.id,
+        weather_source_entity_ids=["weather.home_accuweather"],
+        environment_information_outputs=["weather"],
+    )
+
+    _register_weather_forecast_service(
+        hass,
+        forecast_payload={
+            "weather.home_accuweather": {
+                "forecast": [
+                    {
+                        "condition": "partly_cloudy",
+                        "temperature": 92,
+                        "templow": 74,
+                        "humidity": 78,
+                        "precipitation_probability": 40,
+                        "wind_speed": 5,
+                    }
+                ]
+            }
+        },
+    )
+    hass.states.async_set(
+        "sensor.nws_alerts_alerts",
+        "1",
+        {"Alerts": [{"Headline": "Heat Advisory in effect today"}]},
+    )
+
+    summary = await hass.services.async_call(
+        DOMAIN,
+        "get_summary",
+        {"area_id": area.id, "include_context": True, "include_signals": False},
+        blocking=True,
+        return_response=True,
+    )
+
+    assert summary["execution_outcome_category"] == "ANSWER_SUCCESS"
+    assert summary["silence_as_success"] is False
+    assert summary["response_required"] is True
+    assert summary["response_generated"] is True
+    weather = summary["weather_response_quality"]
+    assert weather["weather_source"] == "weather.home_accuweather"
+    assert weather["forecast_provider"] == "weather.home_accuweather"
+    assert weather["forecast_data_available"] is True
+    assert weather["warning_source"] == "sensor.nws_alerts_alerts"
+    assert weather["warning_available"] is True
+    assert weather["warning_headline"] == "Heat Advisory in effect today"
+    assert weather["weather_response_strategy"] == "forecast_structured_with_warning"
+    assert weather["fallback_reason"] is None
+    assert weather["raw_provider_text_used"] is False
+    assert weather["room_authority_source"] == "room_configuration"
+    parsed = weather["parsed_forecast"]
+    assert parsed["condition"] == "partly cloudy"
+    assert parsed["high"] == 92
+    assert parsed["low"] == 74
+    assert parsed["humidity"] == 78
+    assert parsed["precipitation_probability"] == 40
+    assert parsed["wind_text"] == "winds will be light"
+    assert "partly cloudy" in weather["generated_speech"].lower()
+    assert "high near 92" in weather["generated_speech"].lower()
+    assert "low around 74" in weather["generated_speech"].lower()
+    assert "humidity" in weather["generated_speech"].lower()
+    assert "chance of precipitation" in weather["generated_speech"].lower()
+    assert "heat advisory in effect today" in weather["generated_speech"].lower()
+
+
+async def test_summary_weather_quality_graceful_fallbacks_and_configured_authority_only(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """Weather summary should gracefully fallback and stay bound to configured room weather source."""
+    area = ar.async_get(hass).async_create(name="Bedroom")
+    storage = ConciergeStorage(hass)
+    await storage.async_update_room_config(
+        area_id=area.id,
+        weather_source_entity_ids=["weather.configured_source"],
+        environment_information_outputs=["weather"],
+    )
+    # Unrelated weather entity exists but should be ignored.
+    hass.states.async_set("weather.unrelated_inventory_entity", "sunny", {})
+
+    _register_weather_forecast_service(hass, raise_error=True)
+    hass.states.async_set(
+        "sensor.nws_alerts_alerts",
+        "1",
+        {"Alerts": [{"Headline": "Wind Advisory"}]},
+    )
+
+    summary_warning_only = await hass.services.async_call(
+        DOMAIN,
+        "get_summary",
+        {"area_id": area.id, "include_context": True, "include_signals": False},
+        blocking=True,
+        return_response=True,
+    )
+    warning_only = summary_warning_only["weather_response_quality"]
+    assert warning_only["weather_source"] == "weather.configured_source"
+    assert warning_only["forecast_data_available"] is False
+    assert warning_only["warning_available"] is True
+    assert warning_only["weather_response_strategy"] == "warning_only_fallback"
+    assert "forecast" in warning_only["fallback_reason"]
+    assert "wind advisory" in warning_only["generated_speech"].lower()
+    assert warning_only["raw_provider_text_used"] is False
+
+    hass.states.async_set("sensor.nws_alerts_alerts", "0", {"Alerts": []})
+    summary_none = await hass.services.async_call(
+        DOMAIN,
+        "get_summary",
+        {"area_id": area.id, "include_context": True, "include_signals": False},
+        blocking=True,
+        return_response=True,
+    )
+    fallback_only = summary_none["weather_response_quality"]
+    assert fallback_only["weather_source"] == "weather.configured_source"
+    assert fallback_only["forecast_data_available"] is False
+    assert fallback_only["warning_available"] is False
+    assert fallback_only["weather_response_strategy"] == "graceful_forecast_fallback"
+    assert fallback_only["generated_speech"]
+    assert fallback_only["weather_source"] != "weather.unrelated_inventory_entity"
+    assert fallback_only["room_authority_source"] == "room_configuration"
+
+
+async def test_summary_weather_quality_handles_missing_configured_source_without_discovery(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """Missing configured weather source should not trigger entity discovery scans."""
+    area = ar.async_get(hass).async_create(name="Office")
+    storage = ConciergeStorage(hass)
+    await storage.async_update_room_config(
+        area_id=area.id,
+        weather_source_entity_ids=[],
+        environment_information_outputs=["weather"],
+    )
+    hass.states.async_set("weather.inventory_candidate", "sunny", {})
+    if hass.services.has_service("weather", "get_forecasts"):
+        hass.services.async_remove("weather", "get_forecasts")
+
+    summary = await hass.services.async_call(
+        DOMAIN,
+        "get_summary",
+        {"area_id": area.id, "include_context": True, "include_signals": False},
+        blocking=True,
+        return_response=True,
+    )
+
+    weather = summary["weather_response_quality"]
+    assert weather["weather_source"] is None
+    assert weather["forecast_data_available"] is False
+    assert weather["warning_source"] == "sensor.nws_alerts_alerts"
+    assert weather["weather_response_strategy"] == "configured_source_missing_fallback"
+    assert weather["fallback_reason"] == "configured_weather_source_missing"
+    assert weather["generated_speech"] == "I do not have a configured weather source for this room yet."
+    assert weather["weather_source"] != "weather.inventory_candidate"
     assert (
         provenance_diagnostics_boundary["non_authority_assertions"]["creates_planning_engine"]
         is False
     )
+
+
+@pytest.mark.parametrize(
+    ("query", "capability", "sensor_attributes", "expected_value"),
+    [
+        ("what is the temperature", "temperature", {"temperature": 71, "unit_of_measurement": "F"}, 71),
+        ("what is the humidity", "humidity", {"humidity": 44, "unit_of_measurement": "%"}, 44),
+        ("how bright is it", "light", {"illuminance": 315, "unit_of_measurement": "lux"}, 315),
+        ("what is the air quality", "air_quality", {"aqi": 18, "unit_of_measurement": "AQI"}, 18),
+        ("how noisy is it", "noise", {"noise_level": 39, "unit_of_measurement": "dB"}, 39),
+    ],
+)
+async def test_execute_monitoring_follow_up_uses_configured_room_mapping_only(
+    hass: HomeAssistant,
+    setup_integration,
+    query: str,
+    capability: str,
+    sensor_attributes: dict[str, object],
+    expected_value: int,
+) -> None:
+    """Monitoring follow-up should resolve from configured room mappings and ignore unrelated sensors."""
+    area = ar.async_get(hass).async_create(name="Den")
+    storage = ConciergeStorage(hass)
+    await storage.async_update_room_config(
+        area_id=area.id,
+        room_sensor_entity_ids=["sensor.den_primary"],
+        room_health_entity_ids=["sensor.den_health"],
+        human_health_entity_ids=["sensor.den_human_health"],
+    )
+
+    hass.states.async_set("sensor.den_primary", "on", sensor_attributes)
+    hass.states.async_set("sensor.den_health", "on", sensor_attributes)
+    hass.states.async_set("sensor.den_human_health", "on", sensor_attributes)
+    hass.states.async_set("sensor.unrelated_room_candidate", "on", sensor_attributes)
+
+    result = await hass.services.async_call(
+        DOMAIN,
+        "execute",
+        {
+            "area_id": area.id,
+            "target": query,
+            "intent_class": "home_control",
+        },
+        blocking=True,
+        return_response=True,
+    )
+
+    assert result["execution_outcome_category"] == "ANSWER_SUCCESS"
+    assert result["silence_as_success"] is False
+    assert result["response_required"] is True
+    assert result["response_generated"] is True
+    monitoring = result["monitoring_follow_up"]
+    assert monitoring["monitoring_capability"] == capability
+    assert monitoring["room_authority_source"] == "room_configuration"
+    assert monitoring["runtime_discovery_reliance"] == "validation_only"
+    assert monitoring["refusal_reason"] is None
+    assert monitoring["refusal_category"] is None
+    assert monitoring["capability_requested"] == capability
+    assert monitoring["capability_available"] is True
+    assert monitoring["capability_configured"] is True
+    assert monitoring["person_policy_evaluated"] is False
+    assert monitoring["resolved_monitoring_device"] != "sensor.unrelated_room_candidate"
+    assert monitoring["resolved_measurement"]["value"] == pytest.approx(expected_value)
+
+
+async def test_execute_monitoring_follow_up_deterministic_priority_for_multiple_devices(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """Monitoring follow-up should use deterministic first-configured precedence for repeated queries."""
+    area = ar.async_get(hass).async_create(name="Office")
+    storage = ConciergeStorage(hass)
+    await storage.async_update_room_config(
+        area_id=area.id,
+        room_sensor_entity_ids=["sensor.office_temp_a", "sensor.office_temp_b"],
+    )
+
+    hass.states.async_set("sensor.office_temp_a", "on", {"temperature": 69, "unit_of_measurement": "F"})
+    hass.states.async_set("sensor.office_temp_b", "on", {"temperature": 72, "unit_of_measurement": "F"})
+
+    first = await hass.services.async_call(
+        DOMAIN,
+        "execute",
+        {"area_id": area.id, "target": "what is the temperature", "intent_class": "home_control"},
+        blocking=True,
+        return_response=True,
+    )
+    second = await hass.services.async_call(
+        DOMAIN,
+        "execute",
+        {"area_id": area.id, "target": "what is the temperature", "intent_class": "home_control"},
+        blocking=True,
+        return_response=True,
+    )
+
+    first_follow_up = first["monitoring_follow_up"]
+    second_follow_up = second["monitoring_follow_up"]
+    assert first_follow_up["resolved_monitoring_device"] == "sensor.office_temp_a"
+    assert second_follow_up["resolved_monitoring_device"] == "sensor.office_temp_a"
+    assert first_follow_up["resolution_priority"][0] == "sensor.office_temp_a"
+    assert second_follow_up["resolution_priority"][0] == "sensor.office_temp_a"
+
+
+async def test_execute_monitoring_follow_up_refuses_when_capability_not_configured(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """Monitoring follow-up should refuse when no configured mapping exists for a requested capability."""
+    area = ar.async_get(hass).async_create(name="Kitchen")
+    storage = ConciergeStorage(hass)
+    await storage.async_update_room_config(
+        area_id=area.id,
+        room_sensor_entity_ids=["sensor.kitchen_temperature"],
+    )
+    hass.states.async_set("sensor.kitchen_temperature", "on", {"temperature": 70, "unit_of_measurement": "F"})
+
+    result = await hass.services.async_call(
+        DOMAIN,
+        "execute",
+        {"area_id": area.id, "target": "what is the air quality", "intent_class": "home_control"},
+        blocking=True,
+        return_response=True,
+    )
+
+    assert result["execution_outcome_category"] == "REFUSAL_SUCCESS"
+    assert result["silence_as_success"] is False
+    assert result["response_required"] is True
+    assert result["response_generated"] is True
+    assert result["refusal_reason"] == "configured_capability_mapping_missing"
+    assert result["refusal_category"] == "capability_unavailable"
+    monitoring = result["monitoring_follow_up"]
+    assert monitoring["monitoring_capability"] == "air_quality"
+    assert monitoring["resolved_monitoring_device"] is None
+    assert monitoring["refusal_reason"] == "configured_capability_mapping_missing"
+    assert monitoring["refusal_category"] == "capability_unavailable"
+    assert monitoring["capability_requested"] == "air_quality"
+    assert monitoring["capability_available"] is False
+    assert monitoring["capability_configured"] is False
+    assert monitoring["person_policy_evaluated"] is False
+    assert monitoring["runtime_discovery_reliance"] == "validation_only"
+
+
+async def test_execute_monitoring_follow_up_merged_room_uses_configuration_authority(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """Merged-room monitoring should remain configuration-authored with deterministic room precedence."""
+    living = ar.async_get(hass).async_create(name="Living Room")
+    den = ar.async_get(hass).async_create(name="Den")
+    storage = ConciergeStorage(hass)
+    await storage.async_update_room_config(
+        area_id=living.id,
+        room_sensor_entity_ids=["sensor.living_temp"],
+    )
+    await storage.async_update_room_config(
+        area_id=den.id,
+        room_sensor_entity_ids=["sensor.den_temp"],
+    )
+    await storage.async_update_composite_config(
+        composite_id="main_suite",
+        area_ids=[living.id, den.id],
+        primary_area=living.id,
+    )
+
+    hass.states.async_set("sensor.living_temp", "on", {"temperature": 70, "unit_of_measurement": "F"})
+    hass.states.async_set("sensor.den_temp", "on", {"temperature": 74, "unit_of_measurement": "F"})
+
+    result = await hass.services.async_call(
+        DOMAIN,
+        "execute",
+        {
+            "area_id": living.id,
+            "composite_id": "main_suite",
+            "target": "what is the temperature",
+            "intent_class": "home_control",
+        },
+        blocking=True,
+        return_response=True,
+    )
+
+    monitoring = result["monitoring_follow_up"]
+    assert monitoring["resolved_monitoring_device"] == "sensor.living_temp"
+    assert monitoring["room_authority_source"] == "room_configuration"
+    assert monitoring["merged_room_authority_source"] == "room_configuration"
+    assert monitoring["capability_available"] is True
+    assert monitoring["capability_configured"] is True
+    assert monitoring["configured_capability_mapping"]["participating_rooms"] == [living.id, den.id]
+
+
+async def test_execute_monitoring_follow_up_does_not_infer_from_unrelated_inventory(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """Runtime inventory candidates must not create monitoring capability ownership."""
+    area = ar.async_get(hass).async_create(name="Studio")
+    storage = ConciergeStorage(hass)
+    await storage.async_update_room_config(
+        area_id=area.id,
+        room_sensor_entity_ids=["sensor.studio_configured_temperature"],
+    )
+
+    hass.states.async_set(
+        "sensor.studio_configured_temperature",
+        "on",
+        {"state_class": "measurement"},
+    )
+    hass.states.async_set(
+        "sensor.inventory_air_quality_candidate",
+        "35",
+        {"aqi": 35, "unit_of_measurement": "AQI"},
+    )
+
+    result = await hass.services.async_call(
+        DOMAIN,
+        "execute",
+        {"area_id": area.id, "target": "what is the air quality", "intent_class": "home_control"},
+        blocking=True,
+        return_response=True,
+    )
+
+    monitoring = result["monitoring_follow_up"]
+    assert monitoring["resolved_monitoring_device"] is None
+    assert monitoring["refusal_reason"] == "configured_capability_mapping_missing"
+    assert monitoring["refusal_category"] == "capability_unavailable"
+    assert monitoring["capability_available"] is False
+    assert monitoring["capability_configured"] is False
+    assert "sensor.inventory_air_quality_candidate" not in monitoring["resolution_priority"]
+    assert monitoring["runtime_discovery_reliance"] == "validation_only"
 
 async def test_push_person_message_reports_messaging_governance_boundary(
     hass: HomeAssistant,
@@ -1385,6 +2067,584 @@ async def test_push_person_message_falls_back_to_integration_tts_defaults(
     assert tts_calls[0]["message"] == "Hello Den"
 
 
+async def test_push_person_message_room_tts_runs_bounded_duck_speak_restore_lifecycle(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """Room TTS should apply bounded duck/speak/restore without media continuation behavior."""
+    area = ar.async_get(hass).async_create(name="Den")
+    storage = ConciergeStorage(hass)
+    await storage.async_update_person_profile(
+        PersonProfile(
+            person_id="tom",
+            name="Tom",
+            linked_area_id=area.id,
+            mobile_notify_targets=["phone"],
+            preferred_mobile_target="phone",
+        )
+    )
+    await storage.async_update_room_config(
+        area.id,
+        media_player_entity_ids=["media_player.den_a", "media_player.den_b"],
+    )
+
+    state = await storage.async_load_state()
+    state.usual_states[services_module._room_audio_state_id(area_id=area.id, channel="duck")] = UsualState(
+        state_id=services_module._room_audio_state_id(area_id=area.id, channel="duck"),
+        scope="room",
+        scope_ref=area.id,
+        basis=UsualStateBasis.LEARNED,
+        updated_at=datetime.now(timezone.utc).isoformat(),
+        values={"channel": "duck", "volume_pct": 20, "area_id": area.id},
+        metadata={"policy_name": "experience_continuity_room_audio_memory_ec_d_01"},
+    )
+    state.usual_states[services_module._room_audio_state_id(area_id=area.id, channel="tts")] = UsualState(
+        state_id=services_module._room_audio_state_id(area_id=area.id, channel="tts"),
+        scope="room",
+        scope_ref=area.id,
+        basis=UsualStateBasis.LEARNED,
+        updated_at=datetime.now(timezone.utc).isoformat(),
+        values={"channel": "tts", "volume_pct": 55, "area_id": area.id},
+        metadata={"policy_name": "experience_continuity_room_audio_memory_ec_d_01"},
+    )
+    await storage.async_save_state(state)
+
+    hass.states.async_set("media_player.den_a", "playing", {"volume_level": 0.6})
+    hass.states.async_set("media_player.den_b", "paused", {"volume_level": 0.4})
+
+    volume_calls: list[dict[str, object]] = []
+    tts_calls: list[dict[str, object]] = []
+    if hass.services.has_service("media_player", "volume_set"):
+        hass.services.async_remove("media_player", "volume_set")
+    if hass.services.has_service("tts", "speak"):
+        hass.services.async_remove("tts", "speak")
+
+    async def _volume_set(call):
+        volume_calls.append(dict(call.data))
+
+    async def _tts_speak(call):
+        tts_calls.append(dict(call.data))
+
+    hass.services.async_register("media_player", "volume_set", _volume_set)
+    hass.services.async_register("tts", "speak", _tts_speak)
+
+    result = await hass.services.async_call(
+        DOMAIN,
+        "push_person_message",
+        {
+            "person_id": "tom",
+            "target_id": "speaker",
+            "message": "Bounded lifecycle test",
+        },
+        blocking=True,
+        return_response=True,
+    )
+
+    lifecycle = result["speech_media_separation_lifecycle"]
+    assert result["sent"] is True
+    assert lifecycle["policy_name"] == "experience_continuity_sonos_speech_ec_d_02"
+    assert lifecycle["speech"]["delivery_succeeded"] is True
+    assert lifecycle["duck"]["volume_pct"] == 20
+    assert lifecycle["speech"]["volume_pct"] == 55
+    assert lifecycle["restore"]["media_continuation_performed"] is False
+    assert lifecycle["restore"]["playback_resume_performed"] is False
+    assert tts_calls and tts_calls[0]["media_player_entity_id"] == "media_player.den_a"
+    assert len(volume_calls) == 5
+
+
+async def test_push_person_message_room_tts_uses_deterministic_fallback_when_room_audio_memory_missing(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """Missing duck/TTS room memory should use deterministic fallback and still avoid media continuation."""
+    area = ar.async_get(hass).async_create(name="Den")
+    storage = ConciergeStorage(hass)
+    await storage.async_update_person_profile(
+        PersonProfile(
+            person_id="tom",
+            name="Tom",
+            linked_area_id=area.id,
+            mobile_notify_targets=["phone"],
+            preferred_mobile_target="phone",
+        )
+    )
+    await storage.async_update_room_config(
+        area.id,
+        media_player_entity_ids=["media_player.den_speaker"],
+    )
+
+    hass.states.async_set("media_player.den_speaker", "playing", {})
+
+    if hass.services.has_service("media_player", "volume_set"):
+        hass.services.async_remove("media_player", "volume_set")
+    if hass.services.has_service("tts", "speak"):
+        hass.services.async_remove("tts", "speak")
+
+    async def _volume_set(_call):
+        return None
+
+    async def _tts_speak(_call):
+        return None
+
+    hass.services.async_register("media_player", "volume_set", _volume_set)
+    hass.services.async_register("tts", "speak", _tts_speak)
+
+    result = await hass.services.async_call(
+        DOMAIN,
+        "push_person_message",
+        {
+            "person_id": "tom",
+            "target_id": "speaker",
+            "message": "Fallback lifecycle test",
+        },
+        blocking=True,
+        return_response=True,
+    )
+
+    lifecycle = result["speech_media_separation_lifecycle"]
+    assert result["sent"] is True
+    assert lifecycle["fallback_used"] is True
+    assert lifecycle["duck"]["fallback_reason"] == "room_audio_value_missing"
+    assert lifecycle["speech"]["fallback_reason"] == "room_audio_value_missing"
+    assert lifecycle["restore"]["media_continuation_performed"] is False
+    assert lifecycle["restore"]["playback_resume_performed"] is False
+
+
+async def test_push_person_message_room_tts_restores_after_tts_failure_without_media_resume(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """TTS failures should still run restore and must not trigger any media continuation behavior."""
+    area = ar.async_get(hass).async_create(name="Den")
+    storage = ConciergeStorage(hass)
+    await storage.async_update_person_profile(
+        PersonProfile(
+            person_id="tom",
+            name="Tom",
+            linked_area_id=area.id,
+            mobile_notify_targets=["phone"],
+            preferred_mobile_target="phone",
+        )
+    )
+    await storage.async_update_room_config(
+        area.id,
+        media_player_entity_ids=["media_player.den_speaker"],
+    )
+
+    hass.states.async_set("media_player.den_speaker", "paused", {"volume_level": 0.49})
+
+    volume_calls: list[dict[str, object]] = []
+    if hass.services.has_service("media_player", "volume_set"):
+        hass.services.async_remove("media_player", "volume_set")
+    if hass.services.has_service("tts", "speak"):
+        hass.services.async_remove("tts", "speak")
+
+    async def _volume_set(call):
+        volume_calls.append(dict(call.data))
+
+    async def _tts_speak(_call):
+        raise RuntimeError("tts speak failed")
+
+    hass.services.async_register("media_player", "volume_set", _volume_set)
+    hass.services.async_register("tts", "speak", _tts_speak)
+
+    with pytest.raises(Exception):
+        await hass.services.async_call(
+            DOMAIN,
+            "push_person_message",
+            {
+                "person_id": "tom",
+                "target_id": "speaker",
+                "message": "Failure lifecycle test",
+            },
+            blocking=True,
+            return_response=True,
+        )
+
+    assert len(volume_calls) >= 3
+    assert abs(float(volume_calls[-1]["volume_level"]) - 0.49) < 0.0001
+
+
+async def test_push_person_message_room_tts_merged_room_grouped_lifecycle_preserves_constituent_memory(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """Merged-room room-TTS should group output while preserving per-room memory and no merged-memory key."""
+    floor = fr.async_get(hass).async_create(name="Main")
+    area_registry = ar.async_get(hass)
+    room_a = area_registry.async_create(name="Living Room", floor_id=floor.floor_id)
+    room_b = area_registry.async_create(name="Kitchen", floor_id=floor.floor_id)
+
+    storage = ConciergeStorage(hass)
+    await storage.async_update_person_profile(
+        PersonProfile(
+            person_id="tom",
+            name="Tom",
+            linked_area_id=room_a.id,
+            mobile_notify_targets=["phone"],
+            preferred_mobile_target="phone",
+        )
+    )
+    await storage.async_update_room_config(
+        room_a.id,
+        media_player_entity_ids=["media_player.living_main"],
+    )
+    await storage.async_update_room_config(
+        room_b.id,
+        media_player_entity_ids=["media_player.kitchen_main"],
+    )
+    await hass.services.async_call(
+        DOMAIN,
+        "update_composite_config",
+        {
+            "composite_id": "public_space",
+            "name": "Public Space",
+            "area_ids": [room_a.id, room_b.id],
+            "primary_area": room_a.id,
+        },
+        blocking=True,
+    )
+
+    state = await storage.async_load_state()
+    state.usual_states[services_module._room_audio_state_id(area_id=room_a.id, channel="music")] = UsualState(
+        state_id=services_module._room_audio_state_id(area_id=room_a.id, channel="music"),
+        scope="room",
+        scope_ref=room_a.id,
+        basis=UsualStateBasis.LEARNED,
+        updated_at=datetime.now(timezone.utc).isoformat(),
+        values={"channel": "music", "volume_pct": 30, "area_id": room_a.id},
+        metadata={"policy_name": "experience_continuity_room_audio_memory_ec_d_01"},
+    )
+    state.usual_states[services_module._room_audio_state_id(area_id=room_b.id, channel="music")] = UsualState(
+        state_id=services_module._room_audio_state_id(area_id=room_b.id, channel="music"),
+        scope="room",
+        scope_ref=room_b.id,
+        basis=UsualStateBasis.LEARNED,
+        updated_at=datetime.now(timezone.utc).isoformat(),
+        values={"channel": "music", "volume_pct": 60, "area_id": room_b.id},
+        metadata={"policy_name": "experience_continuity_room_audio_memory_ec_d_01"},
+    )
+    state.usual_states[services_module._room_audio_state_id(area_id=room_a.id, channel="duck")] = UsualState(
+        state_id=services_module._room_audio_state_id(area_id=room_a.id, channel="duck"),
+        scope="room",
+        scope_ref=room_a.id,
+        basis=UsualStateBasis.LEARNED,
+        updated_at=datetime.now(timezone.utc).isoformat(),
+        values={"channel": "duck", "volume_pct": 18, "area_id": room_a.id},
+        metadata={"policy_name": "experience_continuity_room_audio_memory_ec_d_01"},
+    )
+    state.usual_states[services_module._room_audio_state_id(area_id=room_b.id, channel="duck")] = UsualState(
+        state_id=services_module._room_audio_state_id(area_id=room_b.id, channel="duck"),
+        scope="room",
+        scope_ref=room_b.id,
+        basis=UsualStateBasis.LEARNED,
+        updated_at=datetime.now(timezone.utc).isoformat(),
+        values={"channel": "duck", "volume_pct": 22, "area_id": room_b.id},
+        metadata={"policy_name": "experience_continuity_room_audio_memory_ec_d_01"},
+    )
+    state.usual_states[services_module._room_audio_state_id(area_id=room_a.id, channel="tts")] = UsualState(
+        state_id=services_module._room_audio_state_id(area_id=room_a.id, channel="tts"),
+        scope="room",
+        scope_ref=room_a.id,
+        basis=UsualStateBasis.LEARNED,
+        updated_at=datetime.now(timezone.utc).isoformat(),
+        values={"channel": "tts", "volume_pct": 45, "area_id": room_a.id},
+        metadata={"policy_name": "experience_continuity_room_audio_memory_ec_d_01"},
+    )
+    state.usual_states[services_module._room_audio_state_id(area_id=room_b.id, channel="tts")] = UsualState(
+        state_id=services_module._room_audio_state_id(area_id=room_b.id, channel="tts"),
+        scope="room",
+        scope_ref=room_b.id,
+        basis=UsualStateBasis.LEARNED,
+        updated_at=datetime.now(timezone.utc).isoformat(),
+        values={"channel": "tts", "volume_pct": 52, "area_id": room_b.id},
+        metadata={"policy_name": "experience_continuity_room_audio_memory_ec_d_01"},
+    )
+    await storage.async_save_state(state)
+
+    hass.states.async_set("media_player.living_main", "playing", {"volume_level": 0.61})
+    hass.states.async_set("media_player.kitchen_main", "paused", {"volume_level": 0.42})
+
+    volume_calls: list[dict[str, object]] = []
+    tts_calls: list[dict[str, object]] = []
+    if hass.services.has_service("media_player", "volume_set"):
+        hass.services.async_remove("media_player", "volume_set")
+    if hass.services.has_service("tts", "speak"):
+        hass.services.async_remove("tts", "speak")
+
+    async def _volume_set(call):
+        volume_calls.append(dict(call.data))
+
+    async def _tts_speak(call):
+        tts_calls.append(dict(call.data))
+
+    hass.services.async_register("media_player", "volume_set", _volume_set)
+    hass.services.async_register("tts", "speak", _tts_speak)
+
+    result = await hass.services.async_call(
+        DOMAIN,
+        "push_person_message",
+        {
+            "person_id": "tom",
+            "target_id": "speaker",
+            "message": "Merged room lifecycle test",
+        },
+        blocking=True,
+        return_response=True,
+    )
+
+    lifecycle = result["speech_media_separation_lifecycle"]
+    assert result["sent"] is True
+    assert lifecycle["merged_room_participation"] is True
+    assert lifecycle["resolved_composite_id"] == "public_space"
+    assert sorted(lifecycle["participating_rooms"]) == sorted([room_a.id, room_b.id])
+    assert sorted(lifecycle["group_targeted_speakers"]) == ["media_player.kitchen_main", "media_player.living_main"]
+    assert lifecycle["restore"]["media_continuation_performed"] is False
+    assert lifecycle["restore"]["playback_resume_performed"] is False
+    assert len(tts_calls) == 2
+    assert sorted(str(item["media_player_entity_id"]) for item in tts_calls) == [
+        "media_player.kitchen_main",
+        "media_player.living_main",
+    ]
+
+    duck_by_speaker = {
+        str(item["entity_id"]): int(item["duck_volume_pct"])
+        for item in lifecycle["duck"]["actions"]
+        if item.get("applied")
+    }
+    assert duck_by_speaker["media_player.living_main"] == 18
+    assert duck_by_speaker["media_player.kitchen_main"] == 22
+
+    speech_by_speaker = {
+        str(item["entity_id"]): int(item["volume_pct"])
+        for item in lifecycle["speech"]["actions"]
+    }
+    assert speech_by_speaker["media_player.living_main"] == 45
+    assert speech_by_speaker["media_player.kitchen_main"] == 52
+    assert all(item.get("delivery_succeeded") for item in lifecycle["speech"]["actions"])
+
+    restored_by_speaker = {
+        str(item["entity_id"]): int(item["restored_volume_pct"])
+        for item in lifecycle["restore"]["actions"]
+        if item.get("restored")
+    }
+    assert restored_by_speaker["media_player.living_main"] == 61
+    assert restored_by_speaker["media_player.kitchen_main"] == 42
+
+    assert all(item.get("domain") == "media_player" and item.get("service") == "volume_set" for item in volume_calls)
+
+    post = await storage.async_load_state()
+    a_music, _, _ = services_module._resolve_room_audio_level(state=post, area_id=room_a.id, channel="music")
+    b_music, _, _ = services_module._resolve_room_audio_level(state=post, area_id=room_b.id, channel="music")
+    a_duck, _, _ = services_module._resolve_room_audio_level(state=post, area_id=room_a.id, channel="duck")
+    b_duck, _, _ = services_module._resolve_room_audio_level(state=post, area_id=room_b.id, channel="duck")
+    a_tts, _, _ = services_module._resolve_room_audio_level(state=post, area_id=room_a.id, channel="tts")
+    b_tts, _, _ = services_module._resolve_room_audio_level(state=post, area_id=room_b.id, channel="tts")
+    assert (a_music, b_music) == (30, 60)
+    assert (a_duck, b_duck) == (18, 22)
+    assert (a_tts, b_tts) == (45, 52)
+    assert all("public_space" not in key for key in post.usual_states)
+
+
+async def test_push_person_message_room_tts_merged_room_does_not_discover_replacement_speakers(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """Merged-room room-TTS must not discover replacement speakers for rooms with no configured mappings."""
+    floor = fr.async_get(hass).async_create(name="Main")
+    area_registry = ar.async_get(hass)
+    room_a = area_registry.async_create(name="Living Room", floor_id=floor.floor_id)
+    room_b = area_registry.async_create(name="Kitchen", floor_id=floor.floor_id)
+
+    storage = ConciergeStorage(hass)
+    await storage.async_update_person_profile(
+        PersonProfile(
+            person_id="tom",
+            name="Tom",
+            linked_area_id=room_a.id,
+            mobile_notify_targets=["phone"],
+            preferred_mobile_target="phone",
+        )
+    )
+    await storage.async_update_room_config(
+        room_a.id,
+        media_player_entity_ids=["media_player.living_main"],
+    )
+    await storage.async_update_room_config(
+        room_b.id,
+        media_player_entity_ids=[],
+        speaker_entity_ids=[],
+    )
+    await hass.services.async_call(
+        DOMAIN,
+        "update_composite_config",
+        {
+            "composite_id": "public_space",
+            "name": "Public Space",
+            "area_ids": [room_a.id, room_b.id],
+            "primary_area": room_a.id,
+        },
+        blocking=True,
+    )
+
+    entity = er.async_get(hass).async_get_or_create(
+        "media_player",
+        DOMAIN,
+        "kitchen_unconfigured",
+        area_id=room_b.id,
+    )
+    hass.states.async_set("media_player.living_main", "playing", {"volume_level": 0.45})
+    hass.states.async_set(entity.entity_id, "playing", {"volume_level": 0.88})
+
+    tts_calls: list[dict[str, object]] = []
+    if hass.services.has_service("media_player", "volume_set"):
+        hass.services.async_remove("media_player", "volume_set")
+    if hass.services.has_service("tts", "speak"):
+        hass.services.async_remove("tts", "speak")
+
+    async def _volume_set(_call):
+        return None
+
+    async def _tts_speak(call):
+        tts_calls.append(dict(call.data))
+
+    hass.services.async_register("media_player", "volume_set", _volume_set)
+    hass.services.async_register("tts", "speak", _tts_speak)
+
+    result = await hass.services.async_call(
+        DOMAIN,
+        "push_person_message",
+        {
+            "person_id": "tom",
+            "target_id": "speaker",
+            "message": "No replacement discovery",
+        },
+        blocking=True,
+        return_response=True,
+    )
+
+    lifecycle = result["speech_media_separation_lifecycle"]
+    assert lifecycle["merged_room_participation"] is True
+    assert lifecycle["group_targeted_speakers"] == ["media_player.living_main"]
+    assert all(
+        str(item.get("area_id")) != room_b.id or not item.get("validated_speakers")
+        for item in lifecycle["grouped_validation_results"]
+    )
+    assert tts_calls and tts_calls[0]["media_player_entity_id"] == "media_player.living_main"
+    assert all(str(item.get("media_player_entity_id")) != entity.entity_id for item in tts_calls)
+
+
+async def test_push_person_message_room_tts_falls_back_when_preferred_speaker_unavailable(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """Unavailable preferred speaker should deterministically fall back to validated configured room speakers."""
+    area = ar.async_get(hass).async_create(name="Den")
+    storage = ConciergeStorage(hass)
+    await storage.async_update_person_profile(
+        PersonProfile(
+            person_id="tom",
+            name="Tom",
+            linked_area_id=area.id,
+            mobile_notify_targets=["phone"],
+            preferred_mobile_target="phone",
+        )
+    )
+    await storage.async_update_room_config(
+        area.id,
+        media_player_entity_ids=["media_player.den_a", "media_player.den_b"],
+    )
+
+    hass.states.async_set("media_player.den_a", "unavailable", {})
+    hass.states.async_set("media_player.den_b", "playing", {"volume_level": 0.5})
+
+    tts_calls: list[dict[str, object]] = []
+    if hass.services.has_service("media_player", "volume_set"):
+        hass.services.async_remove("media_player", "volume_set")
+    if hass.services.has_service("tts", "speak"):
+        hass.services.async_remove("tts", "speak")
+
+    async def _volume_set(_call):
+        return None
+
+    async def _tts_speak(call):
+        tts_calls.append(dict(call.data))
+
+    hass.services.async_register("media_player", "volume_set", _volume_set)
+    hass.services.async_register("tts", "speak", _tts_speak)
+
+    result = await hass.services.async_call(
+        DOMAIN,
+        "push_person_message",
+        {
+            "person_id": "tom",
+            "target_id": "media_player.den_a",
+            "message": "Fallback preferred speaker",
+        },
+        blocking=True,
+        return_response=True,
+    )
+
+    lifecycle = result["speech_media_separation_lifecycle"]
+    assert result["sent"] is True
+    assert lifecycle["group_targeted_speakers"] == ["media_player.den_b"]
+    assert lifecycle["target_resolution"]["fallback_reason"] == "preferred_speaker_unavailable"
+    assert lifecycle["target_resolution"]["decision_reason"] == "preferred_speaker_unavailable_fallback_to_validated_speakers"
+    assert lifecycle["speech"]["delivery_succeeded"] is True
+    assert tts_calls and tts_calls[0]["media_player_entity_id"] == "media_player.den_b"
+
+
+async def test_push_person_message_room_tts_refuses_when_no_valid_configured_speakers(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """When no configured speakers validate, room-TTS should fail deterministically without replacement discovery."""
+    area = ar.async_get(hass).async_create(name="Den")
+    storage = ConciergeStorage(hass)
+    await storage.async_update_person_profile(
+        PersonProfile(
+            person_id="tom",
+            name="Tom",
+            linked_area_id=area.id,
+            mobile_notify_targets=["phone"],
+            preferred_mobile_target="phone",
+        )
+    )
+    await storage.async_update_room_config(
+        area.id,
+        media_player_entity_ids=["media_player.den_a"],
+    )
+
+    hass.states.async_set("media_player.den_a", "unavailable", {})
+
+    if hass.services.has_service("media_player", "volume_set"):
+        hass.services.async_remove("media_player", "volume_set")
+    if hass.services.has_service("tts", "speak"):
+        hass.services.async_remove("tts", "speak")
+
+    async def _volume_set(_call):
+        return None
+
+    async def _tts_speak(_call):
+        return None
+
+    hass.services.async_register("media_player", "volume_set", _volume_set)
+    hass.services.async_register("tts", "speak", _tts_speak)
+
+    with pytest.raises(Exception, match="no_target_speakers_available"):
+        await hass.services.async_call(
+            DOMAIN,
+            "push_person_message",
+            {
+                "person_id": "tom",
+                "target_id": "speaker",
+                "message": "No valid speakers",
+            },
+            blocking=True,
+            return_response=True,
+        )
+
+
 async def test_push_person_message_delivery_failure_records_error_activity(
     hass: HomeAssistant,
     setup_integration,
@@ -1486,6 +2746,8 @@ async def test_push_person_message_denies_when_consent_is_required_but_absent(
     )
     assert boundary_ref["delivery_permitted"] is False
     assert boundary_ref["decision_reason"] == "consent_required_not_granted"
+    assert boundary_ref["refusal_reason"] == "consent_required_not_granted"
+    assert boundary_ref["refusal_category"] == "policy_denied"
     diagnostics_ref = next(
         ref
         for ref in latest.external_refs
@@ -1930,6 +3192,293 @@ async def test_runtime_person_context_resolves_exact_person_id_and_exposes_bindi
     assert routing["domain_routing"]["shopping"]["selected_source_ref"] == "shopping_list.household"
 
 
+def test_preference_resolution_blocks_known_identity_when_policy_disallows_personalization() -> None:
+    """Service-layer resolver should fail closed when policy blocks personalization."""
+    request = PreferenceResolutionRequest(
+        preference_key="music_preference",
+        identity_state=PreferenceIdentityState.KNOWN,
+        confidence_band=ContinuityConfidenceBand.HIGH,
+        person_preference_value="person-choice",
+        person_room_exception_value="person-room-choice",
+        person_room_exception_enabled=True,
+        room_default_value="room-default",
+        household_default_value="household-default",
+        system_safe_value="system-safe",
+        personalization_policy_allowed=False,
+        personalization_policy_reason="privacy_opt_out",
+    )
+
+    result = services_module._resolve_preference_hierarchy(request)
+
+    assert result.identity_decision["personalization_allowed"] is False
+    assert result.identity_decision["policy_allowed"] is False
+    assert result.identity_decision["reason_code"] == "identity_policy_disallowed"
+    assert result.selected_tier.value == "room_default"
+    assert result.selected_value == "room-default"
+
+
+def test_preference_resolution_missing_room_default_falls_back_to_household_then_system() -> None:
+    """Service-layer resolver should retain safe fallback progression when room defaults are absent."""
+    household_result = services_module._resolve_preference_hierarchy(
+        PreferenceResolutionRequest(
+            preference_key="music_preference",
+            identity_state=PreferenceIdentityState.GUEST,
+            confidence_band=ContinuityConfidenceBand.HIGH,
+            person_preference_value="person-choice",
+            room_default_value=None,
+            household_default_value="household-default",
+            system_safe_value="system-safe",
+        )
+    )
+    system_result = services_module._resolve_preference_hierarchy(
+        PreferenceResolutionRequest(
+            preference_key="music_preference",
+            identity_state=PreferenceIdentityState.GUEST,
+            confidence_band=ContinuityConfidenceBand.HIGH,
+            person_preference_value="person-choice",
+            room_default_value=None,
+            household_default_value=None,
+            system_safe_value="system-safe",
+        )
+    )
+
+    assert household_result.selected_tier.value == "household_default"
+    assert household_result.selected_value == "household-default"
+    assert system_result.selected_tier.value == "system_safe_default"
+    assert system_result.selected_value == "system-safe"
+
+
+def test_learning_policy_allows_known_identity_person_scope() -> None:
+    """Known high-confidence identity with policy permission should allow learning."""
+    outcome = services_module._evaluate_learning_policy(
+        LearningPolicyEvaluationRequest(
+            learning_key="preferred_genre",
+            ownership_scope=LearningOwnershipScope.PERSON,
+            identity_state=PreferenceIdentityState.KNOWN,
+            confidence_band=ContinuityConfidenceBand.HIGH,
+            learning_policy_enabled=True,
+            ownership_supported=True,
+            entity_eligible=True,
+            preference_eligible=True,
+            safety_restrictions_clear=True,
+            personalization_policy_allowed=True,
+            policy_reason="guardian_controls_satisfied",
+            metadata={"learning_source": "interaction"},
+        )
+    )
+
+    assert outcome.learning_allowed is True
+    assert outcome.denial_reason is None
+    assert outcome.ownership_scope.value == "person"
+    assert outcome.write_path.value == "async"
+    assert outcome.policy_decision["policy_name"] == "experience_continuity_learning_governance_ec_b_03"
+    assert outcome.explainability["storage_target"] == "person_profile_learning"
+
+
+@pytest.mark.parametrize(
+    ("identity_state", "expected_reason"),
+    [
+        (PreferenceIdentityState.GUEST, "guest_identity_blocked"),
+        (PreferenceIdentityState.UNKNOWN, "unknown_identity_blocked"),
+        (PreferenceIdentityState.UNAVAILABLE, "unavailable_identity_blocked"),
+        (PreferenceIdentityState.LOW_CONFIDENCE, "low_confidence_identity_blocked"),
+    ],
+)
+def test_learning_policy_denies_identity_fail_closed_states(
+    identity_state: PreferenceIdentityState,
+    expected_reason: str,
+) -> None:
+    """Guest, unknown, unavailable, and low-confidence states must fail closed."""
+    outcome = services_module._evaluate_learning_policy(
+        LearningPolicyEvaluationRequest(
+            learning_key="preferred_artist",
+            ownership_scope=LearningOwnershipScope.PERSON,
+            identity_state=identity_state,
+            confidence_band=ContinuityConfidenceBand.HIGH,
+        )
+    )
+
+    assert outcome.learning_allowed is False
+    assert outcome.denial_reason == expected_reason
+    assert outcome.write_path.value == "none"
+
+
+def test_learning_policy_denies_when_policy_disabled() -> None:
+    """Learning policy disabled must deny writes while preserving explainability metadata."""
+    outcome = services_module._evaluate_learning_policy(
+        LearningPolicyEvaluationRequest(
+            learning_key="preferred_album",
+            ownership_scope=LearningOwnershipScope.PERSON,
+            identity_state=PreferenceIdentityState.KNOWN,
+            confidence_band=ContinuityConfidenceBand.HIGH,
+            learning_policy_enabled=False,
+        )
+    )
+
+    assert outcome.learning_allowed is False
+    assert outcome.denial_reason == "learning_policy_disabled"
+    assert outcome.explainability["write_disposition"] == "none"
+
+
+def test_learning_policy_denies_invalid_ownership_target() -> None:
+    """Unsupported ownership targets must be denied with deterministic policy reason."""
+    outcome = services_module._evaluate_learning_policy(
+        LearningPolicyEvaluationRequest(
+            learning_key="room_media_context",
+            ownership_scope=LearningOwnershipScope.ROOM,
+            identity_state=PreferenceIdentityState.KNOWN,
+            confidence_band=ContinuityConfidenceBand.HIGH,
+            ownership_supported=False,
+        )
+    )
+
+    assert outcome.learning_allowed is False
+    assert outcome.denial_reason == "unsupported_ownership_scope"
+
+
+def test_learning_policy_enforces_scope_specific_storage_targets() -> None:
+    """Learning explainability should preserve person, room, and household ownership targets."""
+    person = services_module._evaluate_learning_policy(
+        LearningPolicyEvaluationRequest(
+            learning_key="preferred_playlist",
+            ownership_scope=LearningOwnershipScope.PERSON,
+            identity_state=PreferenceIdentityState.KNOWN,
+            confidence_band=ContinuityConfidenceBand.HIGH,
+        )
+    )
+    room = services_module._evaluate_learning_policy(
+        LearningPolicyEvaluationRequest(
+            learning_key="room_media_context",
+            ownership_scope=LearningOwnershipScope.ROOM,
+            identity_state=PreferenceIdentityState.UNAVAILABLE,
+            confidence_band=ContinuityConfidenceBand.UNKNOWN,
+            identity_sensitive_learning=False,
+        )
+    )
+    household = services_module._evaluate_learning_policy(
+        LearningPolicyEvaluationRequest(
+            learning_key="household_default_music",
+            ownership_scope=LearningOwnershipScope.HOUSEHOLD,
+            identity_state=PreferenceIdentityState.UNAVAILABLE,
+            confidence_band=ContinuityConfidenceBand.UNKNOWN,
+            identity_sensitive_learning=False,
+        )
+    )
+
+    assert person.learning_allowed is True
+    assert room.learning_allowed is True
+    assert household.learning_allowed is True
+    assert person.explainability["storage_target"] == "person_profile_learning"
+    assert room.explainability["storage_target"] == "room_config_learning"
+    assert household.explainability["storage_target"] == "household_default_learning"
+
+
+def test_learning_policy_identity_sensitive_restriction_blocks_unknown_identity() -> None:
+    """Identity-sensitive learning must deny unknown identity when personalization context is required."""
+    outcome = services_module._evaluate_learning_policy(
+        LearningPolicyEvaluationRequest(
+            learning_key="preferred_genre",
+            ownership_scope=LearningOwnershipScope.PERSON,
+            identity_state=PreferenceIdentityState.UNKNOWN,
+            confidence_band=ContinuityConfidenceBand.HIGH,
+            identity_sensitive_learning=True,
+        )
+    )
+
+    assert outcome.learning_allowed is False
+    assert outcome.denial_reason == "unknown_identity_blocked"
+
+
+def test_learning_policy_produces_reversibility_metadata() -> None:
+    """Allowed learning must provide rollback-supporting reversibility metadata."""
+    outcome = services_module._evaluate_learning_policy(
+        LearningPolicyEvaluationRequest(
+            learning_key="preferred_genre",
+            ownership_scope=LearningOwnershipScope.PERSON,
+            identity_state=PreferenceIdentityState.KNOWN,
+            confidence_band=ContinuityConfidenceBand.HIGH,
+            personalization_policy_allowed=True,
+            metadata={"learning_source": "execute"},
+        )
+    )
+
+    assert outcome.reversibility_metadata["learning_source"] == "execute"
+    assert outcome.reversibility_metadata["owner_scope"] == "person"
+    assert outcome.reversibility_metadata["policy_used"] == "experience_continuity_learning_governance_ec_b_03"
+    assert outcome.reversibility_metadata["rollback_supporting_metadata"] is True
+
+
+def test_learning_write_enqueue_is_non_blocking_and_async() -> None:
+    """Learning writes should be enqueued asynchronously without blocking interaction flow."""
+
+    class _TaskStub:
+        def add_done_callback(self, callback):
+            self._callback = callback
+
+    class _FakeHass:
+        def __init__(self) -> None:
+            self.enqueued_count = 0
+
+        def async_create_task(self, coro):
+            self.enqueued_count += 1
+            coro.close()
+            return _TaskStub()
+
+    hass = _FakeHass()
+    response = services_module._enqueue_learning_write(
+        hass,
+        LearningWriteRequest(
+            learning_event_id="evt-001",
+            learning_key="preferred_genre",
+            ownership_scope=LearningOwnershipScope.PERSON,
+            owner_ref="person.tom",
+            learned_value="jazz",
+            reason_code="explicit_user_feedback",
+            policy_used="experience_continuity_learning_governance_ec_b_03",
+            reversibility_metadata={"owner_scope": "person", "timestamp": "2026-07-22T00:00:00Z"},
+            explainability={"learning_allowed": True, "storage_target": "person_profile_learning"},
+        ),
+    )
+
+    assert hass.enqueued_count == 1
+    assert response["write_path"] == "async"
+    assert response["write_enqueued"] is True
+
+
+def test_learning_write_failure_does_not_interrupt_flow() -> None:
+    """Asynchronous write failures should not break the immediate interaction response path."""
+
+    class _FailureTask:
+        def add_done_callback(self, callback):
+            callback(self)
+
+        def result(self):
+            raise RuntimeError("write_failure")
+
+    class _FakeHass:
+        def async_create_task(self, coro):
+            coro.close()
+            return _FailureTask()
+
+    response = services_module._enqueue_learning_write(
+        _FakeHass(),
+        LearningWriteRequest(
+            learning_event_id="evt-002",
+            learning_key="room_media_context",
+            ownership_scope=LearningOwnershipScope.ROOM,
+            owner_ref="area.kitchen",
+            learned_value={"last_media": "playlist:123"},
+            reason_code="continuity_capture",
+            policy_used="experience_continuity_learning_governance_ec_b_03",
+            reversibility_metadata={"owner_scope": "room", "timestamp": "2026-07-22T00:00:00Z"},
+            explainability={"learning_allowed": True, "storage_target": "room_config_learning"},
+        ),
+    )
+
+    assert response["write_enqueued"] is True
+    assert response["queue_ref"] == "learning_queue:evt-002"
+
+
 async def test_runtime_person_context_resolves_via_voice_profile_reference(
     hass: HomeAssistant,
     setup_integration,
@@ -2003,6 +3552,12 @@ async def test_runtime_person_context_fails_closed_for_missing_profile(
     assert runtime_person_context["fail_closed"] is True
     assert routing["routing_enabled"] is False
     assert routing["reason_code"] == "person_profile_not_configured"
+    assert routing["refusal_reason"] == "person_profile_not_configured"
+    assert routing["refusal_category"] == "configuration_unavailable"
+    assert routing["capability_requested"] == "person_aware_productivity_routing"
+    assert routing["capability_available"] is False
+    assert routing["capability_configured"] is False
+    assert routing["person_policy_evaluated"] is True
     assert routing["domain_routing"]["email"]["enabled"] is False
     assert routing["domain_routing"]["calendar"]["enabled"] is False
     assert routing["domain_routing"]["shopping"]["enabled"] is False
@@ -2055,6 +3610,8 @@ async def test_runtime_person_context_reports_partial_states_safely(
     assert runtime_person_context["policy"]["available"] is True
     assert routing["routing_enabled"] is False
     assert routing["reason_code"] == "presence_bindings_missing"
+    assert routing["refusal_category"] == "configuration_unavailable"
+    assert routing["person_policy_evaluated"] is True
     assert routing["domain_routing"]["email"]["enabled"] is False
     assert routing["domain_routing"]["calendar"]["enabled"] is False
     assert routing["domain_routing"]["task"]["enabled"] is False
@@ -3255,6 +4812,2851 @@ async def test_execute_records_success_activity(
     unsub()
 
 
+def test_lighting_stability_threshold_accepts_stable_level() -> None:
+    """A state older than the stability threshold is eligible for stable learning capture."""
+
+    class _StateStub:
+        def __init__(self) -> None:
+            self.state = "on"
+            self.attributes = {"brightness": 128}
+            self.last_changed = datetime.now(timezone.utc) - timedelta(seconds=45)
+
+    result = services_module._evaluate_entity_stability_for_usual_learning(
+        _StateStub(),
+        stability_seconds=30,
+    )
+
+    assert result["stable"] is True
+    assert result["required_seconds"] == 30
+    assert result["observed_seconds"] >= 45
+
+
+def test_lighting_stability_threshold_rejects_unstable_level() -> None:
+    """A recent state change should not satisfy learned-usual stability capture."""
+
+    class _StateStub:
+        def __init__(self) -> None:
+            self.state = "on"
+            self.attributes = {"brightness": 191}
+            self.last_changed = datetime.now(timezone.utc) - timedelta(seconds=5)
+
+    result = services_module._evaluate_entity_stability_for_usual_learning(
+        _StateStub(),
+        stability_seconds=30,
+    )
+
+    assert result["stable"] is False
+    assert result["reason"] == "stable_threshold_not_met"
+
+
+async def test_execute_turn_on_lights_applies_per_entity_learned_usual_levels(
+    hass: HomeAssistant,
+    setup_integration,
+    monkeypatch,
+) -> None:
+    """Turn on lights should learn and apply distinct per-entity usual brightness levels."""
+    area = ar.async_get(hass).async_create(name="Living Room")
+    await hass.services.async_call(
+        DOMAIN,
+        "update_room_config",
+        {
+            "area_id": area.id,
+            "light_entity_ids": ["light.living_room_lamp_a", "light.living_room_lamp_b"],
+        },
+        blocking=True,
+    )
+
+    hass.states.async_set("light.living_room_lamp_a", "on", {"brightness": 89})
+    hass.states.async_set("light.living_room_lamp_b", "on", {"brightness": 179})
+
+    def _stable(_state_obj, *, stability_seconds: int) -> dict[str, object]:
+        return {
+            "stable": True,
+            "observed_seconds": max(45, stability_seconds),
+            "required_seconds": stability_seconds,
+            "reason": "stable_threshold_satisfied",
+        }
+
+    monkeypatch.setattr(services_module, "_evaluate_entity_stability_for_usual_learning", _stable)
+
+    light_calls: list[dict[str, object]] = []
+
+    if hass.services.has_service("light", "turn_on"):
+        hass.services.async_remove("light", "turn_on")
+
+    async def _turn_on(call):
+        light_calls.append(dict(call.data))
+
+    hass.services.async_register("light", "turn_on", _turn_on)
+
+    result = await hass.services.async_call(
+        DOMAIN,
+        "execute",
+        {
+            "target": "turn on lights",
+            "area_id": area.id,
+            "intent_class": "home_control",
+        },
+        blocking=True,
+        return_response=True,
+    )
+
+    outcomes = result["learned_usual_lighting"]["entity_outcomes"]
+    by_entity = {item["entity_id"]: item for item in outcomes}
+
+    assert result["resolved_target"] == "usual_lighting:lights"
+    assert len(light_calls) == 2
+    assert by_entity["light.living_room_lamp_a"]["applied_brightness_pct"] == 35
+    assert by_entity["light.living_room_lamp_b"]["applied_brightness_pct"] == 70
+    assert by_entity["light.living_room_lamp_a"]["used_learned_level"] is True
+    assert by_entity["light.living_room_lamp_b"]["used_learned_level"] is True
+
+    state = await ConciergeStorage(hass).async_load_state()
+    stored_a = state.usual_states["usual_lighting::" + area.id + "::light.living_room_lamp_a"]
+    stored_b = state.usual_states["usual_lighting::" + area.id + "::light.living_room_lamp_b"]
+    assert stored_a.values["brightness_pct"] == 35
+    assert stored_b.values["brightness_pct"] == 70
+
+
+async def test_execute_turn_on_lamps_uses_configured_membership_only(
+    hass: HomeAssistant,
+    setup_integration,
+    monkeypatch,
+) -> None:
+    """Turn on lamps should only target configured room lamp membership, never inferred entities."""
+    area = ar.async_get(hass).async_create(name="Den")
+    await hass.services.async_call(
+        DOMAIN,
+        "update_room_config",
+        {
+            "area_id": area.id,
+            "lamp_entity_ids": ["light.den_configured_lamp"],
+        },
+        blocking=True,
+    )
+
+    hass.states.async_set("light.den_configured_lamp", "on", {"brightness": 128})
+    hass.states.async_set("light.den_unconfigured_lamp", "on", {"brightness": 200})
+
+    def _stable(_state_obj, *, stability_seconds: int) -> dict[str, object]:
+        return {
+            "stable": True,
+            "observed_seconds": max(60, stability_seconds),
+            "required_seconds": stability_seconds,
+            "reason": "stable_threshold_satisfied",
+        }
+
+    monkeypatch.setattr(services_module, "_evaluate_entity_stability_for_usual_learning", _stable)
+
+    light_calls: list[dict[str, object]] = []
+    if hass.services.has_service("light", "turn_on"):
+        hass.services.async_remove("light", "turn_on")
+
+    async def _turn_on(call):
+        light_calls.append(dict(call.data))
+
+    hass.services.async_register("light", "turn_on", _turn_on)
+
+    result = await hass.services.async_call(
+        DOMAIN,
+        "execute",
+        {
+            "target": "turn on lamps",
+            "area_id": area.id,
+            "intent_class": "home_control",
+        },
+        blocking=True,
+        return_response=True,
+    )
+
+    assert result["resolved_target"] == "usual_lighting:lamps"
+    assert [item["entity_id"] for item in light_calls] == ["light.den_configured_lamp"]
+
+
+async def test_execute_resume_lights_fallback_missing_learned_value(
+    hass: HomeAssistant,
+    setup_integration,
+    monkeypatch,
+) -> None:
+    """Resume lights should fall back safely when no learned value exists."""
+    area = ar.async_get(hass).async_create(name="Bedroom")
+    await hass.services.async_call(
+        DOMAIN,
+        "update_room_config",
+        {
+            "area_id": area.id,
+            "light_entity_ids": ["light.bedroom_overhead"],
+        },
+        blocking=True,
+    )
+
+    hass.states.async_set("light.bedroom_overhead", "off", {})
+
+    def _unstable(_state_obj, *, stability_seconds: int) -> dict[str, object]:
+        return {
+            "stable": False,
+            "observed_seconds": 1,
+            "required_seconds": stability_seconds,
+            "reason": "stable_threshold_not_met",
+        }
+
+    monkeypatch.setattr(services_module, "_evaluate_entity_stability_for_usual_learning", _unstable)
+
+    light_calls: list[dict[str, object]] = []
+    if hass.services.has_service("light", "turn_on"):
+        hass.services.async_remove("light", "turn_on")
+
+    async def _turn_on(call):
+        light_calls.append(dict(call.data))
+
+    hass.services.async_register("light", "turn_on", _turn_on)
+
+    result = await hass.services.async_call(
+        DOMAIN,
+        "execute",
+        {
+            "target": "resume lights",
+            "area_id": area.id,
+            "intent_class": "home_control",
+        },
+        blocking=True,
+        return_response=True,
+    )
+
+    outcome = result["learned_usual_lighting"]["entity_outcomes"][0]
+    assert light_calls[0]["brightness_pct"] == 50
+    assert result["learned_usual_lighting"]["fallback_used"] is True
+    assert result["learned_usual_lighting"]["fallback_path"] == "entity_fallback_default"
+    assert result["learned_usual_lighting"]["deterministic_default"] == "per_entity_fallback"
+    assert outcome["fallback_used"] is True
+    assert outcome["fallback_path"] == "entity_fallback_default"
+    assert outcome["fallback_reason"] == "learned_value_missing"
+    assert outcome["fallback_source"] == "safe_default_brightness"
+    assert outcome["deterministic_default"] == "safe_default_brightness"
+
+
+async def test_execute_usual_lights_fallback_when_learning_denied(
+    hass: HomeAssistant,
+    setup_integration,
+    monkeypatch,
+) -> None:
+    """Usual lights should use deterministic fallback when learning policy denies capture."""
+    area = ar.async_get(hass).async_create(name="Kitchen")
+    await hass.services.async_call(
+        DOMAIN,
+        "update_room_config",
+        {
+            "area_id": area.id,
+            "light_entity_ids": ["light.kitchen_overhead"],
+        },
+        blocking=True,
+    )
+    storage = ConciergeStorage(hass)
+    state = await storage.async_load_state()
+    state.global_features["experience_continuity_lighting_learning_policy"] = {
+        "enabled": False,
+        "options": {"stability_seconds": 30},
+    }
+    await storage.async_save_state(state)
+
+    hass.states.async_set("light.kitchen_overhead", "on", {"brightness": 153})
+
+    def _stable(_state_obj, *, stability_seconds: int) -> dict[str, object]:
+        return {
+            "stable": True,
+            "observed_seconds": 90,
+            "required_seconds": stability_seconds,
+            "reason": "stable_threshold_satisfied",
+        }
+
+    monkeypatch.setattr(services_module, "_evaluate_entity_stability_for_usual_learning", _stable)
+
+    light_calls: list[dict[str, object]] = []
+    if hass.services.has_service("light", "turn_on"):
+        hass.services.async_remove("light", "turn_on")
+
+    async def _turn_on(call):
+        light_calls.append(dict(call.data))
+
+    hass.services.async_register("light", "turn_on", _turn_on)
+
+    result = await hass.services.async_call(
+        DOMAIN,
+        "execute",
+        {
+            "target": "usual lights",
+            "area_id": area.id,
+            "intent_class": "home_control",
+        },
+        blocking=True,
+        return_response=True,
+    )
+
+    outcome = result["learned_usual_lighting"]["entity_outcomes"][0]
+    assert light_calls[0]["brightness_pct"] == 60
+    assert outcome["fallback_used"] is True
+    assert outcome["fallback_path"] == "entity_fallback_default"
+    assert outcome["fallback_reason"] == "learned_value_denied"
+    assert outcome["fallback_source"] == "current_state_brightness"
+    assert outcome["deterministic_default"] == "current_state_brightness"
+
+
+async def test_execute_usual_lights_fallback_unavailable_learned_value(
+    hass: HomeAssistant,
+    setup_integration,
+    monkeypatch,
+) -> None:
+    """Unavailable learned payloads should fall back safely and remain explainable."""
+    area = ar.async_get(hass).async_create(name="Office")
+    await hass.services.async_call(
+        DOMAIN,
+        "update_room_config",
+        {
+            "area_id": area.id,
+            "light_entity_ids": ["light.office_overhead"],
+        },
+        blocking=True,
+    )
+
+    storage = ConciergeStorage(hass)
+    await storage.async_upsert_usual_state(
+        UsualState(
+            state_id=f"usual_lighting::{area.id}::light.office_overhead",
+            scope="entity",
+            scope_ref="light.office_overhead",
+            basis=UsualStateBasis.LEARNED,
+            updated_at=datetime.now(timezone.utc).isoformat(),
+            values={"brightness_pct": 0, "area_id": area.id},
+            metadata={"policy_name": "test"},
+        )
+    )
+    hass.states.async_set("light.office_overhead", "on", {"brightness": 102})
+
+    def _unstable(_state_obj, *, stability_seconds: int) -> dict[str, object]:
+        return {
+            "stable": False,
+            "observed_seconds": 2,
+            "required_seconds": stability_seconds,
+            "reason": "stable_threshold_not_met",
+        }
+
+    monkeypatch.setattr(services_module, "_evaluate_entity_stability_for_usual_learning", _unstable)
+
+    light_calls: list[dict[str, object]] = []
+    if hass.services.has_service("light", "turn_on"):
+        hass.services.async_remove("light", "turn_on")
+
+    async def _turn_on(call):
+        light_calls.append(dict(call.data))
+
+    hass.services.async_register("light", "turn_on", _turn_on)
+
+    result = await hass.services.async_call(
+        DOMAIN,
+        "execute",
+        {
+            "target": "usual lights",
+            "area_id": area.id,
+            "intent_class": "home_control",
+        },
+        blocking=True,
+        return_response=True,
+    )
+
+    outcome = result["learned_usual_lighting"]["entity_outcomes"][0]
+    assert light_calls[0]["brightness_pct"] == 40
+    assert outcome["fallback_reason"] == "learned_value_unavailable"
+    assert outcome["fallback_source"] == "current_state_brightness"
+    assert outcome["deterministic_default"] == "current_state_brightness"
+
+
+async def test_execute_resume_lights_applies_learned_value_when_available(
+    hass: HomeAssistant,
+    setup_integration,
+    monkeypatch,
+) -> None:
+    """Resume lights should apply persisted learned usual values when present."""
+    area = ar.async_get(hass).async_create(name="Media Room")
+    await hass.services.async_call(
+        DOMAIN,
+        "update_room_config",
+        {
+            "area_id": area.id,
+            "light_entity_ids": ["light.media_room_main"],
+        },
+        blocking=True,
+    )
+
+    storage = ConciergeStorage(hass)
+    await storage.async_upsert_usual_state(
+        UsualState(
+            state_id=f"usual_lighting::{area.id}::light.media_room_main",
+            scope="entity",
+            scope_ref="light.media_room_main",
+            basis=UsualStateBasis.LEARNED,
+            updated_at=datetime.now(timezone.utc).isoformat(),
+            values={"brightness_pct": 72, "area_id": area.id},
+            metadata={"policy_name": "experience_continuity_learned_lighting_ec_c_01"},
+        )
+    )
+    hass.states.async_set("light.media_room_main", "on", {"brightness": 50})
+
+    def _unstable(_state_obj, *, stability_seconds: int) -> dict[str, object]:
+        return {
+            "stable": False,
+            "observed_seconds": 2,
+            "required_seconds": stability_seconds,
+            "reason": "stable_threshold_not_met",
+        }
+
+    monkeypatch.setattr(services_module, "_evaluate_entity_stability_for_usual_learning", _unstable)
+
+    calls: list[dict[str, object]] = []
+    if hass.services.has_service("light", "turn_on"):
+        hass.services.async_remove("light", "turn_on")
+
+    async def _turn_on(call):
+        calls.append(dict(call.data))
+
+    hass.services.async_register("light", "turn_on", _turn_on)
+
+    result = await hass.services.async_call(
+        DOMAIN,
+        "execute",
+        {"target": "resume lights", "area_id": area.id, "intent_class": "home_control"},
+        blocking=True,
+        return_response=True,
+    )
+
+    outcome = result["learned_usual_lighting"]["entity_outcomes"][0]
+    assert calls[0]["brightness_pct"] == 72
+    assert outcome["used_learned_level"] is True
+    assert outcome["fallback_used"] is False
+
+
+async def test_execute_usual_lights_applies_learned_value_when_available(
+    hass: HomeAssistant,
+    setup_integration,
+    monkeypatch,
+) -> None:
+    """Usual lights should apply persisted learned usual values when present."""
+    area = ar.async_get(hass).async_create(name="Library")
+    await hass.services.async_call(
+        DOMAIN,
+        "update_room_config",
+        {
+            "area_id": area.id,
+            "light_entity_ids": ["light.library_main"],
+        },
+        blocking=True,
+    )
+
+    storage = ConciergeStorage(hass)
+    await storage.async_upsert_usual_state(
+        UsualState(
+            state_id=f"usual_lighting::{area.id}::light.library_main",
+            scope="entity",
+            scope_ref="light.library_main",
+            basis=UsualStateBasis.LEARNED,
+            updated_at=datetime.now(timezone.utc).isoformat(),
+            values={"brightness_pct": 61, "area_id": area.id},
+            metadata={"policy_name": "experience_continuity_learned_lighting_ec_c_01"},
+        )
+    )
+    hass.states.async_set("light.library_main", "on", {"brightness": 200})
+
+    def _unstable(_state_obj, *, stability_seconds: int) -> dict[str, object]:
+        return {
+            "stable": False,
+            "observed_seconds": 2,
+            "required_seconds": stability_seconds,
+            "reason": "stable_threshold_not_met",
+        }
+
+    monkeypatch.setattr(services_module, "_evaluate_entity_stability_for_usual_learning", _unstable)
+
+    calls: list[dict[str, object]] = []
+    if hass.services.has_service("light", "turn_on"):
+        hass.services.async_remove("light", "turn_on")
+
+    async def _turn_on(call):
+        calls.append(dict(call.data))
+
+    hass.services.async_register("light", "turn_on", _turn_on)
+
+    result = await hass.services.async_call(
+        DOMAIN,
+        "execute",
+        {"target": "usual lights", "area_id": area.id, "intent_class": "home_control"},
+        blocking=True,
+        return_response=True,
+    )
+
+    outcome = result["learned_usual_lighting"]["entity_outcomes"][0]
+    assert calls[0]["brightness_pct"] == 61
+    assert outcome["used_learned_level"] is True
+    assert outcome["fallback_used"] is False
+
+
+async def test_execute_room_aware_lighting_records_decision_reason_for_fallback(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """Degraded room-aware failures should emit deterministic decision reason metadata."""
+    area = ar.async_get(hass).async_create(name="Hall")
+    await hass.services.async_call(
+        DOMAIN,
+        "update_room_config",
+        {
+            "area_id": area.id,
+        },
+        blocking=True,
+    )
+
+    result = await hass.services.async_call(
+        DOMAIN,
+        "execute",
+        {"target": "turn on lights", "area_id": area.id, "intent_class": "home_control"},
+        blocking=True,
+        return_response=True,
+    )
+
+    learned = result["learned_usual_lighting"]
+    assert learned["fallback_used"] is True
+    assert learned["deterministic_default"] == "safe_noop"
+    assert learned["decision_reason"] == "configured_room_authority_validation"
+
+
+async def test_usual_state_and_operational_snapshot_remain_separate(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """Usual-state lighting memory should remain distinct from operational snapshot records."""
+    storage = ConciergeStorage(hass)
+    area_id = "area.test_room"
+    entity_id = "light.test_room_lamp"
+
+    await storage.async_upsert_usual_state(
+        UsualState(
+            state_id=f"usual_lighting::{area_id}::{entity_id}",
+            scope="entity",
+            scope_ref=entity_id,
+            basis=UsualStateBasis.LEARNED,
+            updated_at=datetime.now(timezone.utc).isoformat(),
+            values={"brightness_pct": 65, "area_id": area_id},
+            metadata={"policy_name": "experience_continuity_learned_lighting_ec_c_01"},
+        )
+    )
+    await storage.async_upsert_experience_snapshot(
+        ExperienceSnapshot(
+            snapshot_id=f"opsnap::{entity_id}",
+            scope="entity",
+            scope_ref=entity_id,
+            captured_at=datetime.now(timezone.utc).isoformat(),
+            event_id="evt-op-1",
+            state={"brightness_pct": 15},
+            metadata={"snapshot_kind": "operational"},
+        )
+    )
+
+    state = await storage.async_load_state()
+    usual = state.usual_states[f"usual_lighting::{area_id}::{entity_id}"]
+    snapshot = state.experience_snapshots[f"opsnap::{entity_id}"]
+
+    assert usual.values["brightness_pct"] == 65
+    assert snapshot.state["brightness_pct"] == 15
+
+
+async def test_execute_room_alias_vocabulary_routes_to_room_aware_lighting(
+    hass: HomeAssistant,
+    setup_integration,
+    monkeypatch,
+) -> None:
+    """Room-configured alias vocabulary should route to room-aware configured lighting capability."""
+    area = ar.async_get(hass).async_create(name="Family Room")
+    await hass.services.async_call(
+        DOMAIN,
+        "update_room_config",
+        {
+            "area_id": area.id,
+            "aliases": {"ambient lights": "turn on lights"},
+            "light_entity_ids": ["light.family_room_main"],
+        },
+        blocking=True,
+    )
+
+    hass.states.async_set("light.family_room_main", "on", {"brightness": 166})
+
+    def _stable(_state_obj, *, stability_seconds: int) -> dict[str, object]:
+        return {
+            "stable": True,
+            "observed_seconds": max(60, stability_seconds),
+            "required_seconds": stability_seconds,
+            "reason": "stable_threshold_satisfied",
+        }
+
+    monkeypatch.setattr(services_module, "_evaluate_entity_stability_for_usual_learning", _stable)
+
+    calls: list[dict[str, object]] = []
+    if hass.services.has_service("light", "turn_on"):
+        hass.services.async_remove("light", "turn_on")
+
+    async def _turn_on(call):
+        calls.append(dict(call.data))
+
+    hass.services.async_register("light", "turn_on", _turn_on)
+
+    result = await hass.services.async_call(
+        DOMAIN,
+        "execute",
+        {
+            "target": "ambient lights",
+            "area_id": area.id,
+            "intent_class": "home_control",
+        },
+        blocking=True,
+        return_response=True,
+    )
+
+    assert result["executed"] is True
+    assert result["resolved_target"] == "usual_lighting:lights"
+    learned = result["learned_usual_lighting"]
+    assert learned["command_kind"] == "lights"
+    assert learned["room_source"] == "room_configuration"
+    assert learned["capability_source"] == "configured_room_capability_mapping"
+    assert learned["membership_source"] == "room_configuration_membership"
+    assert learned["targeted_entities"] == ["light.family_room_main"]
+    assert [item["entity_id"] for item in calls] == ["light.family_room_main"]
+
+
+async def test_execute_room_aware_lighting_capability_mapping_controls_targeting(
+    hass: HomeAssistant,
+    setup_integration,
+    monkeypatch,
+) -> None:
+    """Configured capability membership should deterministically select lamp vs light targets."""
+    area = ar.async_get(hass).async_create(name="Kitchen")
+    await hass.services.async_call(
+        DOMAIN,
+        "update_room_config",
+        {
+            "area_id": area.id,
+            "lamp_entity_ids": ["light.kitchen_lamp"],
+            "light_entity_ids": ["light.kitchen_ceiling"],
+        },
+        blocking=True,
+    )
+
+    hass.states.async_set("light.kitchen_lamp", "on", {"brightness": 140})
+    hass.states.async_set("light.kitchen_ceiling", "on", {"brightness": 191})
+
+    def _stable(_state_obj, *, stability_seconds: int) -> dict[str, object]:
+        return {
+            "stable": True,
+            "observed_seconds": max(60, stability_seconds),
+            "required_seconds": stability_seconds,
+            "reason": "stable_threshold_satisfied",
+        }
+
+    monkeypatch.setattr(services_module, "_evaluate_entity_stability_for_usual_learning", _stable)
+
+    calls: list[dict[str, object]] = []
+    if hass.services.has_service("light", "turn_on"):
+        hass.services.async_remove("light", "turn_on")
+
+    async def _turn_on(call):
+        calls.append(dict(call.data))
+
+    hass.services.async_register("light", "turn_on", _turn_on)
+
+    lamps_result = await hass.services.async_call(
+        DOMAIN,
+        "execute",
+        {"target": "turn on lamps", "area_id": area.id, "intent_class": "home_control"},
+        blocking=True,
+        return_response=True,
+    )
+    lights_result = await hass.services.async_call(
+        DOMAIN,
+        "execute",
+        {"target": "turn on lights", "area_id": area.id, "intent_class": "home_control"},
+        blocking=True,
+        return_response=True,
+    )
+
+    assert lamps_result["learned_usual_lighting"]["targeted_entities"] == ["light.kitchen_lamp"]
+    assert lights_result["learned_usual_lighting"]["targeted_entities"] == ["light.kitchen_ceiling"]
+    assert lamps_result["execution_outcome_category"] == "SILENCE_SUCCESS"
+    assert lamps_result["silence_as_success"] is True
+    assert lamps_result["response_required"] is False
+    assert lamps_result["response_generated"] is False
+    assert lights_result["execution_outcome_category"] == "SILENCE_SUCCESS"
+    assert lights_result["silence_as_success"] is True
+    assert [item["entity_id"] for item in calls] == ["light.kitchen_lamp", "light.kitchen_ceiling"]
+
+
+async def test_execute_room_aware_lighting_fails_when_capability_mapping_missing(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """When room capability mapping is missing, execution should fail safely without discovery fallback."""
+    area = ar.async_get(hass).async_create(name="Entry")
+    await hass.services.async_call(
+        DOMAIN,
+        "update_room_config",
+        {
+            "area_id": area.id,
+            "light_entity_ids": ["light.entry_overhead"],
+        },
+        blocking=True,
+    )
+    hass.states.async_set("light.entry_overhead", "on", {"brightness": 140})
+    hass.states.async_set("light.entry_unconfigured", "on", {"brightness": 191})
+
+    calls: list[dict[str, object]] = []
+    if hass.services.has_service("light", "turn_on"):
+        hass.services.async_remove("light", "turn_on")
+
+    async def _turn_on(call):
+        calls.append(dict(call.data))
+
+    hass.services.async_register("light", "turn_on", _turn_on)
+
+    result = await hass.services.async_call(
+        DOMAIN,
+        "execute",
+        {"target": "turn on lamps", "area_id": area.id, "intent_class": "home_control"},
+        blocking=True,
+        return_response=True,
+    )
+
+    assert result["executed"] is False
+    assert result["execution_outcome_category"] == "REFUSAL_SUCCESS"
+    assert result["silence_as_success"] is False
+    assert result["response_required"] is True
+    assert result["response_generated"] is True
+    assert result["refusal_reason"] == "configured_capability_mapping_missing"
+    assert result["refusal_category"] == "capability_unavailable"
+    learned = result["learned_usual_lighting"]
+    assert learned["failure_reason"] == "configured_capability_mapping_missing"
+    assert learned["failure_condition"] == "configured_capability_mapping_missing"
+    assert learned["fallback_used"] is True
+    assert learned["fallback_path"] == "degraded_safe_failure"
+    assert learned["deterministic_default"] == "safe_noop"
+    assert learned["targeted_entities"] == []
+    assert calls == []
+
+
+async def test_execute_room_aware_lighting_fails_for_unavailable_configured_device(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """Unavailable configured entities should fail safely with explainable denial reason."""
+    area = ar.async_get(hass).async_create(name="Den")
+    await hass.services.async_call(
+        DOMAIN,
+        "update_room_config",
+        {
+            "area_id": area.id,
+            "light_entity_ids": ["light.den_overhead"],
+        },
+        blocking=True,
+    )
+    hass.states.async_set("light.den_overhead", "unavailable", {})
+
+    calls: list[dict[str, object]] = []
+    if hass.services.has_service("light", "turn_on"):
+        hass.services.async_remove("light", "turn_on")
+
+    async def _turn_on(call):
+        calls.append(dict(call.data))
+
+    hass.services.async_register("light", "turn_on", _turn_on)
+
+    result = await hass.services.async_call(
+        DOMAIN,
+        "execute",
+        {"target": "turn on lights", "area_id": area.id, "intent_class": "home_control"},
+        blocking=True,
+        return_response=True,
+    )
+
+    assert result["executed"] is False
+    learned = result["learned_usual_lighting"]
+    assert learned["failure_reason"] == "configured_device_unavailable"
+    assert learned["failure_condition"] == "configured_device_unavailable"
+    assert learned["deterministic_default"] == "safe_noop"
+    assert any(item["reason"] == "configured_device_unavailable" for item in learned["validation_results"])
+    assert calls == []
+
+
+async def test_execute_room_aware_lighting_fails_for_invalid_configured_entity(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """Invalid configured entity identifiers should fail safely without targeting unrelated entities."""
+    area = ar.async_get(hass).async_create(name="Office")
+    await hass.services.async_call(
+        DOMAIN,
+        "update_room_config",
+        {
+            "area_id": area.id,
+            "light_entity_ids": ["switch.office_lamp"],
+        },
+        blocking=True,
+    )
+
+    calls: list[dict[str, object]] = []
+    if hass.services.has_service("light", "turn_on"):
+        hass.services.async_remove("light", "turn_on")
+
+    async def _turn_on(call):
+        calls.append(dict(call.data))
+
+    hass.services.async_register("light", "turn_on", _turn_on)
+
+    result = await hass.services.async_call(
+        DOMAIN,
+        "execute",
+        {"target": "turn on lights", "area_id": area.id, "intent_class": "home_control"},
+        blocking=True,
+        return_response=True,
+    )
+
+    assert result["executed"] is False
+    learned = result["learned_usual_lighting"]
+    assert learned["failure_reason"] == "configured_entity_invalid"
+    assert learned["failure_condition"] == "configured_entity_invalid"
+    assert learned["deterministic_default"] == "safe_noop"
+    assert any(item["reason"] == "configured_entity_invalid" for item in learned["validation_results"])
+    assert calls == []
+
+
+async def test_execute_room_aware_lighting_excludes_unrelated_devices(
+    hass: HomeAssistant,
+    setup_integration,
+    monkeypatch,
+) -> None:
+    """Configured membership should exclude unrelated devices even when they exist and are available."""
+    area = ar.async_get(hass).async_create(name="Studio")
+    await hass.services.async_call(
+        DOMAIN,
+        "update_room_config",
+        {
+            "area_id": area.id,
+            "light_entity_ids": ["light.studio_main"],
+        },
+        blocking=True,
+    )
+
+    hass.states.async_set("light.studio_main", "on", {"brightness": 128})
+    hass.states.async_set("light.unrelated_room", "on", {"brightness": 200})
+
+    def _stable(_state_obj, *, stability_seconds: int) -> dict[str, object]:
+        return {
+            "stable": True,
+            "observed_seconds": max(45, stability_seconds),
+            "required_seconds": stability_seconds,
+            "reason": "stable_threshold_satisfied",
+        }
+
+    monkeypatch.setattr(services_module, "_evaluate_entity_stability_for_usual_learning", _stable)
+
+    calls: list[dict[str, object]] = []
+    if hass.services.has_service("light", "turn_on"):
+        hass.services.async_remove("light", "turn_on")
+
+    async def _turn_on(call):
+        calls.append(dict(call.data))
+
+    hass.services.async_register("light", "turn_on", _turn_on)
+
+    result = await hass.services.async_call(
+        DOMAIN,
+        "execute",
+        {"target": "turn on lights", "area_id": area.id, "intent_class": "home_control"},
+        blocking=True,
+        return_response=True,
+    )
+
+    assert result["executed"] is True
+    assert [item["entity_id"] for item in calls] == ["light.studio_main"]
+    assert result["learned_usual_lighting"]["targeted_entities"] == ["light.studio_main"]
+
+
+async def test_execute_room_aware_lighting_does_not_infer_runtime_replacement_membership(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """When room mapping is empty, runtime entity presence should not be used as replacement membership."""
+    area = ar.async_get(hass).async_create(name="Hall")
+    await hass.services.async_call(
+        DOMAIN,
+        "update_room_config",
+        {
+            "area_id": area.id,
+        },
+        blocking=True,
+    )
+    hass.states.async_set("light.hall_runtime_discovered", "on", {"brightness": 153})
+
+    calls: list[dict[str, object]] = []
+    if hass.services.has_service("light", "turn_on"):
+        hass.services.async_remove("light", "turn_on")
+
+    async def _turn_on(call):
+        calls.append(dict(call.data))
+
+    hass.services.async_register("light", "turn_on", _turn_on)
+
+    result = await hass.services.async_call(
+        DOMAIN,
+        "execute",
+        {"target": "turn on lights", "area_id": area.id, "intent_class": "home_control"},
+        blocking=True,
+        return_response=True,
+    )
+
+    assert result["executed"] is False
+    learned = result["learned_usual_lighting"]
+    assert learned["failure_reason"] == "configured_capability_mapping_missing"
+    assert learned["fallback_path"] == "degraded_safe_failure"
+    assert learned["targeted_entities"] == []
+    assert calls == []
+
+
+async def test_execute_room_aware_lighting_fails_when_room_configuration_missing(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """Room-aware commands should fail safely when room configuration does not exist."""
+    area = ar.async_get(hass).async_create(name="Unconfigured Room")
+
+    calls: list[dict[str, object]] = []
+    if hass.services.has_service("light", "turn_on"):
+        hass.services.async_remove("light", "turn_on")
+
+    async def _turn_on(call):
+        calls.append(dict(call.data))
+
+    hass.services.async_register("light", "turn_on", _turn_on)
+
+    result = await hass.services.async_call(
+        DOMAIN,
+        "execute",
+        {"target": "turn on lights", "area_id": area.id, "intent_class": "home_control"},
+        blocking=True,
+        return_response=True,
+    )
+
+    learned = result["learned_usual_lighting"]
+    assert result["executed"] is False
+    assert learned["failure_reason"] == "room_configuration_missing"
+    assert learned["failure_condition"] == "room_configuration_missing"
+    assert learned["fallback_used"] is True
+    assert learned["fallback_path"] == "degraded_safe_failure"
+    assert learned["deterministic_default"] == "safe_noop"
+    assert calls == []
+
+
+async def test_execute_room_aware_lighting_fails_for_unsupported_device_capability(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """Configured entities without brightness support should fail safely with deterministic no-op."""
+    area = ar.async_get(hass).async_create(name="Porch")
+    await hass.services.async_call(
+        DOMAIN,
+        "update_room_config",
+        {
+            "area_id": area.id,
+            "light_entity_ids": ["light.porch_binary"],
+        },
+        blocking=True,
+    )
+    hass.states.async_set("light.porch_binary", "on", {"supported_color_modes": ["onoff"]})
+
+    calls: list[dict[str, object]] = []
+    if hass.services.has_service("light", "turn_on"):
+        hass.services.async_remove("light", "turn_on")
+
+    async def _turn_on(call):
+        calls.append(dict(call.data))
+
+    hass.services.async_register("light", "turn_on", _turn_on)
+
+    result = await hass.services.async_call(
+        DOMAIN,
+        "execute",
+        {"target": "turn on lights", "area_id": area.id, "intent_class": "home_control"},
+        blocking=True,
+        return_response=True,
+    )
+
+    learned = result["learned_usual_lighting"]
+    assert result["executed"] is False
+    assert learned["failure_reason"] == "unsupported_device_capability"
+    assert learned["failure_condition"] == "unsupported_device_capability"
+    assert learned["deterministic_default"] == "safe_noop"
+    assert any(item["reason"] == "unsupported_device_capability" for item in learned["validation_results"])
+    assert calls == []
+
+
+async def test_execute_room_aware_lighting_fails_when_command_not_supported_by_configured_capability(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """Lighting command should fail safely when configured room capability does not support command type."""
+    area = ar.async_get(hass).async_create(name="Entry")
+    await hass.services.async_call(
+        DOMAIN,
+        "update_room_config",
+        {
+            "area_id": area.id,
+            "light_entity_ids": ["light.entry_overhead"],
+        },
+        blocking=True,
+    )
+    hass.states.async_set("light.entry_overhead", "on", {"brightness": 140})
+
+    calls: list[dict[str, object]] = []
+    if hass.services.has_service("light", "turn_on"):
+        hass.services.async_remove("light", "turn_on")
+
+    async def _turn_on(call):
+        calls.append(dict(call.data))
+
+    hass.services.async_register("light", "turn_on", _turn_on)
+
+    result = await hass.services.async_call(
+        DOMAIN,
+        "execute",
+        {"target": "turn on lamps", "area_id": area.id, "intent_class": "home_control"},
+        blocking=True,
+        return_response=True,
+    )
+
+    learned = result["learned_usual_lighting"]
+    assert result["executed"] is False
+    assert learned["failure_reason"] == "lighting_command_not_supported_by_configured_room_capability"
+    assert learned["fallback_path"] == "degraded_safe_failure"
+    assert learned["deterministic_default"] == "safe_command_rejection"
+    assert calls == []
+
+
+async def test_execute_room_aware_lighting_fails_when_lighting_command_kind_not_supported(
+    hass: HomeAssistant,
+    setup_integration,
+    monkeypatch,
+) -> None:
+    """Unsupported room-aware lighting command kinds should be rejected deterministically."""
+    area = ar.async_get(hass).async_create(name="Kitchen")
+    await hass.services.async_call(
+        DOMAIN,
+        "update_room_config",
+        {
+            "area_id": area.id,
+            "light_entity_ids": ["light.kitchen_ceiling"],
+        },
+        blocking=True,
+    )
+
+    monkeypatch.setattr(
+        services_module,
+        "_classify_usual_lighting_command",
+        lambda _target: "color_temperature_restore",
+    )
+
+    calls: list[dict[str, object]] = []
+    if hass.services.has_service("light", "turn_on"):
+        hass.services.async_remove("light", "turn_on")
+
+    async def _turn_on(call):
+        calls.append(dict(call.data))
+
+    hass.services.async_register("light", "turn_on", _turn_on)
+
+    result = await hass.services.async_call(
+        DOMAIN,
+        "execute",
+        {"target": "turn on lights", "area_id": area.id, "intent_class": "home_control"},
+        blocking=True,
+        return_response=True,
+    )
+
+    learned = result["learned_usual_lighting"]
+    assert result["executed"] is False
+    assert learned["failure_reason"] == "lighting_command_not_supported"
+    assert learned["deterministic_default"] == "safe_command_rejection"
+    assert calls == []
+
+
+async def test_execute_room_aware_lighting_fails_when_no_eligible_targets(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """No eligible targets after validation should produce deterministic no-op failure."""
+    area = ar.async_get(hass).async_create(name="Loft")
+    await hass.services.async_call(
+        DOMAIN,
+        "update_room_config",
+        {
+            "area_id": area.id,
+            "light_entity_ids": ["switch.invalid_member", "light.missing_member"],
+        },
+        blocking=True,
+    )
+
+    calls: list[dict[str, object]] = []
+    if hass.services.has_service("light", "turn_on"):
+        hass.services.async_remove("light", "turn_on")
+
+    async def _turn_on(call):
+        calls.append(dict(call.data))
+
+    hass.services.async_register("light", "turn_on", _turn_on)
+
+    result = await hass.services.async_call(
+        DOMAIN,
+        "execute",
+        {"target": "turn on lights", "area_id": area.id, "intent_class": "home_control"},
+        blocking=True,
+        return_response=True,
+    )
+
+    learned = result["learned_usual_lighting"]
+    assert result["executed"] is False
+    assert learned["failure_reason"] == "no_eligible_lighting_targets"
+    assert learned["deterministic_default"] == "safe_noop"
+    assert calls == []
+
+
+async def test_room_audio_capture_learns_stable_music_duck_and_tts_channels(
+    hass: HomeAssistant,
+    setup_integration,
+    monkeypatch,
+) -> None:
+    """Stable room speaker volume should be learned independently for music, duck, and TTS channels."""
+    area = ar.async_get(hass).async_create(name="Media Room")
+    await hass.services.async_call(
+        DOMAIN,
+        "update_room_config",
+        {
+            "area_id": area.id,
+            "media_player_entity_ids": ["media_player.media_room_main"],
+        },
+        blocking=True,
+    )
+    hass.states.async_set("media_player.media_room_main", "playing", {"volume_level": 0.41})
+
+    monkeypatch.setattr(
+        services_module,
+        "_evaluate_entity_stability_for_room_audio_learning",
+        lambda _state_obj, *, stability_seconds: {
+            "stable": True,
+            "observed_seconds": stability_seconds + 60,
+            "required_seconds": stability_seconds,
+            "reason": "stable_threshold_satisfied",
+        },
+    )
+
+    storage = ConciergeStorage(hass)
+    state = await storage.async_load_state()
+    room = state.rooms[area.id]
+    speakers = services_module._resolve_room_audio_speaker_membership(room)
+
+    music = await services_module._async_capture_room_audio_channel(
+        hass,
+        storage=storage,
+        state=state,
+        area_id=area.id,
+        channel="music",
+        configured_speakers=speakers,
+    )
+    hass.states.async_set("media_player.media_room_main", "playing", {"volume_level": 0.33})
+    duck = await services_module._async_capture_room_audio_channel(
+        hass,
+        storage=storage,
+        state=state,
+        area_id=area.id,
+        channel="duck",
+        configured_speakers=speakers,
+    )
+    hass.states.async_set("media_player.media_room_main", "playing", {"volume_level": 0.55})
+    tts = await services_module._async_capture_room_audio_channel(
+        hass,
+        storage=storage,
+        state=state,
+        area_id=area.id,
+        channel="tts",
+        configured_speakers=speakers,
+    )
+
+    assert music["learning_status"] == "learned"
+    assert duck["learning_status"] == "learned"
+    assert tts["learning_status"] == "learned"
+
+    refreshed = await storage.async_load_state()
+    music_level, _, _ = services_module._resolve_room_audio_level(state=refreshed, area_id=area.id, channel="music")
+    duck_level, _, _ = services_module._resolve_room_audio_level(state=refreshed, area_id=area.id, channel="duck")
+    tts_level, _, _ = services_module._resolve_room_audio_level(state=refreshed, area_id=area.id, channel="tts")
+    assert music_level == 41
+    assert duck_level == 33
+    assert tts_level == 55
+
+
+async def test_room_audio_capture_rejects_unstable_and_preserves_previous_value_when_denied(
+    hass: HomeAssistant,
+    setup_integration,
+    monkeypatch,
+) -> None:
+    """Unstable or denied learning should preserve prior room-audio memory value."""
+    area = ar.async_get(hass).async_create(name="Kitchen")
+    await hass.services.async_call(
+        DOMAIN,
+        "update_room_config",
+        {
+            "area_id": area.id,
+            "media_player_entity_ids": ["media_player.kitchen_sonos"],
+        },
+        blocking=True,
+    )
+    hass.states.async_set("media_player.kitchen_sonos", "playing", {"volume_level": 0.62})
+
+    storage = ConciergeStorage(hass)
+    state = await storage.async_load_state()
+    room = state.rooms[area.id]
+    speakers = services_module._resolve_room_audio_speaker_membership(room)
+
+    monkeypatch.setattr(
+        services_module,
+        "_evaluate_entity_stability_for_room_audio_learning",
+        lambda _state_obj, *, stability_seconds: {
+            "stable": True,
+            "observed_seconds": stability_seconds + 30,
+            "required_seconds": stability_seconds,
+            "reason": "stable_threshold_satisfied",
+        },
+    )
+
+    first = await services_module._async_capture_room_audio_channel(
+        hass,
+        storage=storage,
+        state=state,
+        area_id=area.id,
+        channel="music",
+        configured_speakers=speakers,
+    )
+    assert first["learning_status"] == "learned"
+
+    state.global_features["experience_continuity_room_audio_learning_policy"] = {
+        "enabled": False,
+        "options": {"stability_seconds": 30},
+    }
+    hass.states.async_set("media_player.kitchen_sonos", "playing", {"volume_level": 0.2})
+
+    denied = await services_module._async_capture_room_audio_channel(
+        hass,
+        storage=storage,
+        state=state,
+        area_id=area.id,
+        channel="music",
+        configured_speakers=speakers,
+    )
+    assert denied["learning_status"] == "denied_previous_preserved"
+    assert denied["denial_reason"] == "learning_policy_disabled"
+
+    refreshed = await storage.async_load_state()
+    level, _, _ = services_module._resolve_room_audio_level(state=refreshed, area_id=area.id, channel="music")
+    assert level == 62
+
+
+async def test_execute_play_music_uses_configured_room_speakers_and_learned_room_music_volume(
+    hass: HomeAssistant,
+    setup_integration,
+    monkeypatch,
+) -> None:
+    """Playback start should target configured room speakers and reuse learned room music volume."""
+    _enable_music_assistant_provider(hass, monkeypatch)
+    area = ar.async_get(hass).async_create(name="Den")
+    await hass.services.async_call(
+        DOMAIN,
+        "update_room_config",
+        {
+            "area_id": area.id,
+            "media_player_entity_ids": ["media_player.den_main", "media_player.den_side"],
+        },
+        blocking=True,
+    )
+
+    storage = ConciergeStorage(hass)
+    state = await storage.async_load_state()
+    state.usual_states[services_module._room_audio_state_id(area_id=area.id, channel="music")] = UsualState(
+        state_id=services_module._room_audio_state_id(area_id=area.id, channel="music"),
+        scope="room",
+        scope_ref=area.id,
+        basis=UsualStateBasis.LEARNED,
+        updated_at=datetime.now(timezone.utc).isoformat(),
+        values={"channel": "music", "volume_pct": 47, "area_id": area.id},
+        metadata={"policy_name": "experience_continuity_room_audio_memory_ec_d_01"},
+    )
+    await storage.async_save_state(state)
+
+    hass.states.async_set("media_player.den_main", "playing", {"volume_level": 0.1})
+    hass.states.async_set("media_player.den_side", "playing", {"volume_level": 0.1})
+    hass.states.async_set("media_player.unrelated", "playing", {"volume_level": 0.9})
+
+    calls: list[dict[str, object]] = []
+    ma_calls: list[dict[str, object]] = []
+    if hass.services.has_service("media_player", "volume_set"):
+        hass.services.async_remove("media_player", "volume_set")
+
+    async def _volume_set(call):
+        calls.append(dict(call.data))
+
+    hass.services.async_register("media_player", "volume_set", _volume_set)
+    _register_music_assistant_play_media(hass, ma_calls)
+
+    result = await hass.services.async_call(
+        DOMAIN,
+        "execute",
+        {"target": "play music", "area_id": area.id, "intent_class": "home_control"},
+        blocking=True,
+        return_response=True,
+    )
+
+    audio = result["room_audio_continuity"]
+    assert result["execution_outcome_category"] == "SILENCE_SUCCESS"
+    assert result["silence_as_success"] is True
+    assert result["response_required"] is False
+    assert result["response_generated"] is False
+    assert result["executed"] is True
+    assert audio["channel"] == "music"
+    assert audio["playback_scope"] == "room"
+    assert audio["memory_scope"] == "room"
+    assert audio["group_targeted_speakers"] == ["media_player.den_main", "media_player.den_side"]
+    provider = result["media_provider_resolution"]
+    assert provider["provider_selected"] == "music_assistant"
+    assert provider["provider_available"] is True
+    assert provider["music_assistant_request"]["data"]["media_id"] == "music"
+    room_result = audio["room_results"][0]
+    assert room_result["resolved_volume_pct"] == 47
+    assert room_result["resolved_source"] == "room_audio_usual_state"
+    assert sorted(item["entity_id"] for item in calls) == ["media_player.den_main", "media_player.den_side"]
+    assert all(abs(float(item["volume_level"]) - 0.47) < 0.0001 for item in calls)
+    assert ma_calls and ma_calls[0]["media_id"] == "music"
+
+
+async def test_execute_play_music_missing_room_volume_uses_safe_fallback(
+    hass: HomeAssistant,
+    setup_integration,
+    monkeypatch,
+) -> None:
+    """Missing room music memory should use deterministic safe room-audio fallback volume."""
+    _enable_music_assistant_provider(hass, monkeypatch)
+    area = ar.async_get(hass).async_create(name="Office")
+    await hass.services.async_call(
+        DOMAIN,
+        "update_room_config",
+        {
+            "area_id": area.id,
+            "media_player_entity_ids": ["media_player.office_main"],
+        },
+        blocking=True,
+    )
+    hass.states.async_set("media_player.office_main", "playing", {})
+
+    calls: list[dict[str, object]] = []
+    ma_calls: list[dict[str, object]] = []
+    if hass.services.has_service("media_player", "volume_set"):
+        hass.services.async_remove("media_player", "volume_set")
+
+    async def _volume_set(call):
+        calls.append(dict(call.data))
+
+    hass.services.async_register("media_player", "volume_set", _volume_set)
+    _register_music_assistant_play_media(hass, ma_calls)
+
+    result = await hass.services.async_call(
+        DOMAIN,
+        "execute",
+        {"target": "play music", "area_id": area.id, "intent_class": "home_control"},
+        blocking=True,
+        return_response=True,
+    )
+
+    audio = result["room_audio_continuity"]
+    assert result["executed"] is True
+    room_result = audio["room_results"][0]
+    assert room_result["resolved_source"] == "safe_default_volume"
+    assert room_result["fallback_reason"] == "room_audio_value_missing"
+    assert abs(float(calls[0]["volume_level"]) - 0.35) < 0.0001
+    assert ma_calls and ma_calls[0]["media_id"] == "music"
+
+
+async def test_execute_play_music_merged_room_targets_group_and_preserves_per_room_memory(
+    hass: HomeAssistant,
+    setup_integration,
+    monkeypatch,
+) -> None:
+    """Merged-room playback should target all constituent configured speakers while preserving per-room memory."""
+    _enable_music_assistant_provider(hass, monkeypatch)
+    floor = fr.async_get(hass).async_create(name="Main")
+    area_registry = ar.async_get(hass)
+    room_a = area_registry.async_create(name="Living Room", floor_id=floor.floor_id)
+    room_b = area_registry.async_create(name="Kitchen", floor_id=floor.floor_id)
+
+    await hass.services.async_call(
+        DOMAIN,
+        "update_room_config",
+        {"area_id": room_a.id, "media_player_entity_ids": ["media_player.living_main"]},
+        blocking=True,
+    )
+    await hass.services.async_call(
+        DOMAIN,
+        "update_room_config",
+        {"area_id": room_b.id, "media_player_entity_ids": ["media_player.kitchen_main"]},
+        blocking=True,
+    )
+    await hass.services.async_call(
+        DOMAIN,
+        "update_composite_config",
+        {
+            "composite_id": "public_space",
+            "name": "Public Space",
+            "area_ids": [room_a.id, room_b.id],
+        },
+        blocking=True,
+    )
+
+    storage = ConciergeStorage(hass)
+    state = await storage.async_load_state()
+    state.usual_states[services_module._room_audio_state_id(area_id=room_a.id, channel="music")] = UsualState(
+        state_id=services_module._room_audio_state_id(area_id=room_a.id, channel="music"),
+        scope="room",
+        scope_ref=room_a.id,
+        basis=UsualStateBasis.LEARNED,
+        updated_at=datetime.now(timezone.utc).isoformat(),
+        values={"channel": "music", "volume_pct": 30, "area_id": room_a.id},
+        metadata={"policy_name": "experience_continuity_room_audio_memory_ec_d_01"},
+    )
+    state.usual_states[services_module._room_audio_state_id(area_id=room_b.id, channel="music")] = UsualState(
+        state_id=services_module._room_audio_state_id(area_id=room_b.id, channel="music"),
+        scope="room",
+        scope_ref=room_b.id,
+        basis=UsualStateBasis.LEARNED,
+        updated_at=datetime.now(timezone.utc).isoformat(),
+        values={"channel": "music", "volume_pct": 60, "area_id": room_b.id},
+        metadata={"policy_name": "experience_continuity_room_audio_memory_ec_d_01"},
+    )
+    state.usual_states[services_module._room_audio_state_id(area_id=room_a.id, channel="duck")] = UsualState(
+        state_id=services_module._room_audio_state_id(area_id=room_a.id, channel="duck"),
+        scope="room",
+        scope_ref=room_a.id,
+        basis=UsualStateBasis.LEARNED,
+        updated_at=datetime.now(timezone.utc).isoformat(),
+        values={"channel": "duck", "volume_pct": 18, "area_id": room_a.id},
+        metadata={"policy_name": "experience_continuity_room_audio_memory_ec_d_01"},
+    )
+    state.usual_states[services_module._room_audio_state_id(area_id=room_b.id, channel="duck")] = UsualState(
+        state_id=services_module._room_audio_state_id(area_id=room_b.id, channel="duck"),
+        scope="room",
+        scope_ref=room_b.id,
+        basis=UsualStateBasis.LEARNED,
+        updated_at=datetime.now(timezone.utc).isoformat(),
+        values={"channel": "duck", "volume_pct": 22, "area_id": room_b.id},
+        metadata={"policy_name": "experience_continuity_room_audio_memory_ec_d_01"},
+    )
+    state.usual_states[services_module._room_audio_state_id(area_id=room_a.id, channel="tts")] = UsualState(
+        state_id=services_module._room_audio_state_id(area_id=room_a.id, channel="tts"),
+        scope="room",
+        scope_ref=room_a.id,
+        basis=UsualStateBasis.LEARNED,
+        updated_at=datetime.now(timezone.utc).isoformat(),
+        values={"channel": "tts", "volume_pct": 45, "area_id": room_a.id},
+        metadata={"policy_name": "experience_continuity_room_audio_memory_ec_d_01"},
+    )
+    state.usual_states[services_module._room_audio_state_id(area_id=room_b.id, channel="tts")] = UsualState(
+        state_id=services_module._room_audio_state_id(area_id=room_b.id, channel="tts"),
+        scope="room",
+        scope_ref=room_b.id,
+        basis=UsualStateBasis.LEARNED,
+        updated_at=datetime.now(timezone.utc).isoformat(),
+        values={"channel": "tts", "volume_pct": 52, "area_id": room_b.id},
+        metadata={"policy_name": "experience_continuity_room_audio_memory_ec_d_01"},
+    )
+    await storage.async_save_state(state)
+
+    hass.states.async_set("media_player.living_main", "playing", {"volume_level": 0.1})
+    hass.states.async_set("media_player.kitchen_main", "playing", {"volume_level": 0.1})
+
+    calls: list[dict[str, object]] = []
+    ma_calls: list[dict[str, object]] = []
+    if hass.services.has_service("media_player", "volume_set"):
+        hass.services.async_remove("media_player", "volume_set")
+
+    async def _volume_set(call):
+        calls.append(dict(call.data))
+
+    hass.services.async_register("media_player", "volume_set", _volume_set)
+    _register_music_assistant_play_media(hass, ma_calls)
+
+    merged = await hass.services.async_call(
+        DOMAIN,
+        "execute",
+        {
+            "target": "play music",
+            "area_id": room_a.id,
+            "composite_id": "public_space",
+            "intent_class": "home_control",
+        },
+        blocking=True,
+        return_response=True,
+    )
+
+    audio = merged["room_audio_continuity"]
+    provider = merged["media_provider_resolution"]
+    assert merged["executed"] is True
+    assert audio["playback_scope"] == "merged_room"
+    assert audio["merged_room_participation"] is True
+    assert sorted(audio["group_targeted_speakers"]) == ["media_player.kitchen_main", "media_player.living_main"]
+    assert provider["provider_selected"] == "music_assistant"
+    assert provider["merged_room_participation"] is True
+    assert sorted(provider["music_assistant_request"]["target"]["entity_id"]) == ["media_player.kitchen_main", "media_player.living_main"]
+    assert sorted(item["area_id"] for item in audio["room_results"]) == sorted([room_a.id, room_b.id])
+
+    by_entity = {str(item["entity_id"]): float(item["volume_level"]) for item in calls}
+    assert abs(by_entity["media_player.living_main"] - 0.30) < 0.0001
+    assert abs(by_entity["media_player.kitchen_main"] - 0.60) < 0.0001
+
+    post_merged = await storage.async_load_state()
+    a_music, _, _ = services_module._resolve_room_audio_level(state=post_merged, area_id=room_a.id, channel="music")
+    b_music, _, _ = services_module._resolve_room_audio_level(state=post_merged, area_id=room_b.id, channel="music")
+    a_duck, _, _ = services_module._resolve_room_audio_level(state=post_merged, area_id=room_a.id, channel="duck")
+    b_duck, _, _ = services_module._resolve_room_audio_level(state=post_merged, area_id=room_b.id, channel="duck")
+    a_tts, _, _ = services_module._resolve_room_audio_level(state=post_merged, area_id=room_a.id, channel="tts")
+    b_tts, _, _ = services_module._resolve_room_audio_level(state=post_merged, area_id=room_b.id, channel="tts")
+    assert (a_music, b_music) == (30, 60)
+    assert (a_duck, b_duck) == (18, 22)
+    assert (a_tts, b_tts) == (45, 52)
+    assert all("public_space" not in key for key in post_merged.usual_states)
+    assert ma_calls and ma_calls[0]["media_id"] == "music"
+
+    calls.clear()
+    single_room = await hass.services.async_call(
+        DOMAIN,
+        "execute",
+        {"target": "play music", "area_id": room_a.id, "intent_class": "home_control"},
+        blocking=True,
+        return_response=True,
+    )
+    assert single_room["executed"] is True
+    assert calls and abs(float(calls[0]["volume_level"]) - 0.30) < 0.0001
+
+
+async def test_execute_play_music_does_not_discover_replacement_speakers(
+    hass: HomeAssistant,
+    setup_integration,
+    monkeypatch,
+) -> None:
+    """Room audio playback must not discover replacement speakers when room configuration has none."""
+    _enable_music_assistant_provider(hass, monkeypatch)
+    area = ar.async_get(hass).async_create(name="Guest Room")
+    await hass.services.async_call(
+        DOMAIN,
+        "update_room_config",
+        {
+            "area_id": area.id,
+            "media_player_entity_ids": [],
+            "speaker_entity_ids": [],
+        },
+        blocking=True,
+    )
+    entity = er.async_get(hass).async_get_or_create(
+        "media_player",
+        DOMAIN,
+        "guest_room_unconfigured",
+        area_id=area.id,
+    )
+    hass.states.async_set(entity.entity_id, "playing", {"volume_level": 0.75})
+
+    calls: list[dict[str, object]] = []
+    ma_calls: list[dict[str, object]] = []
+    if hass.services.has_service("media_player", "volume_set"):
+        hass.services.async_remove("media_player", "volume_set")
+
+    async def _volume_set(call):
+        calls.append(dict(call.data))
+
+    hass.services.async_register("media_player", "volume_set", _volume_set)
+    _register_music_assistant_play_media(hass, ma_calls)
+
+    result = await hass.services.async_call(
+        DOMAIN,
+        "execute",
+        {"target": "play music", "area_id": area.id, "intent_class": "home_control"},
+        blocking=True,
+        return_response=True,
+    )
+
+    media = result["media_provider_resolution"]
+    assert result["executed"] is False
+    assert media["failure_reason"] == "configured_speaker_mapping_missing"
+    assert media["group_targeted_speakers"] == []
+    assert calls == []
+    assert ma_calls == []
+
+
+@pytest.mark.parametrize(
+    (
+        "context_kwargs",
+        "runtime_context",
+        "expected_strategy",
+        "expected_media_id",
+        "expected_media_type",
+        "expected_radio_mode",
+        "expected_personalization",
+    ),
+    [
+        (
+            {
+                "provider_media_id": "track-001",
+                "media_type": "track",
+                "track_title": "Song A",
+                "artist_name": "Artist A",
+                "album_name": "Album A",
+                "genre": "jazz",
+            },
+            {},
+            "same_song",
+            "track-001",
+            None,
+            False,
+            False,
+        ),
+        (
+            {
+                "provider_media_id": "album-001",
+                "media_type": "album",
+                "album_name": "Album B",
+                "artist_name": "Artist B",
+                "genre": "classical",
+            },
+            {},
+            "same_album",
+            "album-001",
+            "album",
+            False,
+            False,
+        ),
+        (
+            {
+                "provider_media_id": "artist-001",
+                "media_type": "artist",
+                "artist_name": "Artist C",
+                "genre": "rock",
+            },
+            {},
+            "same_artist",
+            "artist-001",
+            "artist",
+            False,
+            False,
+        ),
+        (
+            {
+                "media_type": "genre",
+                "genre": "jazz",
+            },
+            {
+                "identity_context": {
+                    "state": "known",
+                    "confidence_band": "high",
+                    "source": "voice_identity",
+                },
+                "media_preference_inputs": {"preferred_artist": "Miles Davis"},
+                "room_default_media_query": "room-default",
+                "household_default_media_query": "house-default",
+                "system_safe_media_query": "safe-music",
+            },
+            "same_genre",
+            "Miles Davis",
+            "artist",
+            False,
+            True,
+        ),
+    ],
+)
+async def test_execute_room_media_continue_resume_uses_room_context_and_music_assistant(
+    hass: HomeAssistant,
+    setup_integration,
+    monkeypatch,
+    context_kwargs: dict[str, object],
+    runtime_context: dict[str, object],
+    expected_strategy: str,
+    expected_media_id: str,
+    expected_media_type: str | None,
+    expected_radio_mode: bool,
+    expected_personalization: bool,
+) -> None:
+    """Continue/resume should resolve from room media context before falling back to person assistance or room defaults."""
+    _enable_music_assistant_provider(hass, monkeypatch)
+    area = ar.async_get(hass).async_create(name="Listening Room")
+    await hass.services.async_call(
+        DOMAIN,
+        "update_room_config",
+        {
+            "area_id": area.id,
+            "media_player_entity_ids": ["media_player.listening_main"],
+        },
+        blocking=True,
+    )
+    hass.states.async_set("media_player.listening_main", "playing", {"volume_level": 0.4})
+
+    storage = ConciergeStorage(hass)
+    await _seed_room_media_context(storage, area_id=area.id, **context_kwargs)
+
+    ma_calls: list[dict[str, object]] = []
+    if hass.services.has_service("media_player", "volume_set"):
+        hass.services.async_remove("media_player", "volume_set")
+
+    async def _volume_set(_call):
+        return None
+
+    hass.services.async_register("media_player", "volume_set", _volume_set)
+    _register_music_assistant_play_media(hass, ma_calls)
+
+    result = await hass.services.async_call(
+        DOMAIN,
+        "execute",
+        {
+            "target": "continue music",
+            "area_id": area.id,
+            "intent_class": "home_control",
+            "context": runtime_context,
+        },
+        blocking=True,
+        return_response=True,
+    )
+
+    continuity = result["room_media_continuity"]
+    provider = result["media_provider_resolution"]
+    assert result["executed"] is True
+    assert continuity["continuation_strategy"] == expected_strategy
+    assert continuity["source_room_id"] == area.id
+    assert continuity["follow_me_excluded"] is True
+    assert provider["provider_selected"] == "music_assistant"
+    assert provider["provider_available"] is True
+    assert provider["music_assistant_request"]["data"]["media_id"] == expected_media_id
+    if expected_media_type is None:
+        assert "media_type" not in provider["music_assistant_request"]["data"]
+    else:
+        assert provider["music_assistant_request"]["data"]["media_type"] == expected_media_type
+    assert bool(provider["music_assistant_request"]["data"].get("radio_mode", False)) is expected_radio_mode
+    assert continuity["personalization_applied"] is expected_personalization
+    assert ma_calls and ma_calls[0]["media_id"] == expected_media_id
+
+    refreshed = await storage.async_load_state()
+    state_id = services_module._room_media_state_id(area_id=area.id)
+    assert state_id in refreshed.usual_states
+    context_state = refreshed.usual_states[state_id]
+    assert context_state.values["provider_source"] == "music_assistant"
+    if expected_strategy == "same_genre":
+        assert context_state.values["last_genre"] == "jazz"
+
+
+@pytest.mark.parametrize(
+    ("enable_provider", "expected_reason"),
+    [
+        (False, "media_provider_disabled"),
+        (True, "music_assistant_unavailable"),
+    ],
+)
+async def test_execute_room_media_continue_resume_refuses_when_music_assistant_is_disabled_or_unavailable(
+    hass: HomeAssistant,
+    setup_integration,
+    monkeypatch,
+    enable_provider: bool,
+    expected_reason: str,
+) -> None:
+    """Continue/resume should fail closed when the preferred Music Assistant provider is not usable."""
+    if enable_provider:
+        _enable_music_assistant_provider(hass, monkeypatch)
+    area = ar.async_get(hass).async_create(name="Listening Room")
+    await hass.services.async_call(
+        DOMAIN,
+        "update_room_config",
+        {
+            "area_id": area.id,
+            "media_player_entity_ids": ["media_player.listening_main"],
+        },
+        blocking=True,
+    )
+    hass.states.async_set("media_player.listening_main", "playing", {"volume_level": 0.4})
+
+    storage = ConciergeStorage(hass)
+    await _seed_room_media_context(
+        storage,
+        area_id=area.id,
+        provider_media_id="track-001",
+        media_type="track",
+        track_title="Song A",
+        genre="jazz",
+    )
+
+    ma_calls: list[dict[str, object]] = []
+    if hass.services.has_service("media_player", "volume_set"):
+        hass.services.async_remove("media_player", "volume_set")
+
+    async def _volume_set(_call):
+        return None
+
+    hass.services.async_register("media_player", "volume_set", _volume_set)
+    if enable_provider:
+        _register_music_assistant_play_media(hass, ma_calls)
+
+    result = await hass.services.async_call(
+        DOMAIN,
+        "execute",
+        {
+            "target": "resume music",
+            "area_id": area.id,
+            "intent_class": "home_control",
+        },
+        blocking=True,
+        return_response=True,
+    )
+
+    provider = result["media_provider_resolution"]
+    continuity = result.get("room_media_continuity", {})
+    assert result["executed"] is False
+    assert result["execution_outcome_category"] == "REFUSAL_SUCCESS"
+    assert result["silence_as_success"] is False
+    assert result["response_required"] is True
+    assert result["response_generated"] is True
+    assert provider["failure_reason"] == expected_reason
+    assert provider["refusal_reason"] == expected_reason
+    assert provider["refusal_category"] in {
+        "configuration_unavailable",
+        "capability_unavailable",
+    }
+    assert provider["capability_requested"] == "room_media_continuation"
+    assert provider["capability_available"] is False
+    assert provider["person_policy_evaluated"] is True
+    assert provider["fallback_used"] is True
+    assert provider["fallback_path"] == "governed_provider_refusal"
+    assert continuity.get("fallback_used") is True
+    assert ma_calls == []
+
+
+async def test_execute_room_media_continue_resume_respects_manual_stop_cooldown(
+    hass: HomeAssistant,
+    setup_integration,
+    monkeypatch,
+) -> None:
+    """Manual-stop cooldown should suppress automatic continuation even when room media context exists."""
+    _enable_music_assistant_provider(hass, monkeypatch)
+    area = ar.async_get(hass).async_create(name="Listening Room")
+    await hass.services.async_call(
+        DOMAIN,
+        "update_room_config",
+        {
+            "area_id": area.id,
+            "media_player_entity_ids": ["media_player.listening_main"],
+        },
+        blocking=True,
+    )
+    hass.states.async_set("media_player.listening_main", "paused", {"volume_level": 0.4})
+
+    storage = ConciergeStorage(hass)
+    future_until = (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()
+    await _seed_room_media_context(
+        storage,
+        area_id=area.id,
+        provider_media_id="track-001",
+        media_type="track",
+        track_title="Song A",
+        genre="jazz",
+        manual_stop=True,
+        manual_stop_cooldown_until=future_until,
+    )
+
+    ma_calls: list[dict[str, object]] = []
+    if hass.services.has_service("media_player", "volume_set"):
+        hass.services.async_remove("media_player", "volume_set")
+
+    async def _volume_set(_call):
+        return None
+
+    hass.services.async_register("media_player", "volume_set", _volume_set)
+    _register_music_assistant_play_media(hass, ma_calls)
+
+    result = await hass.services.async_call(
+        DOMAIN,
+        "execute",
+        {
+            "target": "continue music",
+            "area_id": area.id,
+            "intent_class": "home_control",
+        },
+        blocking=True,
+        return_response=True,
+    )
+
+    provider = result["media_provider_resolution"]
+    continuity = result["room_media_continuity"]
+    assert result["executed"] is False
+    assert provider["failure_reason"] == "manual_stop_cooldown_active"
+    assert provider["refusal_reason"] == "manual_stop_cooldown_active"
+    assert provider["refusal_category"] == "policy_denied"
+    assert continuity["refusal_reason"] == "manual_stop_cooldown_active"
+    assert continuity["refusal_category"] == "policy_denied"
+    assert provider["fallback_used"] is True
+    assert continuity["cooldown_decision"]["manual_stop_cooldown_active"] is True
+    assert ma_calls == []
+
+
+async def test_execute_room_media_continue_resume_allows_after_manual_stop_cooldown_expires(
+    hass: HomeAssistant,
+    setup_integration,
+    monkeypatch,
+) -> None:
+    """Expired manual-stop cooldown should allow governed continuation to proceed."""
+    _enable_music_assistant_provider(hass, monkeypatch)
+    area = ar.async_get(hass).async_create(name="Listening Room")
+    await hass.services.async_call(
+        DOMAIN,
+        "update_room_config",
+        {
+            "area_id": area.id,
+            "media_player_entity_ids": ["media_player.listening_main"],
+        },
+        blocking=True,
+    )
+    hass.states.async_set("media_player.listening_main", "paused", {"volume_level": 0.4})
+
+    storage = ConciergeStorage(hass)
+    past_until = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+    await _seed_room_media_context(
+        storage,
+        area_id=area.id,
+        provider_media_id="track-002",
+        media_type="track",
+        track_title="Song B",
+        genre="jazz",
+        manual_stop=True,
+        manual_stop_cooldown_until=past_until,
+    )
+
+    ma_calls: list[dict[str, object]] = []
+    if hass.services.has_service("media_player", "volume_set"):
+        hass.services.async_remove("media_player", "volume_set")
+
+    async def _volume_set(_call):
+        return None
+
+    hass.services.async_register("media_player", "volume_set", _volume_set)
+    _register_music_assistant_play_media(hass, ma_calls)
+
+    result = await hass.services.async_call(
+        DOMAIN,
+        "execute",
+        {
+            "target": "continue music",
+            "area_id": area.id,
+            "intent_class": "home_control",
+        },
+        blocking=True,
+        return_response=True,
+    )
+
+    provider = result["media_provider_resolution"]
+    continuity = result["room_media_continuity"]
+    assert result["executed"] is True
+    assert provider["failure_reason"] is None
+    assert continuity["cooldown_decision"]["manual_stop_cooldown_active"] is False
+    assert ma_calls and ma_calls[0]["media_id"] == "track-002"
+
+
+async def test_execute_room_media_continue_resume_uses_deterministic_source_room_in_merged_room(
+    hass: HomeAssistant,
+    setup_integration,
+    monkeypatch,
+) -> None:
+    """Merged-room continuation should select a deterministic source room and preserve constituent-room memory."""
+    _enable_music_assistant_provider(hass, monkeypatch)
+    floor = fr.async_get(hass).async_create(name="Main")
+    area_registry = ar.async_get(hass)
+    room_a = area_registry.async_create(name="Living Room", floor_id=floor.floor_id)
+    room_b = area_registry.async_create(name="Kitchen", floor_id=floor.floor_id)
+
+    await hass.services.async_call(
+        DOMAIN,
+        "update_room_config",
+        {"area_id": room_a.id, "media_player_entity_ids": ["media_player.living_main"]},
+        blocking=True,
+    )
+    await hass.services.async_call(
+        DOMAIN,
+        "update_room_config",
+        {"area_id": room_b.id, "media_player_entity_ids": ["media_player.kitchen_main"]},
+        blocking=True,
+    )
+    await hass.services.async_call(
+        DOMAIN,
+        "update_composite_config",
+        {
+            "composite_id": "public_space",
+            "name": "Public Space",
+            "area_ids": [room_a.id, room_b.id],
+            "primary_area": room_a.id,
+        },
+        blocking=True,
+    )
+
+    storage = ConciergeStorage(hass)
+    await _seed_room_media_context(
+        storage,
+        area_id=room_a.id,
+        provider_media_id="track-a",
+        media_type="track",
+        track_title="Song A",
+        artist_name="Artist A",
+        genre="jazz",
+    )
+    await _seed_room_media_context(
+        storage,
+        area_id=room_b.id,
+        provider_media_id="track-b",
+        media_type="track",
+        track_title="Song B",
+        artist_name="Artist B",
+        genre="classical",
+    )
+
+    ma_calls: list[dict[str, object]] = []
+    if hass.services.has_service("media_player", "volume_set"):
+        hass.services.async_remove("media_player", "volume_set")
+
+    async def _volume_set(_call):
+        return None
+
+    hass.services.async_register("media_player", "volume_set", _volume_set)
+    _register_music_assistant_play_media(hass, ma_calls)
+
+    result = await hass.services.async_call(
+        DOMAIN,
+        "execute",
+        {
+            "target": "continue music",
+            "area_id": room_b.id,
+            "composite_id": "public_space",
+            "intent_class": "home_control",
+        },
+        blocking=True,
+        return_response=True,
+    )
+
+    continuity = result["room_media_continuity"]
+    provider = result["media_provider_resolution"]
+    assert result["executed"] is True
+    assert continuity["source_room_id"] == room_a.id
+    assert continuity["source_room_selection_reason"] == "primary_room_selected"
+    assert provider["group_targeted_speakers"] == ["media_player.living_main", "media_player.kitchen_main"]
+    assert provider["merged_room_participation"] is True
+    assert provider["follow_me_excluded"] is True
+    assert ma_calls and ma_calls[0]["media_id"] == "track-a"
+
+    refreshed = await storage.async_load_state()
+    assert services_module._room_media_state_id(area_id=room_a.id) in refreshed.usual_states
+    assert services_module._room_media_state_id(area_id=room_b.id) in refreshed.usual_states
+    assert refreshed.usual_states[services_module._room_media_state_id(area_id=room_a.id)].values["last_song"] == "Song A"
+    assert refreshed.usual_states[services_module._room_media_state_id(area_id=room_b.id)].values["last_song"] == "Song B"
+
+
+async def test_execute_room_media_continue_resume_uses_room_default_fallback_when_context_is_missing(
+    hass: HomeAssistant,
+    setup_integration,
+    monkeypatch,
+) -> None:
+    """Missing room media context should fall back to governed room defaults rather than a global media history."""
+    _enable_music_assistant_provider(hass, monkeypatch)
+    area = ar.async_get(hass).async_create(name="Fallback Room")
+    await hass.services.async_call(
+        DOMAIN,
+        "update_room_config",
+        {
+            "area_id": area.id,
+            "media_player_entity_ids": ["media_player.fallback_main"],
+        },
+        blocking=True,
+    )
+    hass.states.async_set("media_player.fallback_main", "playing", {"volume_level": 0.4})
+
+    ma_calls: list[dict[str, object]] = []
+    if hass.services.has_service("media_player", "volume_set"):
+        hass.services.async_remove("media_player", "volume_set")
+
+    async def _volume_set(_call):
+        return None
+
+    hass.services.async_register("media_player", "volume_set", _volume_set)
+    _register_music_assistant_play_media(hass, ma_calls)
+
+    result = await hass.services.async_call(
+        DOMAIN,
+        "execute",
+        {
+            "target": "continue music",
+            "area_id": area.id,
+            "intent_class": "home_control",
+            "context": {
+                "room_default_media_query": "room-default",
+                "household_default_media_query": "house-default",
+                "system_safe_media_query": "safe-music",
+            },
+        },
+        blocking=True,
+        return_response=True,
+    )
+
+    continuity = result["room_media_continuity"]
+    provider = result["media_provider_resolution"]
+    assert result["executed"] is True
+    assert continuity["continuation_strategy"] == "governed_fallback"
+    assert provider["music_assistant_request"]["data"]["media_id"] == "room-default"
+    assert "media_type" not in provider["music_assistant_request"]["data"]
+    assert continuity["personalization_applied"] is False
+    assert ma_calls and ma_calls[0]["media_id"] == "room-default"
+
+
+async def test_execute_follow_me_handoff_moves_media_to_destination_room(
+    hass: HomeAssistant,
+    setup_integration,
+    monkeypatch,
+) -> None:
+    """Follow-Me should hand off playback from source room context to destination room speakers."""
+    _enable_music_assistant_provider(hass, monkeypatch)
+    floor = fr.async_get(hass).async_create(name="Main")
+    area_registry = ar.async_get(hass)
+    room_a = area_registry.async_create(name="Living Room", floor_id=floor.floor_id)
+    room_b = area_registry.async_create(name="Kitchen", floor_id=floor.floor_id)
+
+    await hass.services.async_call(
+        DOMAIN,
+        "update_room_config",
+        {"area_id": room_a.id, "media_player_entity_ids": ["media_player.living_main"]},
+        blocking=True,
+    )
+    await hass.services.async_call(
+        DOMAIN,
+        "update_room_config",
+        {"area_id": room_b.id, "media_player_entity_ids": ["media_player.kitchen_main"]},
+        blocking=True,
+    )
+
+    hass.states.async_set("media_player.living_main", "playing", {"volume_level": 0.52})
+    hass.states.async_set("media_player.kitchen_main", "paused", {"volume_level": 0.31})
+
+    storage = ConciergeStorage(hass)
+    await _seed_room_media_context(
+        storage,
+        area_id=room_a.id,
+        provider_media_id="track-living",
+        media_type="track",
+        track_title="Song A",
+        artist_name="Artist A",
+        album_name="Album A",
+        genre="jazz",
+    )
+
+    ma_calls: list[dict[str, object]] = []
+    if hass.services.has_service("media_player", "volume_set"):
+        hass.services.async_remove("media_player", "volume_set")
+
+    async def _volume_set(_call):
+        return None
+
+    hass.services.async_register("media_player", "volume_set", _volume_set)
+    _register_music_assistant_play_media(hass, ma_calls)
+
+    result = await hass.services.async_call(
+        DOMAIN,
+        "execute",
+        {
+            "target": "follow me music",
+            "area_id": room_b.id,
+            "intent_class": "home_control",
+            "context": {
+                "follow_me_enabled": True,
+                "identity_context": {
+                    "state": "known",
+                    "confidence_band": "high",
+                    "source": "voice_identity",
+                },
+                "room_transition": {
+                    "source_room_id": room_a.id,
+                    "destination_room_id": room_b.id,
+                    "departure_confirmed": True,
+                    "arrival_confirmed": True,
+                    "source": "presence_runtime",
+                },
+            },
+        },
+        blocking=True,
+        return_response=True,
+    )
+
+    continuity = result["room_media_continuity"]
+    provider = result["media_provider_resolution"]
+    assert result["executed"] is True
+    assert continuity["follow_me_enabled"] is True
+    assert continuity["follow_me_candidate"] is True
+    assert continuity["follow_me_allowed"] is True
+    assert continuity["follow_me_decision"] == "handoff_execute"
+    assert continuity["follow_me_reason"] == "handoff_allowed"
+    assert continuity["source_room"] == room_a.id
+    assert continuity["destination_room"] == room_b.id
+    assert continuity["room_transition_source"] == "presence_runtime"
+    assert continuity["identity_authority_source"] == "voice_identity_runtime_context"
+    assert continuity["manual_stop_blocked"] is False
+    assert continuity["cooldown_blocked"] is False
+    assert provider["follow_me_excluded"] is False
+    assert provider["group_targeted_speakers"] == ["media_player.kitchen_main"]
+    assert ma_calls and ma_calls[0]["media_id"] == "track-living"
+
+
+async def test_execute_follow_me_handoff_preserves_preference_continuity_for_genre(
+    hass: HomeAssistant,
+    setup_integration,
+    monkeypatch,
+) -> None:
+    """Follow-Me should preserve person-scoped preferences when source context is genre-based."""
+    _enable_music_assistant_provider(hass, monkeypatch)
+    area_registry = ar.async_get(hass)
+    room_a = area_registry.async_create(name="Den")
+    room_b = area_registry.async_create(name="Office")
+
+    await hass.services.async_call(
+        DOMAIN,
+        "update_room_config",
+        {"area_id": room_a.id, "media_player_entity_ids": ["media_player.den_main"]},
+        blocking=True,
+    )
+    await hass.services.async_call(
+        DOMAIN,
+        "update_room_config",
+        {"area_id": room_b.id, "media_player_entity_ids": ["media_player.office_main"]},
+        blocking=True,
+    )
+    hass.states.async_set("media_player.den_main", "playing", {"volume_level": 0.41})
+    hass.states.async_set("media_player.office_main", "playing", {"volume_level": 0.38})
+
+    storage = ConciergeStorage(hass)
+    await _seed_room_media_context(
+        storage,
+        area_id=room_a.id,
+        provider_media_id="genre-seed",
+        media_type="genre",
+        genre="jazz",
+    )
+
+    ma_calls: list[dict[str, object]] = []
+    if hass.services.has_service("media_player", "volume_set"):
+        hass.services.async_remove("media_player", "volume_set")
+
+    async def _volume_set(_call):
+        return None
+
+    hass.services.async_register("media_player", "volume_set", _volume_set)
+    _register_music_assistant_play_media(hass, ma_calls)
+
+    result = await hass.services.async_call(
+        DOMAIN,
+        "execute",
+        {
+            "target": "move music here",
+            "area_id": room_b.id,
+            "intent_class": "home_control",
+            "context": {
+                "follow_me_enabled": True,
+                "identity_context": {
+                    "state": "known",
+                    "confidence_band": "high",
+                    "source": "voice_identity",
+                },
+                "media_preference_inputs": {"preferred_artist": "Miles Davis"},
+                "room_default_media_query": "room-default",
+                "household_default_media_query": "house-default",
+                "system_safe_media_query": "safe-music",
+                "room_transition": {
+                    "source_room_id": room_a.id,
+                    "destination_room_id": room_b.id,
+                    "source": "presence_runtime",
+                },
+            },
+        },
+        blocking=True,
+        return_response=True,
+    )
+
+    continuity = result["room_media_continuity"]
+    assert result["executed"] is True
+    assert continuity["continuation_strategy"] == "same_genre"
+    assert continuity["personalization_applied"] is True
+    assert ma_calls and ma_calls[0]["media_id"] == "Miles Davis"
+    assert ma_calls[0]["media_type"] == "artist"
+
+
+async def test_execute_follow_me_blocks_when_identity_unresolved(
+    hass: HomeAssistant,
+    setup_integration,
+    monkeypatch,
+) -> None:
+    """Follow-Me should fail closed when identity authority is unresolved."""
+    _enable_music_assistant_provider(hass, monkeypatch)
+    area_registry = ar.async_get(hass)
+    room_a = area_registry.async_create(name="Living")
+    room_b = area_registry.async_create(name="Kitchen")
+
+    await hass.services.async_call(DOMAIN, "update_room_config", {"area_id": room_a.id, "media_player_entity_ids": ["media_player.living_main"]}, blocking=True)
+    await hass.services.async_call(DOMAIN, "update_room_config", {"area_id": room_b.id, "media_player_entity_ids": ["media_player.kitchen_main"]}, blocking=True)
+    hass.states.async_set("media_player.living_main", "playing", {"volume_level": 0.4})
+    hass.states.async_set("media_player.kitchen_main", "playing", {"volume_level": 0.4})
+
+    storage = ConciergeStorage(hass)
+    await _seed_room_media_context(storage, area_id=room_a.id, provider_media_id="track-1", media_type="track", track_title="Song A")
+    _register_music_assistant_play_media(hass, [])
+
+    result = await hass.services.async_call(
+        DOMAIN,
+        "execute",
+        {
+            "target": "follow me",
+            "area_id": room_b.id,
+            "intent_class": "home_control",
+            "context": {
+                "follow_me_enabled": True,
+                "identity_context": {"state": "unknown", "confidence_band": "unknown", "source": "voice_identity"},
+                "room_transition": {"source_room_id": room_a.id, "destination_room_id": room_b.id, "source": "presence_runtime"},
+            },
+        },
+        blocking=True,
+        return_response=True,
+    )
+
+    continuity = result["room_media_continuity"]
+    assert result["executed"] is False
+    assert continuity["follow_me_allowed"] is False
+    assert continuity["follow_me_reason"] == "identity_authority_insufficient"
+    assert result["media_provider_resolution"]["failure_reason"] == "identity_authority_insufficient"
+
+
+async def test_execute_follow_me_blocks_for_competing_identity_sources(
+    hass: HomeAssistant,
+    setup_integration,
+    monkeypatch,
+) -> None:
+    """Follow-Me should not hand off when competing identity sources are present."""
+    _enable_music_assistant_provider(hass, monkeypatch)
+    area_registry = ar.async_get(hass)
+    room_a = area_registry.async_create(name="Family")
+    room_b = area_registry.async_create(name="Hall")
+
+    await hass.services.async_call(DOMAIN, "update_room_config", {"area_id": room_a.id, "media_player_entity_ids": ["media_player.family_main"]}, blocking=True)
+    await hass.services.async_call(DOMAIN, "update_room_config", {"area_id": room_b.id, "media_player_entity_ids": ["media_player.hall_main"]}, blocking=True)
+    hass.states.async_set("media_player.family_main", "playing", {"volume_level": 0.4})
+    hass.states.async_set("media_player.hall_main", "playing", {"volume_level": 0.4})
+
+    storage = ConciergeStorage(hass)
+    await _seed_room_media_context(storage, area_id=room_a.id, provider_media_id="track-2", media_type="track", track_title="Song B")
+
+    result = await hass.services.async_call(
+        DOMAIN,
+        "execute",
+        {
+            "target": "follow me music",
+            "area_id": room_b.id,
+            "intent_class": "home_control",
+            "context": {
+                "follow_me_enabled": True,
+                "identity_context": {
+                    "state": "known",
+                    "confidence_band": "high",
+                    "source": "voice_identity",
+                    "candidate_person_ids": ["person.a", "person.b"],
+                },
+                "room_transition": {"source_room_id": room_a.id, "destination_room_id": room_b.id, "source": "presence_runtime"},
+            },
+        },
+        blocking=True,
+        return_response=True,
+    )
+
+    assert result["executed"] is False
+    assert result["room_media_continuity"]["follow_me_reason"] == "competing_identity_sources"
+
+
+async def test_execute_follow_me_blocks_manual_stop_and_cooldown(
+    hass: HomeAssistant,
+    setup_integration,
+    monkeypatch,
+) -> None:
+    """Follow-Me should respect manual-stop and cooldown guardrails."""
+    _enable_music_assistant_provider(hass, monkeypatch)
+    area_registry = ar.async_get(hass)
+    room_a = area_registry.async_create(name="Source")
+    room_b = area_registry.async_create(name="Destination")
+
+    await hass.services.async_call(DOMAIN, "update_room_config", {"area_id": room_a.id, "media_player_entity_ids": ["media_player.source_main"]}, blocking=True)
+    await hass.services.async_call(DOMAIN, "update_room_config", {"area_id": room_b.id, "media_player_entity_ids": ["media_player.dest_main"]}, blocking=True)
+    hass.states.async_set("media_player.source_main", "playing", {"volume_level": 0.4})
+    hass.states.async_set("media_player.dest_main", "playing", {"volume_level": 0.4})
+
+    storage = ConciergeStorage(hass)
+    future_until = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
+    await _seed_room_media_context(
+        storage,
+        area_id=room_a.id,
+        provider_media_id="track-3",
+        media_type="track",
+        track_title="Song C",
+        manual_stop=True,
+        manual_stop_cooldown_until=future_until,
+    )
+
+    result = await hass.services.async_call(
+        DOMAIN,
+        "execute",
+        {
+            "target": "follow me",
+            "area_id": room_b.id,
+            "intent_class": "home_control",
+            "context": {
+                "follow_me_enabled": True,
+                "identity_context": {"state": "known", "confidence_band": "high", "source": "voice_identity"},
+                "room_transition": {"source_room_id": room_a.id, "destination_room_id": room_b.id, "source": "presence_runtime"},
+            },
+        },
+        blocking=True,
+        return_response=True,
+    )
+
+    continuity = result["room_media_continuity"]
+    assert result["executed"] is False
+    assert continuity["manual_stop_blocked"] is True
+    assert continuity["cooldown_blocked"] is True
+    assert continuity["follow_me_reason"] == "manual_stop_active_follow_me"
+
+
+async def test_execute_follow_me_blocks_when_disabled_or_destination_unavailable(
+    hass: HomeAssistant,
+    setup_integration,
+    monkeypatch,
+) -> None:
+    """Follow-Me should fail when disabled and also when destination room cannot serve playback."""
+    _enable_music_assistant_provider(hass, monkeypatch)
+    area_registry = ar.async_get(hass)
+    room_a = area_registry.async_create(name="A")
+    room_b = area_registry.async_create(name="B")
+
+    await hass.services.async_call(DOMAIN, "update_room_config", {"area_id": room_a.id, "media_player_entity_ids": ["media_player.a_main"]}, blocking=True)
+    await hass.services.async_call(DOMAIN, "update_room_config", {"area_id": room_b.id, "media_player_entity_ids": []}, blocking=True)
+    hass.states.async_set("media_player.a_main", "playing", {"volume_level": 0.4})
+
+    storage = ConciergeStorage(hass)
+    await _seed_room_media_context(storage, area_id=room_a.id, provider_media_id="track-4", media_type="track", track_title="Song D")
+
+    disabled = await hass.services.async_call(
+        DOMAIN,
+        "execute",
+        {
+            "target": "follow me music",
+            "area_id": room_b.id,
+            "intent_class": "home_control",
+            "context": {
+                "follow_me_enabled": False,
+                "identity_context": {"state": "known", "confidence_band": "high", "source": "voice_identity"},
+                "room_transition": {"source_room_id": room_a.id, "destination_room_id": room_b.id, "source": "presence_runtime"},
+            },
+        },
+        blocking=True,
+        return_response=True,
+    )
+    assert disabled["executed"] is False
+    assert disabled["room_media_continuity"]["follow_me_reason"] == "follow_me_disabled"
+
+    unavailable = await hass.services.async_call(
+        DOMAIN,
+        "execute",
+        {
+            "target": "follow me music",
+            "area_id": room_b.id,
+            "intent_class": "home_control",
+            "context": {
+                "follow_me_enabled": True,
+                "identity_context": {"state": "known", "confidence_band": "high", "source": "voice_identity"},
+                "room_transition": {"source_room_id": room_a.id, "destination_room_id": room_b.id, "source": "presence_runtime"},
+            },
+        },
+        blocking=True,
+        return_response=True,
+    )
+    assert unavailable["executed"] is False
+    assert unavailable["media_provider_resolution"]["failure_reason"] == "configured_speaker_mapping_missing"
+
+
+async def test_execute_follow_me_does_not_override_merged_room_mode(
+    hass: HomeAssistant,
+    setup_integration,
+    monkeypatch,
+) -> None:
+    """Follow-Me must not override merged-room playback behavior boundaries."""
+    _enable_music_assistant_provider(hass, monkeypatch)
+    floor = fr.async_get(hass).async_create(name="Main")
+    area_registry = ar.async_get(hass)
+    room_a = area_registry.async_create(name="Living", floor_id=floor.floor_id)
+    room_b = area_registry.async_create(name="Kitchen", floor_id=floor.floor_id)
+
+    await hass.services.async_call(DOMAIN, "update_room_config", {"area_id": room_a.id, "media_player_entity_ids": ["media_player.living_main"]}, blocking=True)
+    await hass.services.async_call(DOMAIN, "update_room_config", {"area_id": room_b.id, "media_player_entity_ids": ["media_player.kitchen_main"]}, blocking=True)
+    await hass.services.async_call(
+        DOMAIN,
+        "update_composite_config",
+        {
+            "composite_id": "public_space",
+            "name": "Public Space",
+            "area_ids": [room_a.id, room_b.id],
+            "primary_area": room_a.id,
+        },
+        blocking=True,
+    )
+
+    hass.states.async_set("media_player.living_main", "playing", {"volume_level": 0.51})
+    hass.states.async_set("media_player.kitchen_main", "playing", {"volume_level": 0.37})
+
+    storage = ConciergeStorage(hass)
+    await _seed_room_media_context(storage, area_id=room_a.id, provider_media_id="track-5", media_type="track", track_title="Song E")
+
+    result = await hass.services.async_call(
+        DOMAIN,
+        "execute",
+        {
+            "target": "follow me",
+            "area_id": room_b.id,
+            "composite_id": "public_space",
+            "intent_class": "home_control",
+            "context": {
+                "follow_me_enabled": True,
+                "identity_context": {"state": "known", "confidence_band": "high", "source": "voice_identity"},
+                "room_transition": {"source_room_id": room_a.id, "destination_room_id": room_b.id, "source": "presence_runtime"},
+            },
+        },
+        blocking=True,
+        return_response=True,
+    )
+
+    continuity = result["room_media_continuity"]
+    assert result["executed"] is False
+    assert continuity["follow_me_reason"] == "merged_room_scope_not_supported"
+    assert continuity["follow_me_allowed"] is False
+
+
+@pytest.mark.parametrize(
+    ("target", "runtime_context", "expected_kind", "expected_media_id", "expected_media_type", "expect_radio"),
+    [
+        ("play jazz", {}, "genre", "jazz", None, True),
+        ("play classic rock", {}, "genre", "classic rock", None, True),
+        ("play Miles Davis", {"media_request_type": "artist"}, "artist", "Miles Davis", "artist", False),
+        ("play Kind of Blue", {"media_request_type": "album"}, "album", "Kind of Blue", "album", False),
+        (
+            "play music",
+            {
+                "identity_context": {
+                    "state": "known",
+                    "confidence_band": "high",
+                    "source": "voice_identity",
+                },
+                "media_preference_inputs": {"music_affinity": "Miles Davis"},
+            },
+            "general_music",
+            "Miles Davis",
+            None,
+            False,
+        ),
+    ],
+)
+async def test_execute_music_assistant_preferred_media_resolution_requests(
+    hass: HomeAssistant,
+    setup_integration,
+    monkeypatch,
+    target: str,
+    runtime_context: dict[str, object],
+    expected_kind: str,
+    expected_media_id: str,
+    expected_media_type: str | None,
+    expect_radio: bool,
+) -> None:
+    """Music Assistant should be the preferred provider for governed room-level media requests."""
+    _enable_music_assistant_provider(hass, monkeypatch)
+    area = ar.async_get(hass).async_create(name="Media Den")
+    await hass.services.async_call(
+        DOMAIN,
+        "update_room_config",
+        {"area_id": area.id, "media_player_entity_ids": ["media_player.den_main"]},
+        blocking=True,
+    )
+    hass.states.async_set("media_player.den_main", "playing", {"volume_level": 0.4})
+
+    ma_calls: list[dict[str, object]] = []
+    volume_calls: list[dict[str, object]] = []
+    if hass.services.has_service("media_player", "volume_set"):
+        hass.services.async_remove("media_player", "volume_set")
+
+    async def _volume_set(call):
+        volume_calls.append(dict(call.data))
+
+    hass.services.async_register("media_player", "volume_set", _volume_set)
+    _register_music_assistant_play_media(hass, ma_calls)
+
+    result = await hass.services.async_call(
+        DOMAIN,
+        "execute",
+        {
+            "target": target,
+            "area_id": area.id,
+            "intent_class": "home_control",
+            "context": runtime_context,
+        },
+        blocking=True,
+        return_response=True,
+    )
+
+    provider = result["media_provider_resolution"]
+    assert result["executed"] is True
+    assert provider["provider_selected"] == "music_assistant"
+    assert provider["provider_available"] is True
+    assert provider["request_kind"] == expected_kind
+    assert provider["media_query"] == expected_media_id
+    assert provider["group_targeted_speakers"] == ["media_player.den_main"]
+    assert provider["follow_me_excluded"] is True
+    assert provider["persistent_merged_room_media_memory_created"] is False
+    assert ma_calls and ma_calls[0]["media_id"] == expected_media_id
+    if expected_media_type is None:
+        assert "media_type" not in ma_calls[0]
+    else:
+        assert ma_calls[0]["media_type"] == expected_media_type
+    assert bool(ma_calls[0].get("radio_mode", False)) is expect_radio
+    assert volume_calls
+
+
+async def test_execute_music_assistant_disabled_refuses_deterministically(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """When Music Assistant is not enabled in Concierge configuration, provider selection must refuse deterministically."""
+    area = ar.async_get(hass).async_create(name="Media Den")
+    await hass.services.async_call(
+        DOMAIN,
+        "update_room_config",
+        {"area_id": area.id, "media_player_entity_ids": ["media_player.den_main"]},
+        blocking=True,
+    )
+
+    result = await hass.services.async_call(
+        DOMAIN,
+        "execute",
+        {"target": "play jazz", "area_id": area.id, "intent_class": "home_control"},
+        blocking=True,
+        return_response=True,
+    )
+
+    provider = result["media_provider_resolution"]
+    assert result["executed"] is False
+    assert provider["failure_reason"] == "media_provider_disabled"
+    assert provider["refusal_reason"] == "media_provider_disabled"
+    assert provider["refusal_category"] == "configuration_unavailable"
+    assert provider["fallback_used"] is True
+    assert provider["fallback_path"] == "governed_provider_refusal"
+
+
+async def test_execute_music_assistant_unavailable_refuses_deterministically(
+    hass: HomeAssistant,
+    setup_integration,
+    monkeypatch,
+) -> None:
+    """When Music Assistant is configured but unavailable, playback should refuse deterministically."""
+    _enable_music_assistant_provider(hass, monkeypatch)
+    area = ar.async_get(hass).async_create(name="Media Den")
+    await hass.services.async_call(
+        DOMAIN,
+        "update_room_config",
+        {"area_id": area.id, "media_player_entity_ids": ["media_player.den_main"]},
+        blocking=True,
+    )
+
+    result = await hass.services.async_call(
+        DOMAIN,
+        "execute",
+        {"target": "play jazz", "area_id": area.id, "intent_class": "home_control"},
+        blocking=True,
+        return_response=True,
+    )
+
+    provider = result["media_provider_resolution"]
+    assert result["executed"] is False
+    assert provider["failure_reason"] == "music_assistant_unavailable"
+    assert provider["refusal_reason"] == "music_assistant_unavailable"
+    assert provider["refusal_category"] == "capability_unavailable"
+    assert provider["fallback_used"] is True
+    assert provider["fallback_path"] == "governed_provider_refusal"
+
+
+@pytest.mark.parametrize(
+    ("identity_state", "confidence_band", "music_affinity", "room_default", "expected_query", "expected_tier", "expected_reason"),
+    [
+        ("known", "high", "Miles Davis", "room-default", "Miles Davis", "known_person_preference", "known_person_allowed"),
+        ("guest", "high", "Miles Davis", "room-default", "room-default", "room_default", "guest_identity_blocked"),
+        ("low_confidence", "low", "Miles Davis", "room-default", "room-default", "room_default", "low_confidence_identity_blocked"),
+    ],
+)
+async def test_execute_music_assistant_identity_governs_preference_inputs(
+    hass: HomeAssistant,
+    setup_integration,
+    monkeypatch,
+    identity_state: str,
+    confidence_band: str,
+    music_affinity: str,
+    room_default: str,
+    expected_query: str,
+    expected_tier: str,
+    expected_reason: str,
+) -> None:
+    """Identity state and confidence must govern whether person preference inputs are used."""
+    _enable_music_assistant_provider(hass, monkeypatch)
+    area = ar.async_get(hass).async_create(name="Media Den")
+    await hass.services.async_call(
+        DOMAIN,
+        "update_room_config",
+        {"area_id": area.id, "media_player_entity_ids": ["media_player.den_main"]},
+        blocking=True,
+    )
+    hass.states.async_set("media_player.den_main", "playing", {"volume_level": 0.4})
+
+    ma_calls: list[dict[str, object]] = []
+    if hass.services.has_service("media_player", "volume_set"):
+        hass.services.async_remove("media_player", "volume_set")
+
+    async def _volume_set(_call):
+        return None
+
+    hass.services.async_register("media_player", "volume_set", _volume_set)
+    _register_music_assistant_play_media(hass, ma_calls)
+
+    result = await hass.services.async_call(
+        DOMAIN,
+        "execute",
+        {
+            "target": "play music",
+            "area_id": area.id,
+            "intent_class": "home_control",
+            "context": {
+                "identity_context": {
+                    "state": identity_state,
+                    "confidence_band": confidence_band,
+                    "source": "voice_identity",
+                },
+                "media_preference_inputs": {"music_affinity": music_affinity},
+                "room_default_media_query": room_default,
+                "household_default_media_query": "house-default",
+                "system_safe_media_query": "safe-music",
+            },
+        },
+        blocking=True,
+        return_response=True,
+    )
+
+    identity_resolution = result["identity_aware_media_resolution"]["preference_resolution"]
+    assert result["media_provider_resolution"]["media_query"] == expected_query
+    assert identity_resolution["selected_tier"] == expected_tier
+    assert identity_resolution["identity_decision"]["reason_code"] == expected_reason
+    assert ma_calls and ma_calls[0]["media_id"] == expected_query
+
+
+async def test_execute_music_assistant_merged_room_targets_group_and_excludes_follow_me(
+    hass: HomeAssistant,
+    setup_integration,
+    monkeypatch,
+) -> None:
+    """Merged-room media playback should target configured grouped speakers without introducing Follow-Me behavior."""
+    _enable_music_assistant_provider(hass, monkeypatch)
+    floor = fr.async_get(hass).async_create(name="Main")
+    area_registry = ar.async_get(hass)
+    room_a = area_registry.async_create(name="Living Room", floor_id=floor.floor_id)
+    room_b = area_registry.async_create(name="Kitchen", floor_id=floor.floor_id)
+
+    await hass.services.async_call(
+        DOMAIN,
+        "update_room_config",
+        {"area_id": room_a.id, "media_player_entity_ids": ["media_player.living_main"]},
+        blocking=True,
+    )
+    await hass.services.async_call(
+        DOMAIN,
+        "update_room_config",
+        {"area_id": room_b.id, "media_player_entity_ids": ["media_player.kitchen_main"]},
+        blocking=True,
+    )
+    await hass.services.async_call(
+        DOMAIN,
+        "update_composite_config",
+        {
+            "composite_id": "public_space",
+            "name": "Public Space",
+            "area_ids": [room_a.id, room_b.id],
+            "primary_area": room_a.id,
+        },
+        blocking=True,
+    )
+
+    hass.states.async_set("media_player.living_main", "playing", {"volume_level": 0.61})
+    hass.states.async_set("media_player.kitchen_main", "paused", {"volume_level": 0.42})
+
+    ma_calls: list[dict[str, object]] = []
+    volume_calls: list[dict[str, object]] = []
+    if hass.services.has_service("media_player", "volume_set"):
+        hass.services.async_remove("media_player", "volume_set")
+
+    async def _volume_set(call):
+        volume_calls.append(dict(call.data))
+
+    hass.services.async_register("media_player", "volume_set", _volume_set)
+    _register_music_assistant_play_media(hass, ma_calls)
+
+    result = await hass.services.async_call(
+        DOMAIN,
+        "execute",
+        {
+            "target": "play jazz",
+            "area_id": room_a.id,
+            "composite_id": "public_space",
+            "intent_class": "home_control",
+        },
+        blocking=True,
+        return_response=True,
+    )
+
+    provider = result["media_provider_resolution"]
+    assert result["executed"] is True
+    assert provider["provider_selected"] == "music_assistant"
+    assert provider["merged_room_participation"] is True
+    assert sorted(provider["group_targeted_speakers"]) == ["media_player.kitchen_main", "media_player.living_main"]
+    assert provider["follow_me_excluded"] is True
+    assert provider["persistent_merged_room_media_memory_created"] is False
+    assert ma_calls and ma_calls[0]["media_id"] == "jazz"
+    assert volume_calls
+
+
 async def test_execute_preserves_room_target_without_composite_override(
     hass: HomeAssistant,
     setup_integration,
@@ -4074,6 +8476,10 @@ async def test_execute_direct_returns_execution_envelope_and_event(
     )
 
     assert result["executed"] is True
+    assert result["execution_outcome_category"] == "EXECUTE_SUCCESS"
+    assert result["silence_as_success"] is False
+    assert result["response_required"] is False
+    assert result["response_generated"] is False
     envelope = result["execution_envelope"]
     assert envelope["execution_kind"] == "direct"
     boundary = envelope["capability_projection_boundary"]
@@ -4283,6 +8689,10 @@ async def test_execute_preserves_global_context_fallback_in_envelope(
         return_response=True,
     )
 
+    assert result["execution_outcome_category"] == "SILENCE_SUCCESS"
+    assert result["silence_as_success"] is True
+    assert result["response_required"] is False
+    assert result["response_generated"] is False
     envelope = result["execution_envelope"]
     assert envelope["routing"]["route_scope"] == "global"
     assert envelope["context"]["context_area_id"] is None
@@ -4711,6 +9121,55 @@ async def test_execute_enables_person_aware_productivity_routing_when_active_per
         provenance_diagnostics_boundary["non_authority_assertions"]["claims_ownership_authority"]
         is False
     )
+
+
+async def test_execute_surfaces_room_configuration_authority_traceability_for_composite_room(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """Execute should carry room authority from configuration even when a composite is resolved."""
+    area = ar.async_get(hass).async_create(name="Living Room")
+    storage = ConciergeStorage(hass)
+    await storage.async_update_room_config(
+        area_id=area.id,
+        voice_device_entity_ids=["assist_satellite.living_room"],
+        speaker_entity_ids=["media_player.living_room_speaker"],
+        environment_information_outputs=["weather"],
+        weather_source_entity_ids=["weather.living_room"],
+    )
+    await storage.async_update_composite_config(
+        composite_id="living_suite",
+        area_ids=[area.id],
+        primary_area=area.id,
+        voice_device_entity_ids=["assist_satellite.living_room"],
+        speaker_entity_ids=["media_player.living_room_speaker"],
+        environment_information_outputs=["weather"],
+    )
+
+    result = await hass.services.async_call(
+        DOMAIN,
+        "execute",
+        {
+            "area_id": area.id,
+            "composite_id": "living_suite",
+            "target": "light.kitchen",
+            "intent_class": "home_control",
+        },
+        blocking=True,
+        return_response=True,
+    )
+
+    room_authority = result["execution_envelope"]["room_authority_traceability"]
+    assert room_authority["room_configuration_loaded"] is True
+    assert room_authority["room_authority_source"] == "room_configuration"
+    assert room_authority["merged_room_authority_source"] == "room_configuration"
+    assert room_authority["room_configuration_primary_area"] == area.id
+    assert room_authority["room_configuration_composite_id"] == "living_suite"
+    assert room_authority["environment_source_origin"] == "room_configuration"
+
+    capability_discovery = result["execution_envelope"]["capability_discovery"]
+    assert capability_discovery["authority_traceability"]["room_configuration_loaded"] is True
+    assert capability_discovery["authority_traceability"]["merged_room_authority_source"] == "room_configuration"
 
 
 async def test_execute_disables_person_aware_productivity_routing_for_ambiguous_identity(
@@ -5273,3 +9732,37 @@ async def test_execute_preserves_voice_identity_authority_boundary_for_consumpti
     assert explainability_boundary["replace_voice_identity_provenance"] is False
     assert explainability_boundary["create_explainability_lineage"] is False
     assert explainability_boundary["infer_identity_state"] is False
+
+
+async def test_ec416_monitoring_degraded_path_preserves_validation_only_authority(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """EC416: degraded monitoring path must refuse deterministically without authority bypass."""
+    area = ar.async_get(hass).async_create(name="Office")
+    storage = ConciergeStorage(hass)
+    await storage.async_update_room_config(
+        area_id=area.id,
+        room_sensor_entity_ids=[],
+    )
+
+    result = await hass.services.async_call(
+        DOMAIN,
+        "get_summary",
+        {
+            "area_id": area.id,
+            "monitoring_capability": "temperature",
+        },
+        blocking=True,
+        return_response=True,
+    )
+
+    monitoring = result["monitoring_follow_up"]
+    assert monitoring["refusal_reason"] == "configured_capability_mapping_missing"
+    assert monitoring["refusal_category"] == "capability_unavailable"
+    assert monitoring["runtime_discovery_reliance"] == "validation_only"
+    assert monitoring["room_authority_source"] == "room_configuration"
+
+    assert result["execution_outcome_category"] == "REFUSAL_SUCCESS"
+    assert result["response_required"] is True
+    assert result["response_generated"] is True

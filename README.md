@@ -11,8 +11,9 @@ Concierge consumes governed context from platform authorities and produces deter
 ## Release Status
 
 - Product documentation version: v1.0.0
-- Concierge governed implementation status: complete
+- Concierge core governed implementation status: complete
 - Phase 3 governed implementation status: complete
+- Post-install enhancement track: active (including Follow-Me media continuity classification)
 
 This README describes what Concierge does today.
 
@@ -25,6 +26,14 @@ Concierge currently provides:
 - Household productivity context consumption and synthesis surfaces
 - Provenance-oriented activity timeline and archive export surfaces
 - Diagnostics and repair visibility for operational explainability
+
+## Post-Install Enhancements
+
+Concierge continues to evolve through bounded post-install enhancements that preserve HTBW authority and consumer constraints.
+
+Current enhancement focus includes Follow-Me media continuity classification and decision explainability for room-transition handoff behavior.
+
+Follow-Me is explicitly separate from both room-aware playback and merged-room playback.
 
 ## Platform Responsibility Model
 
@@ -72,6 +81,7 @@ Concierge does not replace authority owned by other services:
 - Coordinates by room-first household context
 - Supports merged and composite room behavior
 - Supports room and structure synchronization with Home Assistant area state
+- Supports governed media continuity with explicit Follow-Me classification boundaries
 
 ### 3) Person and Identity Context Consumption
 
@@ -102,6 +112,14 @@ Concierge does not replace authority owned by other services:
 - Supports activity event recording and activity outcome closure
 - Supports timeline query and archive export
 - Supports diagnostics visibility aligned to bounded governance ownership
+- Exposes media continuity and Follow-Me decision fields for runtime explainability
+
+## Follow-Me and Media Continuity Boundaries
+
+- Follow-Me requires policy-authorized identity and room-transition context.
+- Follow-Me does not override merged-room grouping behavior.
+- Manual stop and cooldown protections can block handoff by design.
+- Destination room playback targets must be configured and available.
 
 ## Home Assistant Service Surface
 
@@ -197,6 +215,14 @@ This README is the product truth and operational overview for Concierge v1.0.0.
 
 Deeper architecture, configuration guides, and user manual content are intended for the Concierge Wiki.
 
+For Follow-Me implementation and boundaries, see:
+
+- [Follow-Me media guide](docs/governance/experience-continuity/follow-me-media-guide.md)
+- [Follow-Me limitations and boundaries](docs/governance/experience-continuity/follow-me-limitations-and-boundaries.md)
+- [Wiki: Follow-Me media](docs/wiki/follow-me-media.md)
+- [Wiki: Services reference](docs/wiki/services-reference.md)
+- [Wiki: Troubleshooting](docs/wiki/troubleshooting.md)
+
 ## Learn More
 
 Platform and repository documentation:
@@ -206,6 +232,7 @@ Platform and repository documentation:
 /docs/contracts/
 /docs/models/
 /docs/governance/
+/docs/wiki/
 /docs/patterns/
 /docs/philosophy/
 ```

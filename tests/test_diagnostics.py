@@ -103,6 +103,8 @@ async def test_diagnostics_include_state_summary(
         "household_memory_messaging_continuity_affinity_occupancy_restoration_separation_visibility",
         "household_memory_provenance_diagnostics_explainability_visibility",
         "continuity_affinity_diagnostics_explainability_visibility",
+        "continuity_classification_traceability_visibility",
+        "continuity_decision_traceability_visibility",
         "occupancy_presence_diagnostics_explainability_visibility",
         "restoration_diagnostics_explainability_visibility",
         "preservation_baseline",
@@ -422,6 +424,35 @@ async def test_diagnostics_include_state_summary(
     assert continuity_affinity_diag["diagnostics_non_rights"]["creates_authority"] is False
     assert continuity_affinity_diag["diagnostics_non_rights"]["modifies_continuity_behavior"] is False
     assert continuity_affinity_diag["diagnostics_non_rights"]["modifies_affinity_behavior"] is False
+
+    continuity_classification_diag = diagnostics["continuity_classification_traceability_visibility"]
+    assert continuity_classification_diag["classifier_version"] == "ec_a_02_v1"
+    assert continuity_classification_diag["deterministic"] is True
+    assert continuity_classification_diag["sample_trace_count"] == 5
+    assert continuity_classification_diag["sample_traces"][0]["scope_classification"]["scope"] == "entity"
+    assert continuity_classification_diag["sample_traces"][1]["scope_classification"]["scope"] == "room"
+    assert continuity_classification_diag["sample_traces"][2]["scope_classification"]["scope"] == "person"
+    assert continuity_classification_diag["sample_traces"][3]["scope_classification"]["scope"] == "household"
+    assert continuity_classification_diag["sample_traces"][4]["scope_classification"]["scope"] == "mode"
+
+    continuity_decision_diag = diagnostics["continuity_decision_traceability_visibility"]
+    assert continuity_decision_diag["diagnostics_version"] == "ec_a_04_v1"
+    assert continuity_decision_diag["classifier_version"] == "ec_a_02_v1"
+    assert continuity_decision_diag["deterministic"] is True
+    assert continuity_decision_diag["sample_decision_trace_count"] == 8
+    assert continuity_decision_diag["trace_visibility"]["decision_summary_trace_fields"] == [
+        "decision_identifier",
+        "timestamp",
+        "source_evidence",
+        "final_classification_outcome",
+        "explainability_references",
+    ]
+    assert continuity_decision_diag["redaction_visibility"]["raw_debug_payloads_exposed"] is False
+    assert continuity_decision_diag["redaction_visibility"]["personally_sensitive_content_exposed"] is False
+    assert continuity_decision_diag["fallback_visibility"]["sample_fallback_trace_count"] == 3
+    assert continuity_decision_diag["confidence_visibility"]["confidence_trace_count"] == 8
+    assert continuity_decision_diag["sample_decision_traces"][0]["fallback_trace"]["fallback_applied"] is False
+    assert continuity_decision_diag["sample_decision_traces"][5]["fallback_trace"]["fallback_applied"] is True
 
     occupancy_presence_diag = diagnostics["occupancy_presence_diagnostics_explainability_visibility"]
     assert occupancy_presence_diag["authority_visibility"]["occupancy_authority_external"] is True
@@ -1018,6 +1049,14 @@ async def test_diagnostics_expose_execution_and_routing_explainability(
     assert continuity_affinity_diag["diagnostics_non_rights"]["modifies_continuity_behavior"] is False
     assert continuity_affinity_diag["diagnostics_non_rights"]["modifies_affinity_behavior"] is False
     assert continuity_affinity_diag["diagnostics_non_rights"]["modifies_privacy_behavior"] is False
+
+    continuity_classification_diag = diagnostics["continuity_classification_traceability_visibility"]
+    assert continuity_classification_diag["deterministic"] is True
+    assert continuity_classification_diag["sample_trace_count"] == 5
+
+    continuity_decision_diag = diagnostics["continuity_decision_traceability_visibility"]
+    assert continuity_decision_diag["deterministic"] is True
+    assert continuity_decision_diag["sample_decision_trace_count"] == 8
 
     restoration_diag = diagnostics["restoration_diagnostics_explainability_visibility"]
     assert restoration_diag["authority_visibility"]["restoration_authority_external"] is True
@@ -1923,3 +1962,22 @@ async def test_diagnostics_expose_vocabulary_ambiguity_visibility(
     assert ambiguity["recent_ambiguity_event_count"] >= 1
     latest_event = ambiguity["recent_ambiguity_events"][0]
     assert "ambiguous" in latest_event["outcome_reason"]
+
+
+async def test_ec416_diagnostics_show_degraded_context_without_authority_bypass(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """EC416: diagnostics must preserve validation-only degraded behavior and external authority."""
+    diagnostics = await async_get_config_entry_diagnostics(hass, setup_integration)
+
+    release_6 = diagnostics["release_6_productivity_diagnostics_visibility"]
+    continuity_decisions = diagnostics["continuity_decision_traceability_visibility"]
+    voice_identity_linkage = diagnostics["voice_identity_linkage_setup_boundary_visibility"]
+
+    assert release_6["safe_fallback_visibility"]["missing_prerequisite_boundary_count"] >= 1
+    assert release_6["diagnostics_non_rights"]["creates_authority"] is False
+    assert continuity_decisions["deterministic"] is True
+    assert continuity_decisions["sample_decision_trace_count"] >= 1
+    assert voice_identity_linkage["voice_identity_discovery_state"] in {"unavailable", "available"}
+    assert voice_identity_linkage["safe_fallback_mode_active"] is True
