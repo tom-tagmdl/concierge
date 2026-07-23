@@ -13,7 +13,6 @@ from uuid import uuid4
 
 import voluptuous as vol
 
-from homeassistant.components.tts.const import DATA_COMPONENT as TTS_DATA_COMPONENT
 from homeassistant.helpers import area_registry as ar
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
@@ -100,6 +99,7 @@ _LOGGER = logging.getLogger(__name__)
 _PROVIDER_NONE = "none"
 _PROVIDER_ASSET_INTELLIGENCE = "asset_intelligence"
 _PROVIDER_MUSIC_ASSISTANT = "music_assistant"
+_TTS_DATA_COMPONENT = "tts"
 _DEFAULT_TARGET_SAMPLE_COUNT = 3
 _VOICE_IDENTITY_DOMAIN = "voice_identity"
 _VOICE_IDENTITY_SERVICE_ATTRIBUTE_SPEAKER = "attribute_speaker"
@@ -3778,8 +3778,8 @@ def _resolve_room_tts_settings(
 
     if not voice and provider:
         entity_id = TTS_PROVIDER_ENTITY_IDS.get(provider)
-        if entity_id and TTS_DATA_COMPONENT in hass.data:
-            entity_component = hass.data[TTS_DATA_COMPONENT]
+        if entity_id and _TTS_DATA_COMPONENT in hass.data:
+            entity_component = hass.data[_TTS_DATA_COMPONENT]
             tts_entity = entity_component.get_entity(entity_id)
             if tts_entity is not None:
                 if not language:
