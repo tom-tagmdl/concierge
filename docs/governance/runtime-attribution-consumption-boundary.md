@@ -380,3 +380,78 @@ E11-VI2 RUNTIME ATTRIBUTION CONSUMPTION BOUNDARY
 APPROVED AS THE AUTHORITATIVE BASELINE
 
 FOR RUNTIME ATTRIBUTION CONSUMPTION
+
+## 27. Runtime Lifecycle Clarification Addendum (2026-07-23)
+
+This addendum is authoritative guidance aligned with
+`docs/architecture/adr-runtime-voice-attribution-lifecycle.md`.
+
+### 27.1 Ownership Clarification
+
+Voice Identity owns:
+
+- runtime attribution execution
+- attribution records
+- attribution context storage
+- freshness and TTL policy
+- confidence and ambiguity determination
+
+Concierge consumes safe attribution context and does not become the
+attribution source of truth.
+
+### 27.2 Correlation Clarification
+
+`conversation_id`, `device_id`, and `satellite_id` are correlation keys.
+
+They are not identity authority and do not define a conversation owner model.
+
+Speaker handoff is valid within the same conversation.
+
+### 27.3 TTL Clarification
+
+Attribution context is a short-lived bridge from audio-time to text-time.
+
+Default reuse policy:
+
+- known high confidence: 30 seconds
+- known medium confidence: 15 seconds
+- low confidence or ambiguous: 5 to 10 seconds
+- unknown: no reuse
+- unavailable: no reuse
+
+Absolute cap: 60 seconds unless superseded by accepted ADR authority.
+
+### 27.4 Text-Only Trigger Clarification
+
+Home Assistant text-only `conversation` trigger paths are valid for fallback,
+debug, typed input, and non-personal room-scoped behavior.
+
+These paths are not identity-authoritative and are not the source of truth for
+speaker attribution.
+
+### 27.5 Authorization Classification Clarification
+
+Concierge must apply identity requirement classification prior to intent
+execution:
+
+- `identity_not_required`
+- `identity_optional`
+- `identity_required`
+- `identity_required_fresh`
+- `identity_required_step_up`
+
+The `not_required` attribution state is distinct from `unknown` and is used
+when identity is not required by the intent policy.
+
+### 27.6 Privacy Clarification
+
+Concierge attribution-consumption diagnostics and execution envelopes must not
+expose:
+
+- raw audio
+- embeddings
+- vectors
+- biometric internals
+- long-lived identity artifacts
+
+Safe reason codes and policy outcomes remain required for explainability.

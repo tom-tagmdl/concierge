@@ -88,6 +88,8 @@ Concierge does not replace authority owned by other services:
 - Consumes person profile and identity context
 - Applies policy-aware person controls and bounded consent posture
 - Preserves fail-closed behavior for unavailable or low-confidence attribution paths
+- Treats `conversation_id`, `device_id`, and `satellite_id` as correlation context only, not identity authority
+- Consumes short-lived Voice Identity attribution context generated while audio is available
 
 ### 4) Voice Enrollment Lifecycle Surfaces
 
@@ -120,6 +122,13 @@ Concierge does not replace authority owned by other services:
 - Follow-Me does not override merged-room grouping behavior.
 - Manual stop and cooldown protections can block handoff by design.
 - Destination room playback targets must be configured and available.
+
+## Runtime Voice Attribution Boundary
+
+- Voice Identity performs attribution while audio is available.
+- Voice Identity owns short-lived runtime attribution context lifecycle.
+- Concierge consumes safe attribution context and applies authorization classification.
+- Home Assistant text-only conversation-trigger automation paths are fallback/debug paths and are not identity-authoritative.
 
 ## Home Assistant Service Surface
 

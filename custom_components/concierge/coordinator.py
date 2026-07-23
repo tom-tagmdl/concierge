@@ -112,6 +112,8 @@ def _resolve_active_person_resolution(latest_envelope: dict[str, Any] | None) ->
         "identity_context_service_unavailable",
         "attribution_unavailable",
         "attribution_not_ready",
+        "identity_audio_missing",
+        "identity_context_missing",
     }
 
     available = bool(attribution_consumed and person_id)
@@ -163,6 +165,64 @@ def _resolve_active_person_resolution(latest_envelope: dict[str, Any] | None) ->
         "fail_closed": not available,
         "authority_source": "voice_identity",
         "consumption_only": True,
+    }
+
+
+def _resolve_identity_policy_projection(latest_envelope: dict[str, Any] | None) -> dict[str, Any]:
+    """Resolve latest identity authorization classification and policy projection."""
+    if latest_envelope is None:
+        return {
+            "identity_requirement_class": "identity_not_required",
+            "identity_policy_outcome": "continue_without_identity",
+            "identity_policy_reason_code": "identity_not_required",
+            "identity_policy_source": "concierge.identity_authorization_classification.v1",
+            "identity_freshness_class": "not_applicable",
+            "identity_attribution_age_ms": -1,
+            "identity_state": "not_required",
+            "confidence_band": "none",
+            "classification_source": "no_execution_envelope",
+        }
+
+    try:
+        attribution_age_ms = int(latest_envelope.get("identity_attribution_age_ms", -1) or -1)
+    except (TypeError, ValueError):
+        attribution_age_ms = -1
+
+    return {
+        "identity_requirement_class": str(
+            latest_envelope.get("identity_requirement_class") or "identity_not_required"
+        ).strip().lower()
+        or "identity_not_required",
+        "identity_policy_outcome": str(
+            latest_envelope.get("identity_policy_outcome") or "continue_without_identity"
+        ).strip().lower()
+        or "continue_without_identity",
+        "identity_policy_reason_code": str(
+            latest_envelope.get("identity_policy_reason_code") or "identity_not_required"
+        ).strip().lower()
+        or "identity_not_required",
+        "identity_policy_source": str(
+            latest_envelope.get("identity_policy_source")
+            or "concierge.identity_authorization_classification.v1"
+        ).strip()
+        or "concierge.identity_authorization_classification.v1",
+        "identity_freshness_class": str(
+            latest_envelope.get("identity_freshness_class") or "not_applicable"
+        ).strip().lower()
+        or "not_applicable",
+        "identity_attribution_age_ms": attribution_age_ms,
+        "identity_state": str(
+            latest_envelope.get("identity_policy_identity_state") or "not_required"
+        ).strip().lower()
+        or "not_required",
+        "confidence_band": str(
+            latest_envelope.get("identity_policy_confidence_band") or "none"
+        ).strip().lower()
+        or "none",
+        "classification_source": str(
+            latest_envelope.get("identity_policy_classification_source") or "unknown"
+        ).strip().lower()
+        or "unknown",
     }
 
 
@@ -506,6 +566,7 @@ class ConciergeCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         state = await self._storage.async_load_state()
         latest_execution_ref = _latest_execution_envelope_ref(state)
         active_person_resolution = _resolve_active_person_resolution(latest_execution_ref)
+        identity_policy_projection = _resolve_identity_policy_projection(latest_execution_ref)
         foundation_area_ids = {area.id for area in ar.async_get(self.hass).async_list_areas()}
         configured_room_outside_foundation_count = sum(
             1 for area_id in state.rooms if area_id not in foundation_area_ids
@@ -692,6 +753,10 @@ class ConciergeCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "active_person_state": active_person_resolution["active_person_state"],
             "active_person_reason_code": active_person_resolution["reason_code"],
             "active_person_available": active_person_resolution["active_person_available"],
+            "identity_requirement_class": identity_policy_projection["identity_requirement_class"],
+            "identity_policy_outcome": identity_policy_projection["identity_policy_outcome"],
+            "identity_policy_reason_code": identity_policy_projection["identity_policy_reason_code"],
+            "identity_freshness_class": identity_policy_projection["identity_freshness_class"],
         }
         room_configs = {
             area_id: {
@@ -730,4 +795,5 @@ class ConciergeCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 for voice_profile_id, profile in state.voice_profiles.items()
             },
             "active_person_resolution": active_person_resolution,
+            "identity_policy_projection": identity_policy_projection,
         }

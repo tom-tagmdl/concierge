@@ -43,6 +43,9 @@ CONF_ASSET_INTELLIGENCE_PROVIDER = "asset_intelligence_provider"
 CONF_AUDIT_ARCHIVE_DESTINATION_URI = "audit_archive_destination_uri"
 CONF_AUDIT_ARCHIVE_ENABLED = "audit_archive_enabled"
 CONF_AUDIT_ARCHIVE_INCLUDE_REFERENCE_EXCERPTS = "audit_archive_include_reference_excerpts"
+_VOICE_IDENTITY_DOMAIN = "voice_identity"
+_VOICE_IDENTITY_DEFAULT_MODEL = "ecapa_v1"
+_VOICE_IDENTITY_ALIGNMENT_NOTIFICATION_ID = "concierge_voice_identity_alignment"
 
 DEFAULT_AI_ENABLED = False
 DEFAULT_AI_LOCAL_FIRST = True
@@ -184,6 +187,93 @@ def _resolve_default_from_options(
     if fallback in values:
         return fallback
     return next(iter(values), fallback)
+
+
+async def _async_notify_voice_identity_alignment(hass, updates: list[str]) -> None:
+    """Publish a user-facing summary when Concierge aligns Voice Identity settings."""
+    if not updates:
+        return
+
+    message_lines = [
+        "Concierge updated Voice Identity settings to keep enrollment and build flows aligned:",
+        "",
+    ]
+    message_lines.extend(f"- {item}" for item in updates)
+    message_lines.extend(
+        [
+            "",
+            "You can review or adjust these values in Voice Identity options.",
+        ]
+    )
+
+    await hass.services.async_call(
+        "persistent_notification",
+        "create",
+        {
+            "title": "Concierge aligned Voice Identity",
+            "message": "\n".join(message_lines),
+            "notification_id": _VOICE_IDENTITY_ALIGNMENT_NOTIFICATION_ID,
+        },
+        blocking=True,
+    )
+
+
+async def _async_align_voice_identity_entry_for_concierge(hass, *, linked: bool) -> list[str]:
+    """Align Voice Identity runtime options when Concierge linkage is enabled."""
+    if not linked:
+        return []
+
+    entries = hass.config_entries.async_entries(_VOICE_IDENTITY_DOMAIN)
+    if not entries:
+        return []
+
+    entry = entries[0]
+    merged = {**dict(entry.data), **dict(entry.options)}
+    updates: list[str] = []
+
+    service = dict(merged.get("service") or {})
+    generation = dict(merged.get("generation") or {})
+    feature_flags = dict(merged.get("feature_flags") or {})
+
+    if not bool(service.get("enabled", False)):
+        updates.append("service.enabled -> true")
+    service["enabled"] = True
+
+    model_preference = str(generation.get("model_preference") or _VOICE_IDENTITY_DEFAULT_MODEL).strip() or _VOICE_IDENTITY_DEFAULT_MODEL
+    if str(generation.get("model_preference") or "").strip() != model_preference:
+        updates.append(f"generation.model_preference -> {model_preference}")
+    raw_supported_models = generation.get("supported_models", (_VOICE_IDENTITY_DEFAULT_MODEL,))
+    if isinstance(raw_supported_models, str):
+        supported_models = tuple(item.strip() for item in raw_supported_models.split(",") if item.strip())
+    else:
+        supported_models = tuple(str(item).strip() for item in raw_supported_models if str(item).strip())
+    if not supported_models:
+        supported_models = (_VOICE_IDENTITY_DEFAULT_MODEL,)
+    if model_preference not in supported_models:
+        supported_models = tuple(dict.fromkeys((*supported_models, model_preference)))
+        updates.append(
+            f"generation.supported_models includes {model_preference}"
+        )
+
+    generation["model_preference"] = model_preference
+    generation["supported_models"] = supported_models
+
+    # Concierge enrollment requires a generation backend path during development
+    # validation. Enabling experimental models activates deterministic execution.
+    if not bool(feature_flags.get("enable_experimental_models", False)):
+        updates.append("feature_flags.enable_experimental_models -> true")
+    feature_flags["enable_experimental_models"] = True
+
+    updated_options = dict(entry.options)
+    updated_options["service"] = service
+    updated_options["generation"] = generation
+    updated_options["feature_flags"] = feature_flags
+
+    if updated_options == dict(entry.options):
+        return []
+
+    hass.config_entries.async_update_entry(entry, options=updated_options)
+    return updates
 
 
 def _build_global_config_schema(
@@ -350,6 +440,12 @@ class ConciergeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 user_input[CONF_AUDIT_ARCHIVE_ENABLED] = False
                 user_input[CONF_AUDIT_ARCHIVE_INCLUDE_REFERENCE_EXCERPTS] = False
 
+            alignment_updates = await _async_align_voice_identity_entry_for_concierge(
+                self.hass,
+                linked=bool(user_input.get(CONF_VOICE_IDENTITY_LINKED, False)),
+            )
+            await _async_notify_voice_identity_alignment(self.hass, alignment_updates)
+
             await self.async_set_unique_id(DOMAIN)
             self._abort_if_unique_id_configured()
             return self.async_create_entry(title=user_input["name"], data=user_input)
@@ -399,6 +495,12 @@ class ConciergeOptionsFlow(config_entries.OptionsFlow):
             if not destination_is_valid:
                 user_input[CONF_AUDIT_ARCHIVE_ENABLED] = False
                 user_input[CONF_AUDIT_ARCHIVE_INCLUDE_REFERENCE_EXCERPTS] = False
+
+            alignment_updates = await _async_align_voice_identity_entry_for_concierge(
+                self.hass,
+                linked=bool(user_input.get(CONF_VOICE_IDENTITY_LINKED, False)),
+            )
+            await _async_notify_voice_identity_alignment(self.hass, alignment_updates)
 
             return self.async_create_entry(title="", data=user_input)
 

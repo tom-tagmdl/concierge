@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import shutil
 from types import SimpleNamespace
+from pathlib import Path
 
 import pytest
 
+from homeassistant import loader
 from homeassistant.core import HomeAssistant
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
@@ -29,6 +32,18 @@ from custom_components.concierge.const import (
 
 
 @pytest.fixture
+def hass_config_dir(hass_tmp_config_dir: str) -> str:
+    """Provide a writable HA config dir with this repo's custom integration staged."""
+    config_dir = Path(hass_tmp_config_dir)
+    repo_custom_components = Path(__file__).resolve().parents[1] / "custom_components"
+    target_custom_components = config_dir / "custom_components"
+
+    shutil.copytree(repo_custom_components, target_custom_components, dirs_exist_ok=True)
+
+    return hass_tmp_config_dir
+
+
+@pytest.fixture
 def mock_config_entry() -> MockConfigEntry:
     """Return a mock config entry."""
     return MockConfigEntry(
@@ -41,24 +56,34 @@ def mock_config_entry() -> MockConfigEntry:
     )
 
 
-@pytest.fixture
-def enable_custom_integrations() -> None:
-    """Fallback fixture for standalone runs when pytest plugin autoload is disabled."""
-    return None
-
-
 @pytest.fixture(autouse=True)
-def auto_enable_custom_integrations(enable_custom_integrations):
-    """Enable loading integration code from custom_components during tests."""
+def auto_enable_custom_integrations(request):
+    """Use plugin integration-loading fixture when available; no-op otherwise."""
+    try:
+        request.getfixturevalue("enable_custom_integrations")
+    except pytest.FixtureLookupError:
+        # Standalone runs without the HA pytest plugin can still execute
+        # pure unit tests that do not require Home Assistant integration setup.
+        pass
     yield
 
 
 @pytest.fixture
-async def setup_integration(hass: HomeAssistant, mock_config_entry: MockConfigEntry) -> MockConfigEntry:
+async def setup_integration(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    enable_custom_integrations,
+) -> MockConfigEntry:
     """Set up the integration for tests."""
-    from pathlib import Path
-
     storage_root = Path(hass.config.path("voice-enrollment-test-root"))
+
+    # Ensure the integration is discoverable from the active HA config dir.
+    custom_components_root = Path(hass.config.path("custom_components"))
+    custom_components_root.mkdir(parents=True, exist_ok=True)
+    source_integration = Path(__file__).resolve().parents[1] / "custom_components" / DOMAIN
+    target_integration = custom_components_root / DOMAIN
+    shutil.copytree(source_integration, target_integration, dirs_exist_ok=True)
+    hass.data.pop(loader.DATA_CUSTOM_COMPONENTS, None)
 
     services_module.resolve_voice_enrollment_root = lambda destination_uri: storage_root
     panel_module.resolve_voice_enrollment_root = lambda destination_uri: storage_root

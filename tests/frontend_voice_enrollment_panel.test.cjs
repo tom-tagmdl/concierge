@@ -613,6 +613,57 @@ test("satellite capture fallback does not mark success when phrase index is not 
   assert.match(String(app._voiceEnrollmentDialog.status || ""), /Satellite capture failed/i);
 });
 
+test("progress refresh resets phrase to first missing when session changes", async () => {
+  const app = new ConciergeApp();
+  app._integrationOptions = { capabilities: { cap_voice_enrollment: true } };
+  app._voiceEnrollmentDialog = conciergeBuildVoiceEnrollmentDialogState({}, {
+    open: true,
+    personId: "person.tom",
+    voiceProfileId: "person_tom_grounds_voice",
+    enrollmentSessionId: "session_old",
+    phraseIndex: 9,
+    currentCaptured: true,
+    consentAcknowledged: true,
+    localOnly: true,
+    captureProvider: "satellite",
+  });
+
+  app._activeVoiceProfileIdForPerson = () => "person_tom_grounds_voice";
+  app._render = () => {};
+  app._authFetch = async () => ({
+    ok: true,
+    json: async () => ({
+      found: true,
+      voice_profile_id: "person_tom_grounds_voice",
+      enrollment_session_id: "session_new",
+      progress: {
+        session_id: "session_new",
+        sample_count: 2,
+        target_sample_count: 10,
+        completion_percentage: 20,
+        captured_phrase_indices: [8, 9],
+        provider_type: "satellite",
+        user_safe_status_summary: "More samples are required before completion.",
+      },
+    }),
+  });
+  app._hass = {
+    callService: async () => ({
+      ready: false,
+      reason_code: "insufficient_samples",
+      user_safe_status_summary: "More samples are required before completion.",
+    }),
+    auth: { data: {} },
+  };
+
+  await app._refreshVoiceEnrollmentDialogProgress("person.tom", "person_tom_grounds_voice");
+
+  assert.equal(app._voiceEnrollmentDialog.enrollmentSessionId, "session_new");
+  assert.equal(app._voiceEnrollmentDialog.phraseIndex, 0);
+  assert.equal(app._voiceEnrollmentDialog.currentCaptured, false);
+  assert.match(String(app._voiceEnrollmentDialog.progressSummary || ""), /^2\/10/);
+});
+
 test("build profile button stays enabled so click can perform authoritative readiness check", () => {
   const app = new ConciergeApp();
   app._archiveStatus = { destination_uri: "/media/NAS/concierge_log", destination_configured: true };

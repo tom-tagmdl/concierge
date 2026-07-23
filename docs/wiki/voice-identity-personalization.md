@@ -59,3 +59,5 @@ Use quick checks after enrollment:
 4. Send a reminder and confirm it goes to the expected mobile target.
 
 If results are wrong, review [Initial Person Setup](person-setup.md) and [Concierge Integration Settings](integration-settings.md).
+
+For installation/runtime alignment and failure-code remediation, review [Voice Identity and Concierge Alignment](voice-identity-alignment.md).

@@ -66,6 +66,10 @@ from .const import (
     SERVICE_RESUME_VOICE_ENROLLMENT,
 )
 from .enrollment_orchestrator import EnrollmentOrchestrator
+from .identity_authorization_policy import (
+    PolicyOutcome,
+    evaluate_identity_authorization,
+)
 from .models import (
     ActivityEvent,
     ContinuityConfidenceBand,
@@ -102,9 +106,39 @@ _PROVIDER_MUSIC_ASSISTANT = "music_assistant"
 _TTS_DATA_COMPONENT = "tts"
 _DEFAULT_TARGET_SAMPLE_COUNT = 3
 _VOICE_IDENTITY_DOMAIN = "voice_identity"
-_VOICE_IDENTITY_SERVICE_ATTRIBUTE_SPEAKER = "attribute_speaker"
 _VOICE_IDENTITY_SERVICE_GET_IDENTITY_CONTEXT = "get_identity_context"
 _VOICE_IDENTITY_NO_ACTIVE_ATTRIBUTION_STATES = {"unavailable", "unknown", "low_confidence"}
+_IDENTITY_POLICY_SOURCE = "concierge.identity_authorization_classification.v1"
+
+_IDENTITY_NOT_REQUIRED_INTENT_CLASSES = {
+    "home_control",
+    "room_context_info",
+    "weather",
+    "capability_inquiry",
+}
+_IDENTITY_OPTIONAL_INTENT_CLASSES = {
+    "general_qna",
+    "briefing",
+    "household_status",
+}
+_IDENTITY_REQUIRED_INTENT_CLASSES = {
+    "person_preference",
+    "preferred_music",
+    "personal_routine",
+    "person_memory",
+}
+_IDENTITY_REQUIRED_FRESH_INTENT_CLASSES = {
+    "calendar",
+    "messages",
+    "personal_schedule",
+    "private_reminders",
+}
+_IDENTITY_REQUIRED_STEP_UP_INTENT_CLASSES = {
+    "unlock",
+    "disarm",
+    "purchase",
+    "admin_identity_profile_change",
+}
 
 _PRODUCTIVITY_SOURCE_BINDING_FIELDS = ["email", "calendar", "task", "shopping"]
 _PRODUCTIVITY_SOURCE_OF_RECORD_DOMAIN_AUTHORITIES = {
@@ -187,6 +221,12 @@ SERVICE_EXECUTE_SCHEMA = vol.Schema(
         vol.Optional("area_id"): str,
         vol.Optional("composite_id"): str,
         vol.Optional("context"): dict,
+        vol.Optional("conversation_id"): str,
+        vol.Optional("device_id"): str,
+        vol.Optional("satellite_id"): str,
+        vol.Optional("agent_id"): str,
+        vol.Optional("language"): str,
+        vol.Optional("text"): str,
         vol.Optional("person_id"): str,
         vol.Optional("intent_class", default="home_control"): str,
     }
@@ -407,7 +447,9 @@ SERVICE_START_VOICE_ENROLLMENT_SCHEMA = vol.Schema(
     {
         vol.Required("person_id"): str,
         vol.Required("voice_profile_id"): str,
+        vol.Optional("voice_name", default=""): str,
         vol.Optional("consent_acknowledged", default=False): bool,
+        vol.Optional("local_only", default=True): bool,
         vol.Optional("capture_provider", default="browser"): str,
         vol.Optional("speech_text", default=""): str,
         vol.Optional("prompt_text", default=""): str,
@@ -421,6 +463,17 @@ SERVICE_CAPTURE_VOICE_ENROLLMENT_SAMPLE_SCHEMA = vol.Schema(
         vol.Optional("capture_provider", default="browser"): str,
         vol.Optional("prompt_text", default=""): str,
         vol.Optional("person_id"): str,
+        vol.Optional("source", default="guided_phrase"): str,
+        vol.Optional("phrase_index"): int,
+        vol.Optional("prompt_id", default=""): str,
+        vol.Optional("prompt_order"): int,
+        vol.Optional("prompt_category", default=""): str,
+        vol.Optional("prompt_length_bucket", default=""): str,
+        vol.Optional("capture_distance", default=""): str,
+        vol.Optional("capture_noise", default=""): str,
+        vol.Optional("quality_pass"): bool,
+        vol.Optional("satellite_entity_id", default=""): str,
+        vol.Optional("timeout_seconds", default=8.0): vol.Coerce(float),
     }
 )
 
@@ -453,6 +506,8 @@ SERVICE_COMPLETE_VOICE_ENROLLMENT_SCHEMA = vol.Schema(
     {
         vol.Required("voice_profile_id"): str,
         vol.Optional("person_id"): str,
+        vol.Optional("min_samples", default=3): int,
+        vol.Optional("min_total_duration_ms", default=30000): int,
     }
 )
 
@@ -460,6 +515,8 @@ SERVICE_GET_VOICE_ENROLLMENT_COMPLETION_READINESS_SCHEMA = vol.Schema(
     {
         vol.Optional("voice_profile_id"): str,
         vol.Optional("person_id"): str,
+        vol.Optional("min_samples", default=3): int,
+        vol.Optional("min_total_duration_ms", default=30000): int,
     }
 )
 
@@ -690,6 +747,11 @@ _MONITORING_FOLLOW_UP_CAPABILITY_ALIASES = {
     "sound level": "noise",
     "how noisy is it": "noise",
 }
+_IDENTITY_SELF_QUERY_ALIASES = {
+    "who am i",
+    "who's speaking",
+    "who is speaking",
+}
 _MONITORING_CAPABILITY_FIELDS = {
     "temperature": ["room_sensor_entity_ids"],
     "humidity": ["room_sensor_entity_ids"],
@@ -838,6 +900,179 @@ def _build_direct_refusal_message(
     return "That capability is not currently available."
 
 
+def _normalize_identity_requirement_class_for_runtime(
+    *,
+    intent_class: str,
+    requested_target: str,
+    resolved_target: str,
+) -> tuple[str, str]:
+    """Classify identity requirement before execution with conservative defaults."""
+    normalized_intent = str(intent_class or "home_control").strip().lower()
+    normalized_tokens = {
+        normalized_intent,
+        str(requested_target or "").strip().lower(),
+        str(resolved_target or "").strip().lower(),
+    }
+    normalized_text = " ".join(token for token in normalized_tokens if token)
+
+    if normalized_intent in _IDENTITY_REQUIRED_STEP_UP_INTENT_CLASSES:
+        return "identity_required_step_up", "intent_class_step_up"
+    if normalized_intent in _IDENTITY_REQUIRED_FRESH_INTENT_CLASSES:
+        return "identity_required_fresh", "intent_class_required_fresh"
+    if normalized_intent in _IDENTITY_REQUIRED_INTENT_CLASSES:
+        return "identity_required", "intent_class_required"
+    if normalized_intent in _IDENTITY_OPTIONAL_INTENT_CLASSES:
+        return "identity_optional", "intent_class_optional"
+    if normalized_intent in _IDENTITY_NOT_REQUIRED_INTENT_CLASSES:
+        return "identity_not_required", "intent_class_not_required"
+
+    if any(token in normalized_text for token in ("unlock", "disarm", "purchase", "admin", "profile")):
+        return "identity_required_step_up", "target_keyword_step_up"
+    if any(token in normalized_text for token in ("calendar", "message", "schedule", "reminder")):
+        return "identity_required_fresh", "target_keyword_required_fresh"
+    if any(token in normalized_text for token in ("personal", "preference", "my_music", "preferred_music")):
+        return "identity_required", "target_keyword_required"
+    if any(token in normalized_text for token in ("weather", "light.", "scene.", "room", "capability")):
+        return "identity_not_required", "target_keyword_not_required"
+
+    return "identity_optional", "conservative_optional_default"
+
+
+def _normalize_identity_state_for_policy(*, identity_state: str, requirement_class: str) -> str:
+    """Map runtime identity states onto policy taxonomy without redefining Voice Identity authority."""
+    if requirement_class == "identity_not_required":
+        return "not_required"
+
+    normalized = str(identity_state or "").strip().lower()
+    if normalized in {"known", "unknown", "unavailable", "not_required", "ambiguous"}:
+        return normalized
+    if normalized in {"low_confidence", "no_match"}:
+        return "ambiguous"
+    return "unknown"
+
+
+def _normalize_identity_freshness_for_policy(
+    *,
+    requirement_class: str,
+    runtime_context: dict[str, Any],
+    attribution_state: str,
+) -> tuple[str, int]:
+    """Resolve freshness class and attribution age from safe runtime attribution context."""
+    runtime_attribution = runtime_context.get("voice_identity_runtime_attribution", {})
+    runtime_attribution = dict(runtime_attribution) if isinstance(runtime_attribution, dict) else {}
+    identity_context = runtime_context.get("identity_context", {})
+    identity_context = dict(identity_context) if isinstance(identity_context, dict) else {}
+
+    freshness = str(
+        runtime_attribution.get("freshness")
+        or identity_context.get("freshness")
+        or identity_context.get("freshness_class")
+        or ""
+    ).strip().lower()
+
+    attribution_age_ms_raw = runtime_attribution.get("attribution_age_ms")
+    try:
+        attribution_age_ms = int(attribution_age_ms_raw) if attribution_age_ms_raw is not None else -1
+    except (TypeError, ValueError):
+        attribution_age_ms = -1
+
+    if freshness in {"fresh", "stale", "expired", "not_applicable"}:
+        return freshness, attribution_age_ms
+
+    if requirement_class == "identity_not_required":
+        return "not_applicable", attribution_age_ms
+    if requirement_class in {"identity_required_fresh", "identity_required_step_up"}:
+        return "stale", attribution_age_ms
+    if requirement_class == "identity_required" and attribution_state == "known":
+        return "fresh", attribution_age_ms
+    return "not_applicable", attribution_age_ms
+
+
+def _identity_policy_response_message(*, policy_outcome: str, reason_code: str) -> str:
+    """Return deterministic user-facing identity policy response text."""
+    if reason_code in {"identity_required_but_missing", "identity_required_but_unknown"}:
+        return "I can't do that until I know who is speaking."
+    if reason_code == "identity_required_fresh_but_stale":
+        return "I need to confirm who is speaking before I use personal information."
+    if reason_code == "identity_optional_missing_continue_without_identity":
+        return "I can continue without personalizing this."
+    if reason_code == "identity_step_up_required":
+        return "I need stronger confirmation before I can do that."
+    if policy_outcome == "deny":
+        return "I can't do that right now because identity authorization failed."
+    if policy_outcome == "challenge":
+        return "I need to confirm identity before I continue."
+    if policy_outcome == "constrain":
+        return "I can continue with a safer, non-personalized version of that request."
+    return ""
+
+
+def _evaluate_runtime_identity_authorization_policy(
+    *,
+    call: ServiceCall,
+    requested_target: str,
+    resolved_target: str,
+    runtime_context: dict[str, Any],
+) -> dict[str, Any]:
+    """Evaluate mandatory identity authorization policy for runtime execution gating."""
+    requirement_class, classification_source = _normalize_identity_requirement_class_for_runtime(
+        intent_class=str(call.data.get("intent_class", "home_control") or "home_control"),
+        requested_target=requested_target,
+        resolved_target=resolved_target,
+    )
+
+    identity_context = runtime_context.get("identity_context", {})
+    identity_context = dict(identity_context) if isinstance(identity_context, dict) else {}
+    identity_state = _normalize_identity_state_for_policy(
+        identity_state=str(identity_context.get("state", "") or ""),
+        requirement_class=requirement_class,
+    )
+    confidence_band = str(identity_context.get("confidence_band") or "none").strip().lower() or "none"
+    if identity_state == "ambiguous" and confidence_band == "none":
+        confidence_band = "low"
+
+    freshness_class, attribution_age_ms = _normalize_identity_freshness_for_policy(
+        requirement_class=requirement_class,
+        runtime_context=runtime_context,
+        attribution_state=identity_state,
+    )
+
+    decision = evaluate_identity_authorization(
+        requirement=requirement_class,
+        attribution_state=identity_state,
+        confidence_band=confidence_band,
+        freshness_class=freshness_class,
+    )
+
+    policy_outcome = decision.outcome.value
+    policy_reason_code = str(decision.reason_code or "identity_context_missing").strip().lower()
+    response_message = _identity_policy_response_message(
+        policy_outcome=policy_outcome,
+        reason_code=policy_reason_code,
+    )
+
+    return {
+        "identity_requirement_class": requirement_class,
+        "identity_policy_outcome": policy_outcome,
+        "identity_policy_reason_code": policy_reason_code,
+        "identity_policy_source": _IDENTITY_POLICY_SOURCE,
+        "identity_freshness_class": str(decision.freshness_class.value),
+        "attribution_age_ms": attribution_age_ms,
+        "identity_state": str(decision.attribution_state.value),
+        "confidence_band": str(decision.confidence_band),
+        "classification_source": classification_source,
+        "response_message": response_message,
+        "allows_execution": policy_outcome
+        in {
+            PolicyOutcome.ALLOW.value,
+            PolicyOutcome.CONSTRAIN.value,
+            PolicyOutcome.CONTINUE_WITHOUT_IDENTITY.value,
+        },
+        "requires_challenge": policy_outcome == PolicyOutcome.CHALLENGE.value,
+        "denied": policy_outcome == PolicyOutcome.DENY.value,
+    }
+
+
 def _build_execute_outcome_metadata(
     response: dict[str, Any],
     *,
@@ -845,6 +1080,8 @@ def _build_execute_outcome_metadata(
 ) -> dict[str, Any]:
     """Classify execute outcomes into execute/answer/refusal/silence success categories."""
     monitoring = dict(response.get("monitoring_follow_up") or {})
+    identity_self_query = dict(response.get("identity_self_query") or {})
+    identity_policy = dict(response.get("identity_authorization_policy") or {})
     media = dict(response.get("media_provider_resolution") or {})
     learned_lighting = dict(response.get("learned_usual_lighting") or {})
     room_audio = dict(response.get("room_audio_continuity") or {})
@@ -856,15 +1093,28 @@ def _build_execute_outcome_metadata(
         or str(room_audio.get("failure_reason") or "").strip()
         or None
     )
+    policy_outcome = str(identity_policy.get("identity_policy_outcome") or "").strip().lower()
+    policy_reason_code = str(identity_policy.get("identity_policy_reason_code") or "").strip().lower() or None
+    if refusal_reason is None and policy_outcome in {"deny", "challenge"}:
+        refusal_reason = policy_reason_code or (
+            "identity_policy_deny" if policy_outcome == "deny" else "identity_policy_challenge"
+        )
+
     refusal_category = (
         str(monitoring.get("refusal_category") or "").strip()
         or str(media.get("refusal_category") or "").strip()
         or _classify_refusal_category(refusal_reason)
     )
+    if refusal_reason is not None and policy_outcome in {"deny", "challenge"}:
+        refusal_category = "identity_authorization_policy"
     if not refusal_category:
         refusal_category = None
 
     generated_response_text = (
+        str(response.get("response_message") or "").strip()
+        or
+        str(identity_self_query.get("generated_speech") or "").strip()
+        or
         str(monitoring.get("generated_speech") or "").strip()
         or _build_direct_refusal_message(
             refusal_reason,
@@ -1168,6 +1418,87 @@ def _classify_monitoring_follow_up_request(target: str | None) -> dict[str, Any]
         "request_kind": "monitoring_follow_up",
         "request_text": raw,
         "monitoring_capability": capability,
+    }
+
+
+def _classify_identity_self_query_request(target: str | None) -> dict[str, Any] | None:
+    """Classify deterministic identity self-query prompts (for example, 'who am I')."""
+    if target is None:
+        return None
+
+    raw = str(target or "").strip()
+    normalized = _normalize_spoken_command_phrase(raw).rstrip("?!. ")
+    if not normalized or "." in normalized:
+        return None
+
+    if normalized not in _IDENTITY_SELF_QUERY_ALIASES:
+        return None
+
+    return {
+        "request_kind": "identity_self_query",
+        "request_text": raw,
+    }
+
+
+def _build_identity_self_query_response(
+    *,
+    state,
+    execution_envelope: dict[str, Any],
+) -> dict[str, Any]:
+    """Build deterministic response text for identity self-query prompts."""
+    active_person_resolution = dict(execution_envelope.get("active_person_resolution", {}))
+    runtime_person_context = dict(execution_envelope.get("runtime_person_context", {}))
+
+    active_person_state = str(
+        active_person_resolution.get("active_person_state", "active_person_unavailable")
+        or "active_person_unavailable"
+    ).strip().lower()
+    reason_code = str(
+        active_person_resolution.get("reason_code", "identity_unknown")
+        or "identity_unknown"
+    ).strip().lower()
+
+    resolved_person_id = str(
+        runtime_person_context.get("resolved_concierge_person_profile_id")
+        or active_person_resolution.get("resolved_person_id")
+        or ""
+    ).strip() or None
+    resolved_voice_profile_id = str(
+        runtime_person_context.get("resolved_voice_profile_id")
+        or active_person_resolution.get("resolved_voice_profile_id")
+        or ""
+    ).strip() or None
+
+    person_profile = (
+        state.person_profiles.get(resolved_person_id)
+        if resolved_person_id is not None
+        else None
+    )
+    resolved_name = str(getattr(person_profile, "name", "") or "").strip()
+
+    if active_person_state == "active_person_available" and resolved_name:
+        generated_speech = f"Hi {resolved_name}, how can I help you today?"
+    elif active_person_state == "active_person_available":
+        generated_speech = "Hi there, how can I help you today?"
+    elif active_person_state == "active_person_ambiguous":
+        if reason_code == "ambiguous_match":
+            generated_speech = "I would greet you by name but Voice Identity reported an ambiguous match."
+        else:
+            generated_speech = "I would greet you by name but Voice Identity reported low confidence."
+    elif active_person_state == "active_person_unavailable":
+        generated_speech = "I would greet you by name but Voice Identity was unavailable or not ready."
+    elif active_person_state == "active_person_unknown":
+        generated_speech = "I would greet you by name but active person is unknown."
+    else:
+        generated_speech = "I'm not sure who is speaking."
+
+    return {
+        "request_kind": "identity_self_query",
+        "generated_speech": generated_speech,
+        "active_person_state": active_person_state,
+        "active_person_reason_code": reason_code,
+        "resolved_person_id": resolved_person_id,
+        "resolved_voice_profile_id": resolved_voice_profile_id,
     }
 
 
@@ -6499,8 +6830,165 @@ async def _build_room_weather_response(
     }
 
 
+def _optional_text_field(value: Any) -> str | None:
+    """Normalize one optional text field to a stripped value or None."""
+    text = str(value or "").strip()
+    return text or None
+
+
+def _optional_int_field(value: Any) -> int | None:
+    """Normalize one optional integer field to int or None."""
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalize_conversation_input_context(
+    *,
+    call_data: dict[str, Any],
+    raw_context: Any,
+) -> dict[str, Any]:
+    """Normalize ConversationInput-style metadata from service and context payloads."""
+    context = dict(raw_context) if isinstance(raw_context, dict) else {}
+
+    def _pick(name: str) -> Any:
+        direct = call_data.get(name)
+        if direct is not None:
+            return direct
+        return context.get(name)
+
+    normalized = {
+        "conversation_id": _optional_text_field(_pick("conversation_id")),
+        "device_id": _optional_text_field(_pick("device_id")),
+        "satellite_id": _optional_text_field(_pick("satellite_id")),
+        "agent_id": _optional_text_field(_pick("agent_id")),
+        "language": _optional_text_field(_pick("language")),
+        "text": _optional_text_field(_pick("text")),
+        "pipeline_id": _optional_text_field(_pick("pipeline_id")),
+        "turn_index": _optional_int_field(_pick("turn_index")),
+    }
+    normalized["has_conversation_input"] = any(
+        normalized.get(key) is not None
+        for key in (
+            "conversation_id",
+            "device_id",
+            "satellite_id",
+            "agent_id",
+            "language",
+            "text",
+        )
+    )
+    return normalized
+
+
+def _resolve_foundation_area_from_conversation_input(
+    hass: HomeAssistant,
+    *,
+    requested_area_id: str | None,
+    device_id: str | None,
+    satellite_id: str | None,
+) -> tuple[str | None, str]:
+    """Resolve room area through Foundation registries from correlation context."""
+    requested = _optional_text_field(requested_area_id)
+    if requested:
+        return requested, "explicit_area_id"
+
+    entity_registry = er.async_get(hass)
+    device_registry = dr.async_get(hass)
+
+    candidate_device_ids: list[str] = []
+    device = _optional_text_field(device_id)
+    if device:
+        candidate_device_ids.append(device)
+
+    satellite = _optional_text_field(satellite_id)
+    if satellite and "." in satellite:
+        satellite_entry = entity_registry.async_get(satellite)
+        if satellite_entry is not None:
+            if satellite_entry.area_id:
+                return satellite_entry.area_id, "foundation_entity_registry"
+            if satellite_entry.device_id:
+                candidate_device_ids.append(satellite_entry.device_id)
+
+    if satellite and "." not in satellite:
+        candidate_device_ids.append(satellite)
+
+    deduped_device_ids: list[str] = []
+    for item in candidate_device_ids:
+        if item and item not in deduped_device_ids:
+            deduped_device_ids.append(item)
+
+    for candidate_device_id in deduped_device_ids:
+        device_entry = device_registry.async_get(candidate_device_id)
+        if device_entry is None:
+            continue
+        if device_entry.area_id:
+            return device_entry.area_id, "foundation_device_registry"
+
+        linked_entities = er.async_entries_for_device(entity_registry, candidate_device_id)
+        for linked_entity in linked_entities:
+            linked_area_id = _optional_text_field(getattr(linked_entity, "area_id", None))
+            if linked_area_id:
+                return linked_area_id, "foundation_entity_registry"
+
+    return None, "foundation_room_unresolved"
+
+
+def _build_conversation_agent_ingress_adapter(
+    hass: HomeAssistant,
+    *,
+    call_data: dict[str, Any],
+    raw_context: Any,
+    requested_area_id: str | None,
+) -> dict[str, Any]:
+    """Build a dedicated Conversation Agent ingress adapter payload."""
+    normalized = _normalize_conversation_input_context(
+        call_data=call_data,
+        raw_context=raw_context,
+    )
+    resolved_area_id, room_resolution_source = _resolve_foundation_area_from_conversation_input(
+        hass,
+        requested_area_id=requested_area_id,
+        device_id=normalized.get("device_id"),
+        satellite_id=normalized.get("satellite_id"),
+    )
+
+    has_conversation_input = bool(normalized.get("has_conversation_input", False))
+    return {
+        "ingress_mode": (
+            "conversation_agent_runtime_ingress"
+            if has_conversation_input
+            else "fallback_service_or_automation"
+        ),
+        "identity_authority": (
+            "voice_identity_lookup"
+            if has_conversation_input
+            else "non_authoritative_fallback"
+        ),
+        "has_conversation_input": has_conversation_input,
+        "correlation": {
+            "conversation_id": normalized.get("conversation_id"),
+            "device_id": normalized.get("device_id"),
+            "satellite_id": normalized.get("satellite_id"),
+            "agent_id": normalized.get("agent_id"),
+            "language": normalized.get("language"),
+            "text": normalized.get("text"),
+            "pipeline_id": normalized.get("pipeline_id"),
+            "turn_index": normalized.get("turn_index"),
+        },
+        "foundation_room_resolution": {
+            "resolved_area_id": resolved_area_id,
+            "resolution_source": room_resolution_source,
+        },
+        "fallback_reason_code": None if has_conversation_input else "identity_audio_missing",
+    }
+
+
 def _context_requires_voice_identity_runtime_invocation(raw_context: Any) -> bool:
-    """Return whether runtime Voice Identity invocation should be attempted."""
+    """Return whether runtime Voice Identity identity-context lookup should run."""
     if not isinstance(raw_context, dict):
         return False
 
@@ -6513,41 +7001,32 @@ def _context_requires_voice_identity_runtime_invocation(raw_context: Any) -> boo
     if bool(raw_context.get("invoke_voice_identity_runtime", False)):
         return True
 
-    audio_ref = str(raw_context.get("audio_ref", "") or "").strip()
-    if audio_ref:
+    if bool(raw_context.get("require_identity_context", False)):
         return True
 
-    candidate_scope = raw_context.get("candidate_scope")
-    if isinstance(candidate_scope, list) and any(str(item).strip() for item in candidate_scope):
-        return True
-
-    model_preference = str(raw_context.get("model_preference", "") or "").strip()
-    if model_preference:
+    if any(
+        _optional_text_field(raw_context.get(key))
+        for key in ("conversation_id", "device_id", "satellite_id")
+    ):
         return True
 
     return False
 
 
 def _voice_identity_request_payload(raw_context: Any) -> dict[str, Any]:
-    """Build approved Voice Identity runtime service request payload."""
+    """Build approved Voice Identity identity-context lookup payload."""
     if not isinstance(raw_context, dict):
         return {}
 
     payload: dict[str, Any] = {}
+    for key in ("conversation_id", "device_id", "satellite_id", "pipeline_id", "room_id"):
+        value = _optional_text_field(raw_context.get(key))
+        if value is not None:
+            payload[key] = value
 
-    audio_ref = str(raw_context.get("audio_ref", "") or "").strip()
-    if audio_ref:
-        payload["audio_ref"] = audio_ref
-
-    model_preference = str(raw_context.get("model_preference", "") or "").strip()
-    if model_preference:
-        payload["model_preference"] = model_preference
-
-    candidate_scope_raw = raw_context.get("candidate_scope")
-    if isinstance(candidate_scope_raw, list):
-        candidate_scope = [str(item).strip() for item in candidate_scope_raw if str(item).strip()]
-        if candidate_scope:
-            payload["candidate_scope"] = candidate_scope
+    turn_index = _optional_int_field(raw_context.get("turn_index"))
+    if turn_index is not None:
+        payload["turn_index"] = turn_index
 
     return payload
 
@@ -6565,82 +7044,55 @@ def _unavailable_identity_context(reason_code: str) -> dict[str, Any]:
     }
 
 
-def _identity_context_from_attribution(attribution: dict[str, Any]) -> dict[str, Any]:
-    """Project attribution-service output into bounded identity-context shape."""
-    status = str(attribution.get("status", "") or "").strip().lower()
-    reason_code = str(attribution.get("reason_code", "") or "").strip().lower() or "unknown"
-    confidence_band = str(attribution.get("confidence_band", "") or "").strip().lower() or None
-    confidence_value = attribution.get("confidence")
-
-    person_id = str(attribution.get("attributed_person_id", "") or "").strip() or None
-    voice_profile_id = str(attribution.get("attributed_profile_id", "") or "").strip() or None
-
-    state = "unavailable"
-    if status == "ready":
-        state = "known" if (person_id or voice_profile_id) else "unknown"
-    elif status == "abstained":
-        if reason_code in {"low_confidence", "ambiguous_match"} or confidence_band in {"low", "ambiguous"}:
-            state = "low_confidence"
-        else:
-            state = "unknown"
-
-    return {
-        "state": state,
-        "person_id": person_id,
-        "voice_profile_id": voice_profile_id,
-        "confidence": confidence_value,
-        "confidence_band": confidence_band,
-        "reason_code": reason_code,
-        "source": "voice_identity",
-    }
-
-
-def _diagnostics_context_from_attribution(attribution: dict[str, Any]) -> dict[str, Any]:
-    """Project Voice Identity attribution diagnostics into bounded diagnostics shape."""
-    diagnostic_summary = attribution.get("diagnostic_summary")
-    if not isinstance(diagnostic_summary, dict):
-        diagnostic_summary = {}
-
-    return {
-        "diagnostic_available": bool(diagnostic_summary.get("diagnostic_available", False)),
-        "diagnostic_reason_code": str(
-            diagnostic_summary.get("diagnostic_reason_code")
-            or attribution.get("reason_code")
-            or "diagnostics_unavailable"
-        ).strip().lower() or "diagnostics_unavailable",
-        "health_status": str(diagnostic_summary.get("health_status", "") or "").strip().lower() or "unavailable",
-        "attribution_readiness": str(
-            diagnostic_summary.get("attribution_readiness", "") or ""
-        ).strip().lower() or None,
-        "compatibility_readiness": str(
-            diagnostic_summary.get("compatibility_readiness", "") or ""
-        ).strip().lower() or None,
-        "repair_available": bool(diagnostic_summary.get("repair_available", False)),
-        "repair_hint_code": str(attribution.get("repair_hint_code", "") or "").strip().lower() or None,
-        "suggested_next_action_code": str(
-            attribution.get("suggested_next_action_code", "") or ""
-        ).strip().lower() or None,
-        "source": "voice_identity",
-    }
-
-
-def _explainability_context_from_attribution(
-    attribution: dict[str, Any],
+def _diagnostics_context_from_identity_lookup(
+    *,
     identity_context: dict[str, Any],
+    runtime_attribution: dict[str, Any],
+    response_reason_code: str,
 ) -> dict[str, Any]:
-    """Project deterministic explainability for consumed Voice Identity outcomes."""
+    """Project safe diagnostics from Voice Identity identity-context lookup outputs."""
+    reason_code = str(
+        identity_context.get("reason_code")
+        or runtime_attribution.get("reason_code")
+        or response_reason_code
+        or "diagnostics_unavailable"
+    ).strip().lower() or "diagnostics_unavailable"
+    freshness = str(runtime_attribution.get("freshness") or "").strip().lower() or None
+    return {
+        "diagnostic_available": True,
+        "diagnostic_reason_code": reason_code,
+        "health_status": "ready",
+        "attribution_readiness": "ready",
+        "compatibility_readiness": "ready",
+        "repair_available": False,
+        "repair_hint_code": None,
+        "suggested_next_action_code": None,
+        "freshness": freshness,
+        "attribution_age_ms": runtime_attribution.get("attribution_age_ms"),
+        "resolution_source": str(runtime_attribution.get("resolution_source") or "").strip().lower() or None,
+        "source": "voice_identity",
+    }
+
+
+def _explainability_context_from_identity_lookup(
+    *,
+    identity_context: dict[str, Any],
+    runtime_attribution: dict[str, Any],
+) -> dict[str, Any]:
+    """Project deterministic explainability from lookup-only Voice Identity outputs."""
     state = str(identity_context.get("state", "") or "").strip().lower()
     no_active_attribution = state in _VOICE_IDENTITY_NO_ACTIVE_ATTRIBUTION_STATES or not (
         identity_context.get("person_id") or identity_context.get("voice_profile_id")
     )
 
     return {
-        "consumed_outcome": str(attribution.get("status", "") or "attribution_unavailable").strip().lower() or "attribution_unavailable",
+        "consumed_outcome": state or "unavailable",
         "authority_source": "voice_identity",
-        "attribution_source": "voice_identity.attribute_speaker",
-        "confidence_source": "voice_identity.attribute_speaker",
+        "attribution_source": "voice_identity.get_identity_context",
+        "confidence_source": "voice_identity.get_identity_context",
         "reason_code": str(identity_context.get("reason_code", "") or "unknown").strip().lower() or "unknown",
         "unavailable_state": "no_active_attribution" if no_active_attribution else None,
+        "resolution_source": str(runtime_attribution.get("resolution_source") or "").strip().lower() or None,
         "source": "voice_identity",
     }
 
@@ -6651,7 +7103,7 @@ async def _async_consume_voice_identity_runtime_context(
     raw_context: Any,
     voice_identity_linked: bool,
 ) -> dict[str, Any]:
-    """Actively consume Voice Identity runtime attribution and identity-context services."""
+    """Consume Voice Identity runtime identity context without local attribution logic."""
     context: dict[str, Any] = dict(raw_context) if isinstance(raw_context, dict) else {}
 
     if not voice_identity_linked:
@@ -6670,8 +7122,8 @@ async def _async_consume_voice_identity_runtime_context(
         context["voice_identity_explainability_context"] = {
             "consumed_outcome": "attribution_unavailable",
             "authority_source": "voice_identity",
-            "attribution_source": "voice_identity.attribute_speaker",
-            "confidence_source": "voice_identity.attribute_speaker",
+            "attribution_source": "voice_identity.get_identity_context",
+            "confidence_source": "voice_identity.get_identity_context",
             "unavailable_state": "no_active_attribution",
             "reason_code": "voice_identity_linkage_disabled",
             "source": "voice_identity",
@@ -6684,12 +7136,6 @@ async def _async_consume_voice_identity_runtime_context(
         context["identity_context"] = identity_context
         return context
 
-    if not hass.services.has_service(_VOICE_IDENTITY_DOMAIN, _VOICE_IDENTITY_SERVICE_ATTRIBUTE_SPEAKER):
-        identity_context = _unavailable_identity_context("attribution_service_unavailable")
-        context["voice_identity_identity_context"] = identity_context
-        context["identity_context"] = identity_context
-        return context
-
     if not hass.services.has_service(_VOICE_IDENTITY_DOMAIN, _VOICE_IDENTITY_SERVICE_GET_IDENTITY_CONTEXT):
         identity_context = _unavailable_identity_context("identity_context_service_unavailable")
         context["voice_identity_identity_context"] = identity_context
@@ -6698,21 +7144,9 @@ async def _async_consume_voice_identity_runtime_context(
 
     request_data = _voice_identity_request_payload(raw_context)
 
-    attribution_response: dict[str, Any] = {}
-    try:
-        response = await hass.services.async_call(
-            _VOICE_IDENTITY_DOMAIN,
-            _VOICE_IDENTITY_SERVICE_ATTRIBUTE_SPEAKER,
-            request_data,
-            blocking=True,
-            return_response=True,
-        )
-        if isinstance(response, dict):
-            attribution_response = dict(response.get("attribution", {}))
-    except Exception:
-        attribution_response = {}
-
     identity_context_payload: dict[str, Any] | None = None
+    runtime_attribution_payload: dict[str, Any] = {}
+    response_reason_code = "identity_context_unavailable"
     try:
         response = await hass.services.async_call(
             _VOICE_IDENTITY_DOMAIN,
@@ -6721,27 +7155,35 @@ async def _async_consume_voice_identity_runtime_context(
             blocking=True,
             return_response=True,
         )
-        if isinstance(response, dict) and isinstance(response.get("identity_context"), dict):
-            identity_context_payload = dict(response["identity_context"])
+        if isinstance(response, dict):
+            response_reason_code = str(response.get("reason_code", "") or "").strip().lower() or response_reason_code
+            if isinstance(response.get("identity_context"), dict):
+                identity_context_payload = dict(response["identity_context"])
+            if isinstance(response.get("runtime_attribution"), dict):
+                runtime_attribution_payload = dict(response["runtime_attribution"])
     except Exception:
         identity_context_payload = None
 
     if identity_context_payload is None:
-        if attribution_response:
-            identity_context_payload = _identity_context_from_attribution(attribution_response)
-        else:
-            identity_context_payload = _unavailable_identity_context("attribution_unavailable")
+        identity_context_payload = _unavailable_identity_context("identity_context_missing")
+
+    if not identity_context_payload.get("reason_code"):
+        identity_context_payload["reason_code"] = response_reason_code
 
     identity_context_payload["source"] = "voice_identity"
     context["voice_identity_identity_context"] = identity_context_payload
     context["identity_context"] = identity_context_payload
 
-    if attribution_response:
-        context["voice_identity_diagnostics_context"] = _diagnostics_context_from_attribution(attribution_response)
-        context["voice_identity_explainability_context"] = _explainability_context_from_attribution(
-            attribution_response,
-            identity_context_payload,
-        )
+    context["voice_identity_runtime_attribution"] = runtime_attribution_payload
+    context["voice_identity_diagnostics_context"] = _diagnostics_context_from_identity_lookup(
+        identity_context=identity_context_payload,
+        runtime_attribution=runtime_attribution_payload,
+        response_reason_code=response_reason_code,
+    )
+    context["voice_identity_explainability_context"] = _explainability_context_from_identity_lookup(
+        identity_context=identity_context_payload,
+        runtime_attribution=runtime_attribution_payload,
+    )
 
     return context
 
@@ -10631,6 +11073,8 @@ def _resolve_active_person_resolution_from_envelope(
         "identity_context_service_unavailable",
         "attribution_unavailable",
         "attribution_not_ready",
+        "identity_audio_missing",
+        "identity_context_missing",
     }
 
     available = bool(attribution_consumed and person_id)
@@ -13392,6 +13836,9 @@ def _build_execution_envelope_ref(execution_envelope: dict[str, Any]) -> dict[st
     voice_identity_explainability = dict(
         voice_identity_explainability_boundary.get("explainability", {})
     )
+    identity_authorization_policy = dict(
+        execution_envelope.get("identity_authorization_policy", {})
+    )
     person_aware_productivity_routing = dict(
         execution_envelope.get("person_aware_productivity_routing", {})
     )
@@ -13669,6 +14116,15 @@ def _build_execution_envelope_ref(execution_envelope: dict[str, Any]) -> dict[st
         "e3a_preservation_consumes_restoration_outcomes": bool(
             preservation_alignment.get("consumes_restoration_outcomes", False)
         ),
+        "identity_requirement_class": identity_authorization_policy.get("identity_requirement_class"),
+        "identity_policy_outcome": identity_authorization_policy.get("identity_policy_outcome"),
+        "identity_policy_reason_code": identity_authorization_policy.get("identity_policy_reason_code"),
+        "identity_policy_source": identity_authorization_policy.get("identity_policy_source"),
+        "identity_freshness_class": identity_authorization_policy.get("identity_freshness_class"),
+        "identity_attribution_age_ms": identity_authorization_policy.get("attribution_age_ms"),
+        "identity_policy_identity_state": identity_authorization_policy.get("identity_state"),
+        "identity_policy_confidence_band": identity_authorization_policy.get("confidence_band"),
+        "identity_policy_classification_source": identity_authorization_policy.get("classification_source"),
         "voice_identity_consumption_boundary_path": voice_identity_consumption.get("boundary_path"),
         "voice_identity_authority_external": bool(
             voice_identity_consumption.get("voice_identity_authority_external", False)
@@ -14517,6 +14973,16 @@ async def _async_handle_execute(hass: HomeAssistant, call: ServiceCall) -> dict[
 
     area_id = call.data.get("area_id")
     composite_id = call.data.get("composite_id")
+    raw_context = call.data.get("context")
+    conversation_ingress = _build_conversation_agent_ingress_adapter(
+        hass,
+        call_data=call.data,
+        raw_context=raw_context,
+        requested_area_id=area_id,
+    )
+    if area_id is None:
+        area_id = conversation_ingress["foundation_room_resolution"].get("resolved_area_id")
+
     room_vocabulary_resolution: dict[str, Any] | None = None
     device_entity_vocabulary_resolution: dict[str, Any] | None = None
     asset_vocabulary_resolution: dict[str, Any] | None = None
@@ -14596,6 +15062,11 @@ async def _async_handle_execute(hass: HomeAssistant, call: ServiceCall) -> dict[
     room_media_follow_me_request = _classify_room_media_follow_me_request(alias_resolved_target)
     room_media_request = _classify_room_media_playback_request(alias_resolved_target)
     monitoring_follow_up_request = _classify_monitoring_follow_up_request(alias_resolved_target)
+    identity_self_query_request = (
+        _classify_identity_self_query_request(call.data.get("target"))
+        or _classify_identity_self_query_request(alias_resolved_target)
+        or _classify_identity_self_query_request(resolved_target)
+    )
 
     async def _runner() -> dict[str, Any]:
         _enforce_minor_intent_policy(
@@ -14637,18 +15108,57 @@ async def _async_handle_execute(hass: HomeAssistant, call: ServiceCall) -> dict[
             service = "turn_on"
             data = {"entity_id": resolved_target}
 
-        raw_context = call.data.get("context")
         runtime_context: dict[str, Any]
-        if _context_requires_voice_identity_runtime_invocation(raw_context):
-            runtime_context = await _async_consume_voice_identity_runtime_context(
-                hass,
-                raw_context=raw_context,
-                voice_identity_linked=voice_identity_linked,
-            )
-        elif isinstance(raw_context, dict):
+        if isinstance(raw_context, dict):
             runtime_context = dict(raw_context)
         else:
             runtime_context = {}
+
+        correlation = dict(conversation_ingress.get("correlation", {}))
+        for key in ("conversation_id", "device_id", "satellite_id", "agent_id", "language", "text", "pipeline_id"):
+            if runtime_context.get(key) is None and correlation.get(key) is not None:
+                runtime_context[key] = correlation.get(key)
+        if runtime_context.get("turn_index") is None and correlation.get("turn_index") is not None:
+            runtime_context["turn_index"] = correlation.get("turn_index")
+
+        context_room_id = assembled_context.get("context_area_id")
+        if runtime_context.get("room_id") is None and isinstance(context_room_id, str) and context_room_id:
+            runtime_context["room_id"] = context_room_id
+
+        runtime_context["conversation_agent_ingress"] = {
+            "ingress_mode": conversation_ingress.get("ingress_mode"),
+            "identity_authority": conversation_ingress.get("identity_authority"),
+            "room_resolution_source": conversation_ingress.get("foundation_room_resolution", {}).get("resolution_source"),
+            "resolved_room_id": context_room_id,
+            "correlation": {
+                "conversation_id": correlation.get("conversation_id"),
+                "device_id": correlation.get("device_id"),
+                "satellite_id": correlation.get("satellite_id"),
+                "agent_id": correlation.get("agent_id"),
+                "language": correlation.get("language"),
+                "text": correlation.get("text"),
+            },
+        }
+
+        should_invoke_voice_identity = _context_requires_voice_identity_runtime_invocation(runtime_context)
+        if bool(conversation_ingress.get("has_conversation_input", False)):
+            should_invoke_voice_identity = True
+
+        if should_invoke_voice_identity:
+            runtime_context = await _async_consume_voice_identity_runtime_context(
+                hass,
+                raw_context=runtime_context,
+                voice_identity_linked=voice_identity_linked,
+            )
+        else:
+            if not isinstance(runtime_context.get("identity_context"), dict):
+                fallback_reason_code = str(
+                    conversation_ingress.get("fallback_reason_code")
+                    or "identity_audio_missing"
+                ).strip().lower() or "identity_audio_missing"
+                fallback_identity = _unavailable_identity_context(fallback_reason_code)
+                runtime_context["voice_identity_identity_context"] = fallback_identity
+                runtime_context["identity_context"] = fallback_identity
 
         execution_envelope = _build_execute_envelope(
             state,
@@ -14667,6 +15177,81 @@ async def _async_handle_execute(hass: HomeAssistant, call: ServiceCall) -> dict[
             runtime_context=runtime_context,
         )
 
+        identity_policy = _evaluate_runtime_identity_authorization_policy(
+            call=call,
+            requested_target=str(call.data.get("target", "") or ""),
+            resolved_target=resolved_target,
+            runtime_context=runtime_context,
+        )
+        execution_envelope["identity_requirement_class"] = identity_policy["identity_requirement_class"]
+        execution_envelope["identity_policy_outcome"] = identity_policy["identity_policy_outcome"]
+        execution_envelope["identity_policy_reason_code"] = identity_policy["identity_policy_reason_code"]
+        execution_envelope["identity_policy_source"] = identity_policy["identity_policy_source"]
+        execution_envelope["identity_freshness_class"] = identity_policy["identity_freshness_class"]
+        execution_envelope["attribution_age_ms"] = identity_policy["attribution_age_ms"]
+        execution_envelope["identity_state"] = identity_policy["identity_state"]
+        execution_envelope["confidence_band"] = identity_policy["confidence_band"]
+        execution_envelope["identity_authorization_policy"] = {
+            "identity_requirement_class": identity_policy["identity_requirement_class"],
+            "identity_policy_outcome": identity_policy["identity_policy_outcome"],
+            "identity_policy_reason_code": identity_policy["identity_policy_reason_code"],
+            "identity_policy_source": identity_policy["identity_policy_source"],
+            "identity_freshness_class": identity_policy["identity_freshness_class"],
+            "attribution_age_ms": identity_policy["attribution_age_ms"],
+            "identity_state": identity_policy["identity_state"],
+            "confidence_band": identity_policy["confidence_band"],
+            "classification_source": identity_policy["classification_source"],
+        }
+
+        if not bool(identity_policy.get("allows_execution", False)):
+            response: dict[str, Any] = {
+                "executed": False,
+                "resolved_target": resolved_target,
+                "execution_envelope": execution_envelope,
+                "identity_authorization_policy": dict(
+                    execution_envelope.get("identity_authorization_policy", {})
+                ),
+                "response_message": identity_policy.get("response_message") or None,
+                "activity_external_refs": [
+                    _build_context_assembly_ref(assembled_context),
+                    _build_routing_decision_ref(execution_envelope),
+                    _build_execution_envelope_ref(execution_envelope),
+                    _build_preservation_alignment_ref(execution_envelope),
+                    {
+                        "ref_type": "identity_authorization_policy",
+                        "identity_requirement_class": identity_policy["identity_requirement_class"],
+                        "identity_policy_outcome": identity_policy["identity_policy_outcome"],
+                        "identity_policy_reason_code": identity_policy["identity_policy_reason_code"],
+                        "identity_policy_source": identity_policy["identity_policy_source"],
+                        "identity_freshness_class": identity_policy["identity_freshness_class"],
+                        "attribution_age_ms": identity_policy["attribution_age_ms"],
+                        "identity_state": identity_policy["identity_state"],
+                        "confidence_band": identity_policy["confidence_band"],
+                        "classification_source": identity_policy["classification_source"],
+                    },
+                ],
+            }
+            outcome_metadata = _build_execute_outcome_metadata(
+                response,
+                runtime_context=runtime_context,
+            )
+            response.update(outcome_metadata)
+            response["activity_external_refs"].append(
+                {
+                    "ref_type": "execution_outcome_classification",
+                    "execution_outcome_category": outcome_metadata["execution_outcome_category"],
+                    "silence_as_success": outcome_metadata["silence_as_success"],
+                    "response_required": outcome_metadata["response_required"],
+                    "response_generated": outcome_metadata["response_generated"],
+                    "refusal_reason": outcome_metadata["refusal_reason"],
+                    "refusal_category": outcome_metadata["refusal_category"],
+                    "room_authority_source": outcome_metadata["room_authority_source"],
+                    "person_policy_evaluated": True,
+                    "merged_room_authority_source": outcome_metadata["merged_room_authority_source"],
+                }
+            )
+            return response
+
         await _async_update_person_context_repairs(
             hass,
             execution_envelope=execution_envelope,
@@ -14676,6 +15261,12 @@ async def _async_handle_execute(hass: HomeAssistant, call: ServiceCall) -> dict[
         room_audio_result: dict[str, Any] | None = None
         room_media_result: dict[str, Any] | None = None
         monitoring_result: dict[str, Any] | None = None
+        identity_self_query_result: dict[str, Any] | None = None
+        if identity_self_query_request is not None:
+            identity_self_query_result = _build_identity_self_query_response(
+                state=state,
+                execution_envelope=execution_envelope,
+            )
         if usual_lighting_command_kind is not None and composite_id is None and area_id is not None:
             room = state.rooms.get(area_id)
             lighting_result = await _async_execute_learned_usual_lighting(
@@ -15132,7 +15723,7 @@ async def _async_handle_execute(hass: HomeAssistant, call: ServiceCall) -> dict[
                 }
             ]
 
-        if lighting_result is None and room_audio_result is None and room_media_result is None and monitoring_result is None:
+        if lighting_result is None and room_audio_result is None and room_media_result is None and monitoring_result is None and identity_self_query_result is None:
             await hass.services.async_call(domain, service, data, blocking=True)
 
         payload = {
@@ -15177,7 +15768,66 @@ async def _async_handle_execute(hass: HomeAssistant, call: ServiceCall) -> dict[
                     "resolved_composite_id": assembled_context.get("resolved_composite_id"),
                     "preserved": resolved_target != call.data["target"],
                 },
+                {
+                    "ref_type": "conversation_agent_ingress",
+                    "ingress_mode": conversation_ingress.get("ingress_mode"),
+                    "identity_authority": conversation_ingress.get("identity_authority"),
+                    "conversation_id": runtime_context.get("conversation_id"),
+                    "device_id": runtime_context.get("device_id"),
+                    "satellite_id": runtime_context.get("satellite_id"),
+                    "room_id": assembled_context.get("context_area_id"),
+                    "resolution_source": conversation_ingress.get("foundation_room_resolution", {}).get("resolution_source"),
+                },
             ],
+        }
+        response["identity_authorization_policy"] = dict(
+            execution_envelope.get("identity_authorization_policy", {})
+        )
+        response["activity_external_refs"].append(
+            {
+                "ref_type": "identity_authorization_policy",
+                "identity_requirement_class": identity_policy["identity_requirement_class"],
+                "identity_policy_outcome": identity_policy["identity_policy_outcome"],
+                "identity_policy_reason_code": identity_policy["identity_policy_reason_code"],
+                "identity_policy_source": identity_policy["identity_policy_source"],
+                "identity_freshness_class": identity_policy["identity_freshness_class"],
+                "attribution_age_ms": identity_policy["attribution_age_ms"],
+                "identity_state": identity_policy["identity_state"],
+                "confidence_band": identity_policy["confidence_band"],
+                "classification_source": identity_policy["classification_source"],
+            }
+        )
+        response["conversation_agent_ingress"] = {
+            "ingress_mode": conversation_ingress.get("ingress_mode"),
+            "identity_authority": conversation_ingress.get("identity_authority"),
+            "correlation": {
+                "conversation_id": runtime_context.get("conversation_id"),
+                "device_id": runtime_context.get("device_id"),
+                "satellite_id": runtime_context.get("satellite_id"),
+                "agent_id": runtime_context.get("agent_id"),
+                "language": runtime_context.get("language"),
+                "text": runtime_context.get("text"),
+            },
+            "foundation_room_resolution": {
+                "resolved_area_id": assembled_context.get("context_area_id"),
+                "resolution_source": conversation_ingress.get("foundation_room_resolution", {}).get("resolution_source"),
+            },
+            "speaker_lookup": {
+                "identity_status": str(runtime_context.get("identity_context", {}).get("state", "") or "").strip().lower() or "unavailable",
+                "confidence_band": runtime_context.get("identity_context", {}).get("confidence_band"),
+                "reason_code": runtime_context.get("identity_context", {}).get("reason_code"),
+                "resolution_source": runtime_context.get("voice_identity_runtime_attribution", {}).get("resolution_source"),
+            },
+            "diagnostics": {
+                "conversation_id": runtime_context.get("conversation_id"),
+                "device_id": runtime_context.get("device_id"),
+                "satellite_id": runtime_context.get("satellite_id"),
+                "room_id": assembled_context.get("context_area_id"),
+                "identity_status": str(runtime_context.get("identity_context", {}).get("state", "") or "").strip().lower() or "unavailable",
+                "confidence_band": runtime_context.get("identity_context", {}).get("confidence_band"),
+                "reason_code": runtime_context.get("identity_context", {}).get("reason_code"),
+                "resolution_source": runtime_context.get("voice_identity_runtime_attribution", {}).get("resolution_source"),
+            },
         }
         if lighting_result is not None:
             response["learned_usual_lighting"] = {
@@ -15351,6 +16001,26 @@ async def _async_handle_execute(hass: HomeAssistant, call: ServiceCall) -> dict[
             response["activity_external_refs"].extend(
                 list(monitoring_result.get("activity_external_refs", []))
             )
+        if identity_self_query_result is not None:
+            response["executed"] = True
+            response["resolved_target"] = "identity:self_query"
+            response["identity_self_query"] = {
+                "request_kind": identity_self_query_result.get("request_kind"),
+                "generated_speech": identity_self_query_result.get("generated_speech"),
+                "active_person_state": identity_self_query_result.get("active_person_state"),
+                "active_person_reason_code": identity_self_query_result.get("active_person_reason_code"),
+                "resolved_person_id": identity_self_query_result.get("resolved_person_id"),
+                "resolved_voice_profile_id": identity_self_query_result.get("resolved_voice_profile_id"),
+            }
+            response["activity_external_refs"].append(
+                {
+                    "ref_type": "identity_self_query_resolution",
+                    "active_person_state": identity_self_query_result.get("active_person_state"),
+                    "active_person_reason_code": identity_self_query_result.get("active_person_reason_code"),
+                    "resolved_person_id": identity_self_query_result.get("resolved_person_id"),
+                    "resolved_voice_profile_id": identity_self_query_result.get("resolved_voice_profile_id"),
+                }
+            )
         if room_vocabulary_resolution is not None:
             response["room_vocabulary_resolution"] = dict(room_vocabulary_resolution)
             response["activity_external_refs"].append(
@@ -15477,6 +16147,81 @@ async def _async_handle_execute_direct(hass: HomeAssistant, call: ServiceCall) -
             service=service,
             data=data,
         )
+
+        direct_runtime_context = dict(call.data.get("context", {})) if isinstance(call.data.get("context"), dict) else {}
+        identity_policy = _evaluate_runtime_identity_authorization_policy(
+            call=call,
+            requested_target=str(call.data.get("entity_id", "") or ""),
+            resolved_target=str(call.data.get("entity_id", "") or ""),
+            runtime_context=direct_runtime_context,
+        )
+        execution_envelope["identity_requirement_class"] = identity_policy["identity_requirement_class"]
+        execution_envelope["identity_policy_outcome"] = identity_policy["identity_policy_outcome"]
+        execution_envelope["identity_policy_reason_code"] = identity_policy["identity_policy_reason_code"]
+        execution_envelope["identity_policy_source"] = identity_policy["identity_policy_source"]
+        execution_envelope["identity_freshness_class"] = identity_policy["identity_freshness_class"]
+        execution_envelope["attribution_age_ms"] = identity_policy["attribution_age_ms"]
+        execution_envelope["identity_state"] = identity_policy["identity_state"]
+        execution_envelope["confidence_band"] = identity_policy["confidence_band"]
+        execution_envelope["identity_authorization_policy"] = {
+            "identity_requirement_class": identity_policy["identity_requirement_class"],
+            "identity_policy_outcome": identity_policy["identity_policy_outcome"],
+            "identity_policy_reason_code": identity_policy["identity_policy_reason_code"],
+            "identity_policy_source": identity_policy["identity_policy_source"],
+            "identity_freshness_class": identity_policy["identity_freshness_class"],
+            "attribution_age_ms": identity_policy["attribution_age_ms"],
+            "identity_state": identity_policy["identity_state"],
+            "confidence_band": identity_policy["confidence_band"],
+            "classification_source": identity_policy["classification_source"],
+        }
+
+        if not bool(identity_policy.get("allows_execution", False)):
+            response: dict[str, Any] = {
+                "executed": False,
+                "execution_envelope": execution_envelope,
+                "identity_authorization_policy": dict(
+                    execution_envelope.get("identity_authorization_policy", {})
+                ),
+                "response_message": identity_policy.get("response_message") or None,
+                "activity_external_refs": [
+                    _build_routing_decision_ref(execution_envelope),
+                    _build_execution_envelope_ref(execution_envelope),
+                    _build_preservation_alignment_ref(execution_envelope),
+                    {
+                        "ref_type": "identity_authorization_policy",
+                        "identity_requirement_class": identity_policy["identity_requirement_class"],
+                        "identity_policy_outcome": identity_policy["identity_policy_outcome"],
+                        "identity_policy_reason_code": identity_policy["identity_policy_reason_code"],
+                        "identity_policy_source": identity_policy["identity_policy_source"],
+                        "identity_freshness_class": identity_policy["identity_freshness_class"],
+                        "attribution_age_ms": identity_policy["attribution_age_ms"],
+                        "identity_state": identity_policy["identity_state"],
+                        "confidence_band": identity_policy["confidence_band"],
+                        "classification_source": identity_policy["classification_source"],
+                    },
+                ],
+            }
+            outcome_metadata = _build_execute_outcome_metadata(
+                response,
+                runtime_context=direct_runtime_context,
+            )
+            response.update(outcome_metadata)
+            response["activity_external_refs"].append(
+                {
+                    "ref_type": "execution_outcome_classification",
+                    "execution_outcome_category": outcome_metadata["execution_outcome_category"],
+                    "silence_as_success": outcome_metadata["silence_as_success"],
+                    "response_required": outcome_metadata["response_required"],
+                    "response_generated": outcome_metadata["response_generated"],
+                    "refusal_reason": outcome_metadata["refusal_reason"],
+                    "refusal_category": outcome_metadata["refusal_category"],
+                    "room_authority_source": outcome_metadata["room_authority_source"],
+                    "person_policy_evaluated": True,
+                    "merged_room_authority_source": outcome_metadata["merged_room_authority_source"],
+                },
+            )
+            return response
+
         await hass.services.async_call(domain, service, data, blocking=True)
 
         payload = {
@@ -15489,6 +16234,9 @@ async def _async_handle_execute_direct(hass: HomeAssistant, call: ServiceCall) -
         return {
             "executed": True,
             "execution_envelope": execution_envelope,
+            "identity_authorization_policy": dict(
+                execution_envelope.get("identity_authorization_policy", {})
+            ),
             "execution_outcome_category": "EXECUTE_SUCCESS",
             "silence_as_success": False,
             "response_required": False,
@@ -15503,6 +16251,18 @@ async def _async_handle_execute_direct(hass: HomeAssistant, call: ServiceCall) -
                 _build_routing_decision_ref(execution_envelope),
                 _build_execution_envelope_ref(execution_envelope),
                 _build_preservation_alignment_ref(execution_envelope),
+                {
+                    "ref_type": "identity_authorization_policy",
+                    "identity_requirement_class": identity_policy["identity_requirement_class"],
+                    "identity_policy_outcome": identity_policy["identity_policy_outcome"],
+                    "identity_policy_reason_code": identity_policy["identity_policy_reason_code"],
+                    "identity_policy_source": identity_policy["identity_policy_source"],
+                    "identity_freshness_class": identity_policy["identity_freshness_class"],
+                    "attribution_age_ms": identity_policy["attribution_age_ms"],
+                    "identity_state": identity_policy["identity_state"],
+                    "confidence_band": identity_policy["confidence_band"],
+                    "classification_source": identity_policy["classification_source"],
+                },
                 {
                     "ref_type": "execution_outcome_classification",
                     "execution_outcome_category": "EXECUTE_SUCCESS",

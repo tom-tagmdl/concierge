@@ -9,6 +9,7 @@ import pytest
 
 from homeassistant.core import Event, SupportsResponse
 from homeassistant.helpers import area_registry as ar
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import floor_registry as fr
 from homeassistant.core import HomeAssistant
@@ -47,6 +48,9 @@ def _register_voice_identity_runtime_services(
     *,
     attribution_payload: dict[str, object] | None = None,
     identity_context_payload: dict[str, object] | None = None,
+    runtime_attribution_payload: dict[str, object] | None = None,
+    captured_attribute_calls: list[dict[str, object]] | None = None,
+    captured_identity_context_calls: list[dict[str, object]] | None = None,
 ) -> None:
     """Register test Voice Identity runtime services with deterministic payloads."""
     if hass.services.has_service("voice_identity", "attribute_speaker"):
@@ -55,7 +59,8 @@ def _register_voice_identity_runtime_services(
         hass.services.async_remove("voice_identity", "get_identity_context")
 
     async def _handle_attribute_speaker(call):
-        _ = call
+        if captured_attribute_calls is not None:
+            captured_attribute_calls.append(dict(call.data))
         payload = attribution_payload or {
             "success": True,
             "status": "attribution_unavailable",
@@ -83,13 +88,21 @@ def _register_voice_identity_runtime_services(
         return {"success": True, "reason_code": "ready", "entry_id": "entry", "attribution": payload}
 
     async def _handle_get_identity_context(call):
-        _ = call
+        if captured_identity_context_calls is not None:
+            captured_identity_context_calls.append(dict(call.data))
         payload = identity_context_payload or {
             "state": "unavailable",
             "reason_code": "attribution_unavailable",
             "source": "voice_identity",
         }
-        return {"success": True, "reason_code": "ready", "entry_id": "entry", "identity_context": payload}
+        runtime_attribution = runtime_attribution_payload or {}
+        return {
+            "success": True,
+            "reason_code": "ready",
+            "entry_id": "entry",
+            "identity_context": payload,
+            "runtime_attribution": runtime_attribution,
+        }
 
     hass.services.async_register(
         "voice_identity",
@@ -1441,6 +1454,343 @@ async def test_execute_monitoring_follow_up_refuses_when_capability_not_configur
     assert monitoring["capability_configured"] is False
     assert monitoring["person_policy_evaluated"] is False
     assert monitoring["runtime_discovery_reliance"] == "validation_only"
+
+
+async def test_execute_identity_self_query_returns_unknown_when_unresolved(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """Identity self-query should explain when Voice Identity is unavailable."""
+    result = await hass.services.async_call(
+        DOMAIN,
+        "execute",
+        {
+            "target": "who am i",
+            "intent_class": "general_qna",
+        },
+        blocking=True,
+        return_response=True,
+    )
+
+    assert result["execution_outcome_category"] == "ANSWER_SUCCESS"
+    assert result["response_generated"] is True
+    assert result["response_message"] == "I would greet you by name but Voice Identity was unavailable or not ready."
+    assert result["resolved_target"] == "identity:self_query"
+    assert result["identity_self_query"]["active_person_state"] == "active_person_unavailable"
+
+
+async def test_execute_identity_self_query_reports_low_confidence(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """Identity self-query should distinguish low-confidence attribution."""
+    result = await hass.services.async_call(
+        DOMAIN,
+        "execute",
+        {
+            "target": "who am i",
+            "intent_class": "general_qna",
+            "context": {
+                "identity_context": {
+                    "state": "low_confidence",
+                    "person_id": None,
+                    "voice_profile_id": None,
+                    "confidence": 0.42,
+                    "confidence_band": "low",
+                    "reason_code": "low_confidence",
+                    "source": "voice_identity",
+                }
+            },
+        },
+        blocking=True,
+        return_response=True,
+    )
+
+    assert result["execution_outcome_category"] == "ANSWER_SUCCESS"
+    assert result["response_generated"] is True
+    assert result["response_message"] == "I would greet you by name but Voice Identity reported low confidence."
+    assert result["resolved_target"] == "identity:self_query"
+    assert result["identity_self_query"]["active_person_state"] == "active_person_ambiguous"
+    assert result["identity_self_query"]["active_person_reason_code"] == "low_confidence"
+
+
+async def test_execute_identity_self_query_reports_ambiguous_match(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """Identity self-query should distinguish ambiguous attribution."""
+    result = await hass.services.async_call(
+        DOMAIN,
+        "execute",
+        {
+            "target": "who am i",
+            "intent_class": "general_qna",
+            "context": {
+                "identity_context": {
+                    "state": "low_confidence",
+                    "person_id": None,
+                    "voice_profile_id": None,
+                    "confidence": 0.51,
+                    "confidence_band": "ambiguous",
+                    "reason_code": "ambiguous_match",
+                    "source": "voice_identity",
+                }
+            },
+        },
+        blocking=True,
+        return_response=True,
+    )
+
+    assert result["execution_outcome_category"] == "ANSWER_SUCCESS"
+    assert result["response_generated"] is True
+    assert result["response_message"] == "I would greet you by name but Voice Identity reported an ambiguous match."
+    assert result["resolved_target"] == "identity:self_query"
+    assert result["identity_self_query"]["active_person_state"] == "active_person_ambiguous"
+    assert result["identity_self_query"]["active_person_reason_code"] == "ambiguous_match"
+
+
+async def test_execute_identity_self_query_reports_unknown_active_person(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """Identity self-query should distinguish unknown active person outcomes."""
+    result = await hass.services.async_call(
+        DOMAIN,
+        "execute",
+        {
+            "target": "who am i",
+            "intent_class": "general_qna",
+            "context": {
+                "identity_context": {
+                    "state": "unknown",
+                    "person_id": None,
+                    "voice_profile_id": None,
+                    "confidence": None,
+                    "confidence_band": None,
+                    "reason_code": "identity_unknown",
+                    "source": "voice_identity",
+                }
+            },
+        },
+        blocking=True,
+        return_response=True,
+    )
+
+    assert result["execution_outcome_category"] == "ANSWER_SUCCESS"
+    assert result["response_generated"] is True
+    assert result["response_message"] == "I would greet you by name but active person is unknown."
+    assert result["resolved_target"] == "identity:self_query"
+    assert result["identity_self_query"]["active_person_state"] == "active_person_unknown"
+    assert result["identity_self_query"]["active_person_reason_code"] == "identity_unknown"
+
+
+async def test_execute_identity_self_query_returns_personalized_greeting_when_resolved(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """Identity self-query should greet resolved speaker by person profile name."""
+    storage = ConciergeStorage(hass)
+    await storage.async_update_person_profile(
+        PersonProfile(
+            person_id="person.tom",
+            name="Tom",
+            voice_profile_id="person_tom_voice",
+        ),
+        set_as_default=True,
+    )
+
+    result = await hass.services.async_call(
+        DOMAIN,
+        "execute",
+        {
+            "target": "who am i",
+            "intent_class": "general_qna",
+            "context": {
+                "identity_context": {
+                    "state": "known",
+                    "person_id": "person.tom",
+                    "voice_profile_id": "person_tom_voice",
+                    "confidence": 0.91,
+                    "confidence_band": "high",
+                    "reason_code": "attribution_ready",
+                    "source": "voice_identity",
+                }
+            },
+        },
+        blocking=True,
+        return_response=True,
+    )
+
+    assert result["execution_outcome_category"] == "ANSWER_SUCCESS"
+    assert result["response_generated"] is True
+    assert result["response_message"] == "Hi Tom, how can I help you today?"
+    assert result["resolved_target"] == "identity:self_query"
+    assert result["identity_self_query"]["resolved_person_id"] == "person.tom"
+    assert result["identity_self_query"]["active_person_state"] == "active_person_available"
+
+
+async def test_execute_conversation_agent_ingress_resolves_room_and_uses_lookup_only(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """Conversation ingress should resolve room via Foundation and consume Voice Identity lookup only."""
+    area = ar.async_get(hass).async_create(name="Kitchen")
+    await hass.services.async_call(
+        DOMAIN,
+        "update_room_config",
+        {"area_id": area.id},
+        blocking=True,
+    )
+
+    device_registry = dr.async_get(hass)
+    satellite_device = device_registry.async_get_or_create(
+        config_entry_id=setup_integration.entry_id,
+        identifiers={("test", "satellite-kitchen")},
+        area_id=area.id,
+    )
+    satellite_entity = er.async_get(hass).async_get_or_create(
+        "assist_satellite",
+        "test",
+        "satellite-kitchen",
+        device_id=satellite_device.id,
+        suggested_object_id="kitchen_satellite",
+        original_name="Kitchen Satellite",
+    )
+
+    attribute_calls: list[dict[str, object]] = []
+    identity_calls: list[dict[str, object]] = []
+    _register_voice_identity_runtime_services(
+        hass,
+        identity_context_payload={
+            "state": "known",
+            "person_id": "person.tom",
+            "voice_profile_id": "vp_tom",
+            "confidence": 0.91,
+            "confidence_band": "high",
+            "reason_code": "attribution_ready",
+            "source": "voice_identity",
+        },
+        runtime_attribution_payload={
+            "resolution_source": "conversation_id",
+            "freshness": "fresh",
+            "attribution_age_ms": 80,
+            "reason_code": "attribution_ready",
+        },
+        captured_attribute_calls=attribute_calls,
+        captured_identity_context_calls=identity_calls,
+    )
+
+    result = await hass.services.async_call(
+        DOMAIN,
+        "execute",
+        {
+            "target": "who am i",
+            "intent_class": "general_qna",
+            "context": {
+                "conversation_id": "conv-424",
+                "device_id": satellite_device.id,
+                "satellite_id": satellite_entity.entity_id,
+                "agent_id": "conversation.home_assistant",
+                "language": "en",
+                "text": "who am i",
+            },
+        },
+        blocking=True,
+        return_response=True,
+    )
+
+    ingress = result["conversation_agent_ingress"]
+    assert ingress["ingress_mode"] == "conversation_agent_runtime_ingress"
+    assert ingress["identity_authority"] == "voice_identity_lookup"
+    assert ingress["correlation"]["conversation_id"] == "conv-424"
+    assert ingress["correlation"]["device_id"] == satellite_device.id
+    assert ingress["correlation"]["satellite_id"] == satellite_entity.entity_id
+    assert ingress["foundation_room_resolution"]["resolved_area_id"] == area.id
+    assert ingress["speaker_lookup"]["identity_status"] == "known"
+    assert ingress["speaker_lookup"]["confidence_band"] == "high"
+    assert ingress["speaker_lookup"]["reason_code"] == "attribution_ready"
+    assert ingress["speaker_lookup"]["resolution_source"] == "conversation_id"
+    assert result["execution_envelope"]["routing"]["context_area_id"] == area.id
+
+    assert len(identity_calls) == 1
+    identity_request = identity_calls[0]
+    assert identity_request["conversation_id"] == "conv-424"
+    assert identity_request["device_id"] == satellite_device.id
+    assert identity_request["satellite_id"] == satellite_entity.entity_id
+    assert identity_request["room_id"] == area.id
+    assert attribute_calls == []
+
+    diagnostics_text = str(ingress["diagnostics"]).lower()
+    for forbidden in {"audio", "embedding", "vector", "voiceprint", "biometric"}:
+        assert forbidden not in diagnostics_text
+
+
+async def test_execute_conversation_agent_ingress_partial_input_is_null_safe(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """Conversation ingress should preserve partial correlation inputs without failing."""
+    identity_calls: list[dict[str, object]] = []
+    _register_voice_identity_runtime_services(
+        hass,
+        identity_context_payload={
+            "state": "unknown",
+            "reason_code": "identity_context_missing",
+            "source": "voice_identity",
+        },
+        captured_identity_context_calls=identity_calls,
+    )
+
+    result = await hass.services.async_call(
+        DOMAIN,
+        "execute",
+        {
+            "target": "who am i",
+            "intent_class": "general_qna",
+            "context": {"conversation_id": "conv-partial"},
+        },
+        blocking=True,
+        return_response=True,
+    )
+
+    ingress = result["conversation_agent_ingress"]
+    assert ingress["ingress_mode"] == "conversation_agent_runtime_ingress"
+    assert ingress["correlation"]["conversation_id"] == "conv-partial"
+    assert ingress["correlation"]["device_id"] is None
+    assert ingress["correlation"]["satellite_id"] is None
+    assert ingress["correlation"]["agent_id"] is None
+    assert ingress["correlation"]["language"] is None
+    assert ingress["correlation"]["text"] is None
+    assert ingress["speaker_lookup"]["reason_code"] == "identity_context_missing"
+
+    assert len(identity_calls) == 1
+    assert identity_calls[0]["conversation_id"] == "conv-partial"
+
+
+async def test_execute_fallback_path_supported_and_non_authoritative_for_identity(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """Fallback execute paths should remain supported and explicitly non-authoritative for identity."""
+    result = await hass.services.async_call(
+        DOMAIN,
+        "execute",
+        {
+            "target": "who am i",
+            "intent_class": "general_qna",
+        },
+        blocking=True,
+        return_response=True,
+    )
+
+    ingress = result["conversation_agent_ingress"]
+    assert ingress["ingress_mode"] == "fallback_service_or_automation"
+    assert ingress["identity_authority"] == "non_authoritative_fallback"
+    assert ingress["speaker_lookup"]["reason_code"] == "identity_audio_missing"
+
+    resolution = result["execution_envelope"]["active_person_resolution"]
+    assert resolution["active_person_state"] == "active_person_unavailable"
+    assert resolution["reason_code"] == "identity_audio_missing"
 
 
 async def test_execute_monitoring_follow_up_merged_room_uses_configuration_authority(
@@ -3872,6 +4222,10 @@ async def test_voice_enrollment_lifecycle_services_round_trip(
     final_state = await storage.async_load_state()
     assert "tom_voice" not in final_state.voice_profiles
     assert final_state.person_profiles["tom"].voice_profile_id is None
+    assert all(
+        session.voice_profile_id != "tom_voice"
+        for session in final_state.enrollment_sessions.values()
+    )
 
 
 async def test_start_voice_enrollment_fails_closed_when_storage_unavailable(
@@ -4153,12 +4507,15 @@ async def test_complete_voice_enrollment_service_delegates_to_orchestrator(
             "voice_profile_id": "tom_voice",
             "person_id": "person.tom",
             "min_samples": 3,
+            "min_total_duration_ms": 30000,
         },
         blocking=True,
         return_response=True,
     )
 
     assert delegated["voice_profile_id"] == "tom_voice"
+    assert delegated["min_samples"] == 3
+    assert delegated["min_total_duration_ms"] == 30000
     assert result["completed"] is True
 
 

@@ -22,6 +22,36 @@ execute:
       required: false
       selector:
         object:
+    conversation_id:
+      name: Conversation ID
+      required: false
+      selector:
+        text:
+    device_id:
+      name: Device ID
+      required: false
+      selector:
+        text:
+    satellite_id:
+      name: Satellite ID
+      required: false
+      selector:
+        text:
+    agent_id:
+      name: Agent ID
+      required: false
+      selector:
+        text:
+    language:
+      name: Language
+      required: false
+      selector:
+        text:
+    text:
+      name: Text
+      required: false
+      selector:
+        text:
 
 execute_direct:
   name: Execute Direct

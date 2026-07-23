@@ -20,6 +20,7 @@ If you are new, start here:
 - [Concierge Integration Settings](integration-settings.md)
 - [Initial Person Setup](person-setup.md)
 - [Voice Identity Personalization](voice-identity-personalization.md)
+- [Voice Identity and Concierge Alignment](voice-identity-alignment.md)
 - [Initial Room Setup](room-setup.md)
 - [Merged Rooms](merged-rooms.md)
 - [Vocabulary Setup](vocabulary-setup.md)

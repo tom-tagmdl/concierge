@@ -872,6 +872,20 @@ class EnrollmentOrchestrator:
         result["sample_written"] = True
 
         try:
+            inferred_duration_ms = 0
+            try:
+                audio_rate = int(result.get("audio_rate") or 0)
+                audio_width = int(result.get("audio_width") or 0)
+                audio_channels = int(result.get("audio_channels") or 0)
+                bytes_per_frame = audio_width * audio_channels
+                if audio_rate > 0 and bytes_per_frame > 0:
+                    inferred_duration_ms = max(
+                        1,
+                        int(round((len(captured_audio) / float(audio_rate * bytes_per_frame)) * 1000.0)),
+                    )
+            except (TypeError, ValueError, ZeroDivisionError):
+                inferred_duration_ms = 0
+
             registration_payload = {
                 "voice_profile_id": voice_profile_id,
                 "speech_text": speech_text,
@@ -884,6 +898,22 @@ class EnrollmentOrchestrator:
                 "skip_capture_provider_preflight": True,
                 "skip_storage_preflight": True,
             }
+            if call_data.get("prompt_id"):
+                registration_payload["prompt_id"] = str(call_data["prompt_id"])
+            if call_data.get("prompt_order") is not None:
+                registration_payload["prompt_order"] = int(call_data["prompt_order"])
+            if call_data.get("prompt_category"):
+                registration_payload["prompt_category"] = str(call_data["prompt_category"])
+            if call_data.get("prompt_length_bucket"):
+                registration_payload["prompt_length_bucket"] = str(call_data["prompt_length_bucket"])
+            if call_data.get("capture_distance"):
+                registration_payload["capture_distance"] = str(call_data["capture_distance"])
+            if call_data.get("capture_noise"):
+                registration_payload["capture_noise"] = str(call_data["capture_noise"])
+            if call_data.get("quality_pass") is not None:
+                registration_payload["quality_pass"] = bool(call_data["quality_pass"])
+            if inferred_duration_ms > 0:
+                registration_payload["recording_duration_ms"] = inferred_duration_ms
             registered = await self.record_sample(registration_payload)
             result["sample_registered"] = bool(registered.get("captured", False))
             result["sample_id"] = registered.get("sample_id")
@@ -1549,6 +1579,60 @@ class EnrollmentOrchestrator:
                 "user_safe_status_summary": "Enrollment session is not in a buildable state.",
             }
 
+        generate_operation = self._voice_identity_generate_operation()
+        generate_execute = getattr(generate_operation, "execute", None)
+        if not callable(generate_execute):
+            return {
+                "ready": False,
+                "reason_code": "generation_operation_unavailable",
+                "voice_profile_id": voice_profile_id,
+                "sample_count": sample_count,
+                "min_samples": min_samples,
+                "recommended_sample_count": recommended_sample_count,
+                "robust_sample_count": robust_sample_count,
+                "total_duration_ms": total_duration_ms,
+                "min_total_duration_ms": min_total_duration_ms,
+                "recommended_total_duration_ms": recommended_total_duration_ms,
+                "missing_prompt_categories": missing_categories,
+                "missing_capture_distances": missing_distances,
+                "quality_failed_count": quality_failed_count,
+                "retry_recommendations": retry_recommendations,
+                "enrollment_state": enrollment_state or "unknown",
+                "user_safe_status_summary": "Voice Identity generation operation is unavailable; restart Voice Identity or Concierge and try again.",
+            }
+
+        validate_health = getattr(generate_operation, "validate_health", None)
+        if callable(validate_health):
+            try:
+                health = await validate_health()
+            except Exception:
+                health = None
+
+            health_state = str(getattr(health, "state", "") or "").strip().lower()
+            if health_state and health_state != "healthy":
+                reason_codes = tuple(getattr(health, "reason_codes", ()) or ())
+                reason_hint = "operation_failed"
+                if reason_codes:
+                    reason_hint = str(reason_codes[0] or reason_hint).strip().lower() or reason_hint
+                return {
+                    "ready": False,
+                    "reason_code": "generation_backend_unavailable",
+                    "voice_profile_id": voice_profile_id,
+                    "sample_count": sample_count,
+                    "min_samples": min_samples,
+                    "recommended_sample_count": recommended_sample_count,
+                    "robust_sample_count": robust_sample_count,
+                    "total_duration_ms": total_duration_ms,
+                    "min_total_duration_ms": min_total_duration_ms,
+                    "recommended_total_duration_ms": recommended_total_duration_ms,
+                    "missing_prompt_categories": missing_categories,
+                    "missing_capture_distances": missing_distances,
+                    "quality_failed_count": quality_failed_count,
+                    "retry_recommendations": retry_recommendations,
+                    "enrollment_state": enrollment_state or "unknown",
+                    "user_safe_status_summary": f"Voice Identity generation backend is unavailable ({reason_hint}); restore model backend and retry.",
+                }
+
         try:
             await self.require_storage_preflight()
         except vol.Invalid:
@@ -1629,8 +1713,8 @@ class EnrollmentOrchestrator:
             sample_items=list(enrollment_session.sample_items),
         )
         if not generation["success"]:
-            generation_reason = generation["reason_code"]
-            failure_category = generation["failure_category"]
+            generation_reason = str(generation.get("reason_code", "") or "generation_failed").strip().lower()
+            failure_category = str(generation.get("failure_category", "") or "").strip().lower()
             await storage.async_update_enrollment_session(
                 session_id=enrollment_session.session_id,
                 metadata={
@@ -1638,9 +1722,12 @@ class EnrollmentOrchestrator:
                     "last_generation_failure": generation_reason or "generation_failed",
                 },
             )
+            detail_suffix = generation_reason or "generation_failed"
+            if failure_category:
+                detail_suffix = f"{detail_suffix}:{failure_category}"
             if "validation" in generation_reason or "validation" in failure_category:
-                raise vol.Invalid("completion_not_ready: validation_failed")
-            raise vol.Invalid("completion_not_ready: generation_failed")
+                raise vol.Invalid(f"completion_not_ready: validation_failed:{detail_suffix}")
+            raise vol.Invalid(f"completion_not_ready: generation_failed:{detail_suffix}")
 
         voiceprint_id = str(generation.get("voiceprint_id", "") or "").strip()
         if not voiceprint_id:
@@ -1651,7 +1738,7 @@ class EnrollmentOrchestrator:
                     "last_generation_failure": "generation_failed",
                 },
             )
-            raise vol.Invalid("completion_not_ready: generation_failed")
+            raise vol.Invalid("completion_not_ready: generation_failed:empty_voiceprint_id")
 
         status_projection = await self._async_get_voiceprint_status(voiceprint_id)
         lifecycle_status = str(status_projection.get("lifecycle_status", "") or "").strip().lower()
@@ -2430,6 +2517,7 @@ class EnrollmentOrchestrator:
             voice_profile_id,
             unlink_from_people=unlink_from_people,
         )
+        await storage.async_delete_enrollment_sessions_for_voice_profile(voice_profile_id)
 
         if enrollment_session is None and existing_voice is not None:
             provider = self.resolve_provider()

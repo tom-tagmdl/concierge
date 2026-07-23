@@ -4785,6 +4785,9 @@ var ConciergeApp = globalThis.ConciergeApp || class ConciergeApp extends HTMLEle
       const targetSampleCount = Math.max(1, Number(progress.target_sample_count || phrases.length || 1));
       const completionPercentage = Math.max(0, Math.min(100, Number(progress.completion_percentage || 0)));
       const providerFromProgress = conciergeNormalizeVoiceEnrollmentProvider(progress.provider_type);
+      const previousSessionId = String(dialog.enrollmentSessionId || "").trim();
+      const nextSessionId = String(progress.session_id || progressResponse.enrollment_session_id || dialog.enrollmentSessionId || "").trim();
+      const sessionChanged = Boolean(previousSessionId && nextSessionId && previousSessionId !== nextSessionId);
       const previousPhraseIndex = Math.max(0, Number(dialog.phraseIndex || 0));
       const localCaptureAwaitingAdvance = Boolean(dialog.currentCaptured);
       const highestCapturedPhraseIndex = Math.max(0, sampleCount - 1);
@@ -4793,10 +4796,23 @@ var ConciergeApp = globalThis.ConciergeApp || class ConciergeApp extends HTMLEle
         : [];
       const hasCapturedPhraseIndices = capturedPhraseIndices.length > 0;
       const capturedPhraseIndexSet = hasCapturedPhraseIndices ? new Set(capturedPhraseIndices.map((value) => Math.floor(value))) : null;
+      let firstMissingPhraseIndex = Math.min(sampleCount, maxPhraseIndex);
+      if (capturedPhraseIndexSet) {
+        firstMissingPhraseIndex = maxPhraseIndex;
+        for (let candidate = 0; candidate <= maxPhraseIndex; candidate += 1) {
+          if (!capturedPhraseIndexSet.has(candidate)) {
+            firstMissingPhraseIndex = candidate;
+            break;
+          }
+        }
+      }
 
       if (progress.is_complete) {
         dialog.phraseIndex = Math.min(sampleCount, maxPhraseIndex);
         dialog.currentCaptured = true;
+      } else if (sessionChanged) {
+        dialog.phraseIndex = Math.min(Math.max(firstMissingPhraseIndex, 0), maxPhraseIndex);
+        dialog.currentCaptured = Boolean(capturedPhraseIndexSet?.has(dialog.phraseIndex));
       } else if (highestCapturedPhraseIndex > previousPhraseIndex) {
         dialog.phraseIndex = Math.min(highestCapturedPhraseIndex, maxPhraseIndex);
         dialog.currentCaptured = true;
@@ -4807,8 +4823,8 @@ var ConciergeApp = globalThis.ConciergeApp || class ConciergeApp extends HTMLEle
         dialog.phraseIndex = Math.min(sampleCount, maxPhraseIndex);
         dialog.currentCaptured = false;
       } else if (sampleCount <= previousPhraseIndex) {
-        dialog.phraseIndex = Math.min(previousPhraseIndex, maxPhraseIndex);
-        dialog.currentCaptured = false;
+        dialog.phraseIndex = Math.min(Math.max(firstMissingPhraseIndex, 0), maxPhraseIndex);
+        dialog.currentCaptured = Boolean(capturedPhraseIndexSet?.has(dialog.phraseIndex));
       } else {
         dialog.phraseIndex = Math.min(Math.max(sampleCount - 1, 0), maxPhraseIndex);
         dialog.currentCaptured = true;
@@ -4819,7 +4835,7 @@ var ConciergeApp = globalThis.ConciergeApp || class ConciergeApp extends HTMLEle
       }
       dialog.progress = progress;
       dialog.progressSummary = `${sampleCount}/${targetSampleCount} samples, ${completionPercentage}%`;
-      dialog.enrollmentSessionId = String(progress.session_id || progressResponse.enrollment_session_id || dialog.enrollmentSessionId || "").trim();
+      dialog.enrollmentSessionId = nextSessionId;
       dialog.voiceProfileId = String(progressResponse.voice_profile_id || voiceProfileId || dialog.voiceProfileId || "").trim();
       if (providerFromProgress) {
         dialog.captureProvider = providerFromProgress;

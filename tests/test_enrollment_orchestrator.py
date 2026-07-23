@@ -819,6 +819,138 @@ async def test_orchestrator_complete_enrollment_missing_runtime_operation_fails_
     assert str(session.metadata.get("last_generation_failure", "")) == "generation_failed"
 
 
+async def test_orchestrator_readiness_reports_generation_operation_unavailable(
+    hass: HomeAssistant,
+    setup_integration,
+) -> None:
+    """Readiness should fail early when Voice Identity generation operation is unavailable."""
+    storage = ConciergeStorage(hass)
+    await storage.async_update_person_profile(
+        PersonProfile(person_id="person.tom", name="Tom", voice_profile_id="tom_voice"),
+        set_as_default=True,
+    )
+    await storage.async_update_voice_profile(
+        VoiceProfile(
+            voice_profile_id="tom_voice",
+            name="Tom Voice",
+            enrollment_state="capturing",
+            enrollment_source="people_setup",
+        )
+    )
+
+    runtime = hass.data.get("voice_identity")
+    assert isinstance(runtime, dict)
+    runtime_entries = [value for value in runtime.values() if isinstance(value, dict)]
+    assert runtime_entries
+    for entry_runtime in runtime_entries:
+        entry_runtime.pop("generate_voiceprint_operation", None)
+
+    orchestrator = EnrollmentOrchestrator(hass)
+    await orchestrator.start_enrollment(
+        {
+            "person_id": "person.tom",
+            "voice_profile_id": "tom_voice",
+            "voice_name": "Tom Voice",
+            "local_only": True,
+        }
+    )
+    for index, category in enumerate(("command", "question", "conversational")):
+        await orchestrator.record_sample(
+            {
+                "voice_profile_id": "tom_voice",
+                "speech_text": f"Phrase {index + 1}",
+                "phrase_index": index,
+                "source": "guided_enrollment_dialog",
+                "recording_duration_ms": 10000,
+                "prompt_category": category,
+                "capture_distance": "near_field" if index != 1 else "mid_field",
+                "capture_noise": "quiet",
+                "quality_pass": True,
+            }
+        )
+
+    readiness = await orchestrator.get_completion_readiness(
+        {
+            "voice_profile_id": "tom_voice",
+            "person_id": "person.tom",
+            "min_samples": 3,
+        }
+    )
+
+    assert readiness["ready"] is False
+    assert readiness["reason_code"] == "generation_operation_unavailable"
+
+
+async def test_orchestrator_readiness_reports_generation_backend_unavailable(
+    hass: HomeAssistant,
+    setup_integration,
+    monkeypatch,
+) -> None:
+    """Readiness should fail when generation operation health is not healthy."""
+    storage = ConciergeStorage(hass)
+    await storage.async_update_person_profile(
+        PersonProfile(person_id="person.tom", name="Tom", voice_profile_id="tom_voice"),
+        set_as_default=True,
+    )
+    await storage.async_update_voice_profile(
+        VoiceProfile(
+            voice_profile_id="tom_voice",
+            name="Tom Voice",
+            enrollment_state="capturing",
+            enrollment_source="people_setup",
+        )
+    )
+
+    orchestrator = EnrollmentOrchestrator(hass)
+    await orchestrator.start_enrollment(
+        {
+            "person_id": "person.tom",
+            "voice_profile_id": "tom_voice",
+            "voice_name": "Tom Voice",
+            "local_only": True,
+        }
+    )
+    for index, category in enumerate(("command", "question", "conversational")):
+        await orchestrator.record_sample(
+            {
+                "voice_profile_id": "tom_voice",
+                "speech_text": f"Phrase {index + 1}",
+                "phrase_index": index,
+                "source": "guided_enrollment_dialog",
+                "recording_duration_ms": 10000,
+                "prompt_category": category,
+                "capture_distance": "near_field" if index != 1 else "mid_field",
+                "capture_noise": "quiet",
+                "quality_pass": True,
+            }
+        )
+
+    class _UnavailableGenerateOperation:
+        async def execute(self, request):
+            _ = request
+            return None
+
+        async def validate_health(self):
+            return SimpleNamespace(state="unavailable", reason_codes=("operation_failed",))
+
+    monkeypatch.setattr(
+        EnrollmentOrchestrator,
+        "_voice_identity_generate_operation",
+        lambda self: _UnavailableGenerateOperation(),
+    )
+
+    readiness = await orchestrator.get_completion_readiness(
+        {
+            "voice_profile_id": "tom_voice",
+            "person_id": "person.tom",
+            "min_samples": 3,
+        }
+    )
+
+    assert readiness["ready"] is False
+    assert readiness["reason_code"] == "generation_backend_unavailable"
+
+
 async def test_orchestrator_generate_operation_missing_returns_operation_not_loaded(
     hass: HomeAssistant,
     setup_integration,
@@ -1634,6 +1766,13 @@ async def test_orchestrator_capture_enrollment_sample_satellite_routes_through_r
             "capture_provider": "satellite",
             "prompt_text": "Please say phrase one now",
             "speech_text": "Phrase one",
+            "prompt_id": "prompt_001",
+            "prompt_order": 1,
+            "prompt_category": "command",
+            "prompt_length_bucket": "medium",
+            "capture_distance": "near_field",
+            "capture_noise": "quiet",
+            "quality_pass": True,
             "timeout_seconds": 5.0,
         }
     )
@@ -1643,3 +1782,11 @@ async def test_orchestrator_capture_enrollment_sample_satellite_routes_through_r
     assert result["sample_count"] == 1
     assert recorded_payload["voice_profile_id"] == "tom_voice"
     assert recorded_payload["capture_provider"] == "satellite"
+    assert int(recorded_payload.get("recording_duration_ms", 0)) > 0
+    assert recorded_payload["prompt_id"] == "prompt_001"
+    assert recorded_payload["prompt_order"] == 1
+    assert recorded_payload["prompt_category"] == "command"
+    assert recorded_payload["prompt_length_bucket"] == "medium"
+    assert recorded_payload["capture_distance"] == "near_field"
+    assert recorded_payload["capture_noise"] == "quiet"
+    assert recorded_payload["quality_pass"] is True
